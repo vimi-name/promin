@@ -1,0 +1,92 @@
+{
+  "base_user_commands": [
+    "init",
+    "doctor",
+    "status",
+    "next",
+    "validate",
+    "continue",
+    "audit",
+    "refresh",
+    "context",
+    "skills"
+  ],
+  "default_profile": "morok-local",
+  "document": "promin.preset",
+  "forbidden_implicit_behavior": [
+    "full-scan-on-init",
+    "provider-discovery-as-authority",
+    "implicit-action-grant",
+    "unbounded-context-expansion",
+    "search-ranking-as-acceptance-proof"
+  ],
+  "function": "Select Semantic Programming plus Morok/Tower decomposition, retrieval, and parallelism budgets without granting action authority.",
+  "optional_provider_capabilities": [
+    "filesystem-inventory",
+    "export-scan",
+    "signature",
+    "build-dependency"
+  ],
+  "preset_id": "semantic-morok-tower",
+  "profiles": {
+    "morok-local": {
+      "default_dependency_depth": 2,
+      "max_context_bytes": 8192,
+      "max_entities": 16,
+      "max_fanout_per_entity": 4,
+      "max_parallel_tasks": 1,
+      "max_relations": 24,
+      "model_tier": "weak-local",
+      "top_k": 8
+    },
+    "tower-capable": {
+      "default_dependency_depth": 4,
+      "max_context_bytes": 12288,
+      "max_entities": 24,
+      "max_fanout_per_entity": 6,
+      "max_parallel_tasks": 3,
+      "max_relations": 36,
+      "model_tier": "capable",
+      "top_k": 10
+    },
+    "tower-strong": {
+      "default_dependency_depth": 6,
+      "max_context_bytes": 16384,
+      "max_entities": 32,
+      "max_fanout_per_entity": 8,
+      "max_parallel_tasks": 6,
+      "max_relations": 48,
+      "model_tier": "strong",
+      "top_k": 12
+    }
+  },
+  "record_type": "Preset",
+  "required_provider_capabilities": [
+    "control-runtime",
+    "shape-validation",
+    "content-identity",
+    "local-serialization",
+    "query-projection"
+  ],
+  "schema_ref": "urn:promin:contracts:1#/$defs/Preset",
+  "semantic_programming": {
+    "default_visibility": "private",
+    "object_promotion_criteria": [
+      "independent-invariant",
+      "independent-policy",
+      "replaceability",
+      "measurable-algorithm",
+      "failure-boundary",
+      "reuse",
+      "domain-significance"
+    ],
+    "pipeline": [
+      "validate-input",
+      "prepare-change",
+      "execute-operation",
+      "record-result",
+      "publish-evidence"
+    ]
+  },
+  "version": "1.0.0-alpha.1"
+}

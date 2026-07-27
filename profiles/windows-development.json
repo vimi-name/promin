@@ -1,0 +1,25 @@
+{
+  "authority_effect": "none",
+  "category": "platform-domain",
+  "defaults": {
+    "path_guardrails": true
+  },
+  "detect": [
+    "*.sln",
+    "*.vcxproj",
+    "*.csproj",
+    "Directory.Build.props",
+    "CMakePresets.json"
+  ],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "official_sources": [
+    "https://learn.microsoft.com/",
+    "https://cmake.org/documentation/"
+  ],
+  "profile_id": "windows-development",
+  "purpose": "Windows-native development and portability guardrails",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

@@ -1,0 +1,28 @@
+{
+  "capabilities": [
+    "skill.example"
+  ],
+  "content_digest": "d11b810a6ac8efdbe66afb7555c21ca0fbb2903c54bdf43ab7c0d18e1054e72a",
+  "enabled": false,
+  "hosts": [
+    "generic",
+    "codex",
+    "claude",
+    "cursor",
+    "local"
+  ],
+  "license": "Apache-2.0",
+  "platforms": [
+    "windows",
+    "macos",
+    "linux"
+  ],
+  "record_type": "ProminSkillBinding",
+  "required_tools": [],
+  "security_scope": "read-only",
+  "skill_id": "example",
+  "source_kind": "bundled-example",
+  "source_sha256": null,
+  "source_uri": null,
+  "version": "0.1.0"
+}

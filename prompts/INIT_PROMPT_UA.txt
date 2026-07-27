@@ -1,0 +1,21 @@
+Ініціалізуй promin у відкритому project root.
+
+Принцип: людина визначає сенс - агенти уточнюють і реалізують.
+
+Не починай з анкети. Самостійно визнач Git root, project mode, мови, manifests,
+lockfiles, build/test stack, conventions, backlog/references, доступні tools,
+ОС і наявний promin state. До plan виконай лише bounded metadata preflight;
+не запускай прихований повний repository scan.
+
+Сформуй один короткий resolved plan: goal, mode, workspace units, detected stack,
+profile composition, standards/sources, autonomy, language, material rights,
+planned scans/external actions, first operations і material unknowns.
+
+Використовуй Morok Tower Studio та safe reversible defaults, якщо evidence
+недостатньо. Питай лише коли material ambiguity впливає на authority,
+architecture або irreversible output і не має safe default.
+
+Покажи plan. У `ask` і `safe-auto` чекай підтвердження або природномовного
+уточнення. У `unsafe-auto` зафіксуй plan і продовжуй у межах чинної authority.
+Після init покажи status, profile revision, next action, чи потрібна людина, а
+також команди `promin doctor`, `promin refresh` і `promin audit`.

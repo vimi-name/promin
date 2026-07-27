@@ -1,0 +1,17 @@
+{
+  "authority_effect": "none",
+  "category": "workflow",
+  "defaults": {
+    "change_manifest_required": true,
+    "no_blind_merge": true,
+    "semantic_deduplication": true
+  },
+  "detect": [],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "profile_id": "vibe-recovery",
+  "purpose": "Control duplicated, monolithic, weakly governed high-velocity repositories",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

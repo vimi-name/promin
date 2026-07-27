@@ -1,0 +1,30 @@
+{
+  "authority_effect": "none",
+  "category": "domain",
+  "defaults": {
+    "security": [
+      "permission-minimization",
+      "signing-review"
+    ]
+  },
+  "detect": [
+    "AndroidManifest.xml",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradlew"
+  ],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "official_sources": [
+    "https://developer.android.com/",
+    "https://kotlinlang.org/docs/",
+    "https://docs.gradle.org/"
+  ],
+  "profile_id": "android-application",
+  "purpose": "Android/Kotlin/Gradle application development",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

@@ -1,0 +1,937 @@
+{
+  "bootstrap_rule": "authority.json configures root ceilings and Activation only. Root command proofs bind one command intent and may issue only the first authority.manage Grant. Every Grant proof binds claim_digest; later Grants cite an active authority.manage issuer Grant or team signatures verified by the exact signature adapter selected in technologies.json.",
+  "canonical_timestamp_contract": {
+    "calendar": "proleptic-gregorian",
+    "format": "utc-second-z",
+    "formatter_api": "promin.canonical.format_utc_second(value: datetime) -> str",
+    "fractional_seconds": "reject",
+    "normalization": "identity-round-trip",
+    "offset": "Z-only",
+    "parser_api": "promin.canonical.parse_utc_second(value: str) -> timezone-aware UTC datetime",
+    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+    "real_calendar_validation": true,
+    "resolution_seconds": 1,
+    "year_max": 9999,
+    "year_min": 1
+  },
+  "capabilities": [
+    {
+      "id": "standard.activate",
+      "purpose": "Activate one digest-bound repository configuration."
+    },
+    {
+      "id": "authority.manage",
+      "purpose": "Issue or revoke runtime Grants within a configured root ceiling."
+    },
+    {
+      "id": "task.plan",
+      "purpose": "Create, split, order, or block Tasks."
+    },
+    {
+      "id": "task.execute",
+      "purpose": "Execute one Task inside its WorkCard and valid Lease."
+    },
+    {
+      "id": "lease.manage",
+      "purpose": "Acquire, heartbeat, close, expire, or revoke Leases."
+    },
+    {
+      "id": "evidence.publish",
+      "purpose": "Publish candidate-bound evidence Artifacts."
+    },
+    {
+      "id": "validation.evaluate",
+      "purpose": "Evaluate gates without promotion or release authority."
+    },
+    {
+      "id": "finding.record",
+      "purpose": "Record Findings."
+    },
+    {
+      "id": "finding.resolve",
+      "purpose": "Resolve one Finding only with evidence bound to that Finding's canonical digest."
+    },
+    {
+      "id": "finding.waive",
+      "purpose": "Waive one Finding only through an expiring exception-policy Decision, Finding-bound evidence, and separation of duties."
+    },
+    {
+      "id": "candidate.promote",
+      "purpose": "Promote a validated Candidate."
+    },
+    {
+      "id": "release.decide",
+      "purpose": "Record an immutable historical release judgement bound to an exact acceptance-closure and provider-binding digest; current eligibility remains derived."
+    },
+    {
+      "id": "export.create",
+      "purpose": "Create a sanitized external package."
+    },
+    {
+      "id": "migration.manage",
+      "purpose": "Execute cutover, rollback, and deterministic recutover."
+    },
+    {
+      "id": "projection.rebuild",
+      "purpose": "Rebuild or verify non-authoritative projections."
+    },
+    {
+      "id": "projection.read",
+      "purpose": "Read one bounded current projection or resume its continuation under the exact current Grant claim; it grants no mutation, validation, promotion, product acceptance, or standard distribution authority."
+    }
+  ],
+  "command_capability_rules": [
+    {
+      "capability_id": "task.plan",
+      "command_kind": "task.record"
+    },
+    {
+      "capability_id": "task.plan",
+      "command_kind": "task.transition"
+    },
+    {
+      "capability_id": "task.execute",
+      "command_kind": "candidate.record"
+    },
+    {
+      "capability_by_value": {
+        "diff": "task.execute",
+        "evidence": "evidence.publish",
+        "log": "task.execute",
+        "product": "task.execute",
+        "report": "projection.rebuild"
+      },
+      "command_kind": "artifact.record",
+      "payload_field": "artifact_kind"
+    },
+    {
+      "capability_by_value": {
+        "execution": "task.execute",
+        "validation": "validation.evaluate"
+      },
+      "command_kind": "run.record",
+      "payload_field": "run_kind"
+    },
+    {
+      "capability_id": "validation.evaluate",
+      "command_kind": "gate.record"
+    },
+    {
+      "capability_id": "finding.record",
+      "command_kind": "finding.record"
+    },
+    {
+      "capability_by_value": {
+        "accept": "validation.evaluate",
+        "promote": "candidate.promote",
+        "reject": "validation.evaluate",
+        "release": "release.decide",
+        "resolve": "finding.resolve",
+        "revoke": "authority.manage",
+        "waive": "finding.waive"
+      },
+      "command_kind": "decision.record",
+      "payload_field": "decision_kind"
+    },
+    {
+      "capability_id": "authority.manage",
+      "command_kind": "grant.issue"
+    },
+    {
+      "capability_id": "authority.manage",
+      "command_kind": "grant.revoke"
+    },
+    {
+      "capability_id": "lease.manage",
+      "command_kind": "lease.record"
+    }
+  ],
+  "command_effect_scope_rules": [
+    {
+      "command_kind": "task.record",
+      "id_field": "task_id",
+      "kind": "task",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "task.transition",
+      "id_field": "task_id",
+      "kind": "task",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "candidate.record",
+      "id_field": "candidate_id",
+      "kind": "candidate",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "artifact.record",
+      "id_field": "artifact_id",
+      "kind": "artifact",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "run.record",
+      "mode": "payload-multi-id",
+      "targets": [
+        {
+          "id_field": "task_id",
+          "kind": "task"
+        },
+        {
+          "id_field": "candidate_digest",
+          "kind": "candidate"
+        }
+      ]
+    },
+    {
+      "command_kind": "gate.record",
+      "id_field": "candidate_digest",
+      "kind": "candidate",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "finding.record",
+      "id_field": "finding_id",
+      "kind": "finding",
+      "mode": "payload-id"
+    },
+    {
+      "command_kind": "decision.record",
+      "grant_target_type": "Grant",
+      "id_field": "target_id",
+      "kind_field": "target_type",
+      "kind_map": {
+        "Candidate": "candidate",
+        "Finding": "finding",
+        "Task": "task"
+      },
+      "mode": "payload-dynamic-id-or-referenced-grant-scope"
+    },
+    {
+      "command_kind": "grant.issue",
+      "mode": "payload-scope",
+      "scope_field": "scope"
+    },
+    {
+      "command_kind": "grant.revoke",
+      "grant_id_field": "grant_id",
+      "mode": "referenced-grant-scope"
+    },
+    {
+      "command_kind": "lease.record",
+      "id_field": "task_id",
+      "kind": "task",
+      "mode": "payload-id"
+    }
+  ],
+  "command_mutation_claim_rule": {
+    "binding_equalities": [
+      "CommandRequest.workcard_task_id == WorkCard.task_id == Lease.task_id",
+      "CommandRequest.subject_id == Lease.holder_subject_id",
+      "CommandRequest.holder_authorization.grant_id == WorkCard.holder_grant_id == Lease.holder_grant_id",
+      "CommandRequest.lease_id == WorkCard.lease_id == Lease.lease_id",
+      "CommandRequest.lease_generation == WorkCard.lease_generation == Lease.generation",
+      "CommandRequest.fencing_token == WorkCard.fencing_token == Lease.fencing_token",
+      "CommandRequest.context_digest == WorkCard.context_digest",
+      "CommandRequest.workcard_digest == sha256(canonical WorkCard)"
+    ],
+    "claim_rule": "A lease-bound command is admissible only when authorization proves the exact command capability, holder_authorization independently proves task.execute, both exact Grant claims bind the same subject, Activation and conjunctive effect scope, the referenced Lease is current and ACTIVE at issued_at, and task, generation, fence, candidate, context, and WorkCard digests match exactly.",
+    "command_authorization_source": "CommandRequest.authorization.grant_id + grant_claim_digest",
+    "grant_separation_rule": "The command authorization Grant and holder Grant are resolved and validated independently; they may be the same record only when the required command capability is task.execute.",
+    "holder_grant_capability": "task.execute",
+    "holder_grant_field": "holder_authorization.grant_id",
+    "lease_bound_command_kinds": [
+      "artifact.record",
+      "run.record",
+      "gate.record",
+      "finding.record"
+    ],
+    "lease_bound_task_transition_states": [
+      "LEASED",
+      "RUNNING",
+      "COMPLETED"
+    ],
+    "lease_required_state": "ACTIVE",
+    "required_command_fields": [
+      "workcard_task_id",
+      "holder_authorization",
+      "lease_id",
+      "lease_generation",
+      "fencing_token",
+      "workcard_digest",
+      "context_digest"
+    ],
+    "required_workcard_fields": [
+      "holder_grant_id",
+      "lease_id",
+      "lease_generation",
+      "fencing_token",
+      "context_digest"
+    ],
+    "stale_or_unresolved": "reject"
+  },
+  "continuation_access_rule": {
+    "authority_effect": false,
+    "authorization_rule": "Initial retrieval and every continuation resume require a current projection.read Grant whose subject, grant_id, claim_digest, capability, Activation, conjunctive requested scope, interval, and revocation state match the token claims exactly.",
+    "capability_id": "projection.read",
+    "default_budget_source": "selected Preset profile max_context_bytes, max_entities, max_relations, max_fanout_per_entity, and top_k",
+    "default_depth_source": "selected Preset profile default_dependency_depth",
+    "default_ttl_seconds": 900,
+    "depth_max_source": "Conformance.dependency_depth_hard_max",
+    "depth_min": 1,
+    "hard_budget_source": "Conformance.workcard_hard_ceiling",
+    "max_continuation_state_bytes_source": "Conformance.scale_contracts.workcard.continuation_state_bytes_max",
+    "max_query_bytes_source": "PolicySet.derived_result_contracts.RetrievalPage.query_bytes_max",
+    "max_resume_binding_bytes": 4096,
+    "max_resume_binding_fields": 8,
+    "max_resume_binding_key_chars": 64,
+    "max_resume_binding_value_bytes": 512,
+    "min_result_bytes": 1024,
+    "persistent_entity_types_source": "SemanticModel.persistent_entities.kind-in-owner-order",
+    "ranking_algorithm_id": "bm25-v1",
+    "required_claims": [
+      "activation_digest",
+      "subject_id",
+      "grant_id",
+      "grant_claim_digest",
+      "capability_id",
+      "requested_scope",
+      "normalized_query_digest",
+      "cursor",
+      "head_event_id",
+      "head_sequence",
+      "head_digest",
+      "projection_digest",
+      "ranking_id",
+      "traversal_id",
+      "dependency_depth",
+      "budgets",
+      "issued_at",
+      "expires_at",
+      "ttl_seconds",
+      "revocation_epoch",
+      "implementation_closure_digest",
+      "state_id"
+    ],
+    "required_resume_binding_fields": [
+      "activation_digest",
+      "capability_id",
+      "grant_claim_digest",
+      "grant_id",
+      "implementation_closure_digest",
+      "requested_scope_digest",
+      "revocation_epoch",
+      "subject_id"
+    ],
+    "revocation_rule": "Expired, revoked, substituted, stale, mismatched, or unresolved Grant claims reject before projection continuation.",
+    "secret_lifecycle": "Generate one random 32-byte secret per Activation, store it only under .promin/state/secrets with restrictive permissions, never derive it from public package or control digests, never journal or export it, and rotate it with Activation.",
+    "selected_profile_digest_rule": "sha256(canonical exact selected Preset profile object)",
+    "selected_profile_id_source": "Activation.operating_profile",
+    "state_digest_rule": "sha256(canonical full ContinuationTokenClaims); the compact token MAC binds token version, opaque state_id, state digest, Activation, subject, Grant claim, and expiry",
+    "state_persistence": "derived-live-only",
+    "token_envelope": "promin-v2.<base64url opaque 128-bit state handle>.<lowercase state digest>.<base64url HMAC-SHA256>",
+    "token_max_bytes_source": "Conformance.scale_contracts.workcard.continuation_token_bytes_max",
+    "token_version": 2,
+    "traversal_algorithm_id": "typed-bfs-v2",
+    "ttl_min_seconds": 1,
+    "ttl_seconds_max": 3600
+  },
+  "default": "deny",
+  "delegation_depth_max": 8,
+  "derived_event_store_policy_contract": {
+    "allowed_state_binding_leaf_types_source": "Activation plus SemanticModel.persistent_entities.kind plus Relation",
+    "command_conditional_fields_source": "event_contract.command_conditional_fields",
+    "command_mutation_fields_source": "command_mutation_claim_rule.required_command_fields",
+    "event_contract_source": "event_contract",
+    "lease_bound_command_kinds_source": "command_mutation_claim_rule.lease_bound_command_kinds",
+    "lease_bound_task_transition_states_source": "command_mutation_claim_rule.lease_bound_task_transition_states",
+    "persistence": "derived-live-only",
+    "policy_digest_rule": "sha256(canonical EventStorePolicy without policy_digest)",
+    "required_bindings": [
+      "authority_model_digest",
+      "max_command_bytes",
+      "max_envelope_bytes",
+      "max_state_binding_bytes",
+      "max_state_binding_updates_per_batch",
+      "max_events_per_batch",
+      "max_requested_scope_items",
+      "derived_tail_batch_threshold",
+      "derived_tail_byte_threshold",
+      "runtime_overlay_compaction_depth",
+      "command_required_fields",
+      "command_conditional_fields",
+      "command_mutation_fields",
+      "lease_bound_command_kinds",
+      "lease_bound_task_transition_states",
+      "command_to_primary_event",
+      "allowed_state_binding_leaf_types",
+      "state_binding_identity_rules",
+      "state_binding_algorithm_contract",
+      "state_binding_value_rules",
+      "canonical_timestamp_contract",
+      "genesis_previous_authority_commitment",
+      "genesis_event_semantic_digest",
+      "policy_digest"
+    ],
+    "scope_contract_source": "scope_contract",
+    "timestamp_contract_source": "canonical_timestamp_contract"
+  },
+  "derived_runtime_policy_contract": {
+    "capability_ids_source": "capabilities[].id-in-owner-order",
+    "delegation_depth_source": "delegation_depth_max",
+    "grant_contract_source": "grant_contract",
+    "persistence": "derived-live-only",
+    "policy_digest_rule": "sha256(canonical AuthorityRuntimePolicy without policy_digest)",
+    "required_bindings": [
+      "authority_model_digest",
+      "capability_ids",
+      "separation_of_duties",
+      "separation_of_duties_capability_ids",
+      "separation_of_duties_contract",
+      "delegation_depth_max",
+      "scope_contract",
+      "grant_contract",
+      "canonical_timestamp_contract",
+      "policy_digest"
+    ],
+    "scope_contract_source": "scope_contract",
+    "separation_of_duties_capability_ids_source": "capabilities[].id plus separation_of_duties_contract.external_capability_ids",
+    "separation_of_duties_contract_source": "separation_of_duties_contract",
+    "separation_of_duties_source": "separation_of_duties-in-owner-order",
+    "timestamp_contract_source": "canonical_timestamp_contract"
+  },
+  "document": "promin.authority-model",
+  "event_contract": {
+    "auxiliary_event_kinds": [
+      "relation.recorded"
+    ],
+    "command_bytes_max": 1048576,
+    "command_conditional_fields": [
+      "definition_digest"
+    ],
+    "command_required_fields": [
+      "record_type",
+      "command_id",
+      "command_kind",
+      "subject_id",
+      "activation_digest",
+      "idempotency_key",
+      "requested_scope",
+      "expected_head_digest",
+      "issued_at",
+      "payload",
+      "intent_digest",
+      "authorization"
+    ],
+    "command_to_primary_event": {
+      "artifact.record": "artifact.recorded",
+      "candidate.record": "candidate.recorded",
+      "decision.record": "decision.recorded",
+      "finding.record": "finding.recorded",
+      "gate.record": "gate.recorded",
+      "grant.issue": "grant.issued",
+      "grant.revoke": "grant.revoked",
+      "lease.record": "lease.recorded",
+      "run.record": "run.recorded",
+      "task.record": "task.recorded",
+      "task.transition": "task.transitioned"
+    },
+    "derived_tail_batch_threshold": 128,
+    "derived_tail_byte_threshold": 8388608,
+    "envelope_bytes_max": 2097152,
+    "event_batch_commitment_rule": {
+      "authority_commitment": "sha256(canonical object with exactly previous_authority_commitment, sequence, previous_batch_digest, event_count, event_semantic_digest, state_binding_update_count, state_binding_digest)",
+      "cumulative_event_count": "previous cumulative_event_count plus current events length",
+      "cumulative_state_binding_update_count": "previous cumulative state-binding update count plus current state_binding_delta length",
+      "event_semantic_digest": "ordered append-only digest over every canonical Event",
+      "previous_authority_commitment": "exact previous EventBatch authority_commitment; sequence one uses genesis_previous_authority_commitment",
+      "state_binding_delta": "nonempty canonical ordered unique set/delete updates over changed typed authority leaves only",
+      "state_binding_digest": "exact typed-sparse-merkle-v1 post-batch authority root using runtime domain separators for leaf and internal nodes; never a full serialized state hash"
+    },
+    "event_batch_required_fields": [
+      "record_type",
+      "batch_id",
+      "sequence",
+      "previous_digest",
+      "previous_authority_commitment",
+      "authority_commitment",
+      "cumulative_event_count",
+      "event_semantic_digest",
+      "state_binding_delta",
+      "cumulative_state_binding_update_count",
+      "state_binding_digest",
+      "created_at",
+      "command_id",
+      "idempotency_key",
+      "activation_record_digest",
+      "events",
+      "subject_id",
+      "command_intent_digest",
+      "command_digest",
+      "authorization_digest"
+    ],
+    "event_required_fields": [
+      "record_type",
+      "event_id",
+      "event_kind",
+      "activation_digest",
+      "payload"
+    ],
+    "events_per_batch_max": 20,
+    "genesis_event_semantic_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "genesis_previous_authority_commitment": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lease_bound_command_kinds_source": "command_mutation_claim_rule.lease_bound_command_kinds",
+    "lease_bound_task_transition_states_source": "command_mutation_claim_rule.lease_bound_task_transition_states",
+    "primary_event_count_per_command": 1,
+    "requested_scope_items_max_source": "scope_contract.requested_scope_items_max",
+    "runtime_overlay_compaction_depth": 64,
+    "state_binding_algorithm": "typed-sparse-merkle-v1",
+    "state_binding_algorithm_contract": {
+      "delete_rule": "delete maps the keyed leaf to empty_leaf",
+      "delta_order": [
+        "leaf_type-ascending",
+        "leaf_id-ascending"
+      ],
+      "depth": 256,
+      "depth_encoding": "unsigned-16-bit-big-endian",
+      "empty_leaf_domain_utf8": "promin:typed-sparse-merkle-v1:empty-leaf",
+      "internal_node_domain_utf8": "promin:typed-sparse-merkle-v1:node\u0000",
+      "internal_node_rule": "sha256(domain + depth_uint16_be + left_32_bytes + right_32_bytes)",
+      "leaf_domain_utf8": "promin:typed-sparse-merkle-v1:leaf\u0000",
+      "leaf_key_rule": "sha256(canonical bytes of exact object leaf_type and leaf_id)",
+      "set_leaf_rule": "sha256(domain + leaf_key_32_bytes + value_digest_32_bytes)"
+    },
+    "state_binding_bytes_max": 1048576,
+    "state_binding_identity_rule": "direct uses the exact id field; typed_digest_id uses prefix plus first 48 lowercase hex characters of sha256(canonical ordered id_fields array)",
+    "state_binding_identity_rules": {
+      "Activation": {
+        "id_fields": [
+          "activation_digest"
+        ],
+        "identity_mode": "direct"
+      },
+      "Artifact": {
+        "id_fields": [
+          "artifact_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Candidate": {
+        "id_fields": [
+          "candidate_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Decision": {
+        "id_fields": [
+          "decision_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Finding": {
+        "id_fields": [
+          "finding_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "GateResult": {
+        "digest_algorithm": "sha256",
+        "digest_hex_chars": 48,
+        "digest_input": "canonical-ordered-id-field-values",
+        "id_fields": [
+          "gate_id",
+          "run_id"
+        ],
+        "identity_mode": "typed_digest_id",
+        "prefix": "gate-result:"
+      },
+      "Grant": {
+        "id_fields": [
+          "grant_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Lease": {
+        "id_fields": [
+          "lease_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Relation": {
+        "id_fields": [
+          "relation_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Run": {
+        "id_fields": [
+          "run_id"
+        ],
+        "identity_mode": "direct"
+      },
+      "Task": {
+        "id_fields": [
+          "task_id"
+        ],
+        "identity_mode": "direct"
+      }
+    },
+    "state_binding_leaf_type_source": "Activation plus SemanticModel.persistent_entities.kind plus Relation",
+    "state_binding_updates_per_batch_max": 20,
+    "state_binding_value_rules": {
+      "Activation": {
+        "event_kinds": [],
+        "value_definition": "Activation",
+        "value_digest_rule": "sha256(canonical installed Activation record); installed before sequence one and immutable for the journal"
+      },
+      "Artifact": {
+        "event_kinds": [
+          "artifact.recorded"
+        ],
+        "value_definition": "Artifact",
+        "value_digest_rule": "sha256(canonical exact Event.payload Artifact)"
+      },
+      "Candidate": {
+        "event_kinds": [
+          "candidate.recorded"
+        ],
+        "value_definition": "Candidate",
+        "value_digest_rule": "sha256(canonical exact Event.payload Candidate)"
+      },
+      "Decision": {
+        "event_kinds": [
+          "decision.recorded"
+        ],
+        "value_definition": "Decision",
+        "value_digest_rule": "sha256(canonical exact Event.payload Decision)"
+      },
+      "Finding": {
+        "event_kinds": [
+          "finding.recorded"
+        ],
+        "value_definition": "Finding",
+        "value_digest_rule": "sha256(canonical exact Event.payload Finding)"
+      },
+      "GateResult": {
+        "event_kinds": [
+          "gate.recorded"
+        ],
+        "value_definition": "GateResult",
+        "value_digest_rule": "sha256(canonical exact Event.payload GateResult)"
+      },
+      "Grant": {
+        "event_kinds": [
+          "grant.issued",
+          "grant.revoked"
+        ],
+        "value_definition": "GrantAuthorityState",
+        "value_digest_rule": "sha256(canonical exact GrantAuthorityState containing the current Grant and null or exact current GrantRevocation)"
+      },
+      "Lease": {
+        "event_kinds": [
+          "lease.recorded"
+        ],
+        "value_definition": "Lease",
+        "value_digest_rule": "sha256(canonical exact Event.payload post-state Lease)"
+      },
+      "Relation": {
+        "event_kinds": [
+          "relation.recorded"
+        ],
+        "value_definition": "Relation",
+        "value_digest_rule": "sha256(canonical exact Event.payload Relation)"
+      },
+      "Run": {
+        "event_kinds": [
+          "run.recorded"
+        ],
+        "value_definition": "Run",
+        "value_digest_rule": "sha256(canonical exact Event.payload Run)"
+      },
+      "Task": {
+        "event_kinds": [
+          "task.recorded",
+          "task.transitioned"
+        ],
+        "value_definition": "Task",
+        "value_digest_rule": "sha256(canonical exact Event.payload post-state Task)"
+      }
+    },
+    "timestamp_contract_source": "canonical_timestamp_contract"
+  },
+  "function": "Own action capabilities, runtime Grant semantics, trust modes, configured signature-adapter verification, root ceilings, and separation-of-duty constraints.",
+  "grant_contract": {
+    "claim_digest_rule": "sha256(canonical Grant without claim_digest and trust_proofs)",
+    "nonce": {
+      "max_length": 128,
+      "min_length": 16,
+      "pattern": "^[A-Za-z0-9._:-]{16,128}$"
+    },
+    "required_fields": [
+      "record_type",
+      "grant_id",
+      "subject_id",
+      "capability_id",
+      "scope",
+      "activation_digest",
+      "issued_at",
+      "expires_at",
+      "nonce",
+      "claim_digest",
+      "trust_proofs"
+    ],
+    "scope_items_max_source": "scope_contract.grant_scope_items_max",
+    "trust_proof_kinds": {
+      "issuer-grant": {
+        "required_fields": [
+          "kind",
+          "issuer_grant_id",
+          "issuer_signed_claim_digest",
+          "signed_claim_digest"
+        ]
+      },
+      "local-root": {
+        "required_fields": [
+          "kind",
+          "root_subject_id",
+          "authority_init_digest",
+          "signed_claim_digest"
+        ]
+      },
+      "signature": {
+        "required_fields": [
+          "kind",
+          "key_id",
+          "algorithm",
+          "signed_digest",
+          "signature"
+        ],
+        "signature_max_length": 8192,
+        "signature_min_length": 1
+      }
+    },
+    "trust_proofs_max": 32,
+    "trust_proofs_min": 1,
+    "trust_proofs_unique": true,
+    "unknown_proof_kind": "reject"
+  },
+  "model_tier_rule": "Model strength changes decomposition, context, parallelism, and analysis depth; it never changes authority.",
+  "record_type": "AuthorityModel",
+  "release_evidence_authority_rule": {
+    "attestation_algorithm": "Ed25519",
+    "attestation_domain": "promin.release-evidence.producer-attestation.v1",
+    "decision_capability": "standard.distribute",
+    "evidence_capability": "evidence.produce",
+    "evidence_key_scope": "Every evidence producer key is independently pinned to an exact subject, evidence role, platform, public key, validity interval, and revocation state.",
+    "required_claim_bindings": [
+      "candidate_binding_digest",
+      "record_type",
+      "evidence_role",
+      "platform",
+      "invocation_id",
+      "payload_digest",
+      "raw_artifact_manifest_digest"
+    ],
+    "required_evidence_role_count": 7,
+    "role_subject_key_uniqueness": "one-role-one-subject-one-key",
+    "separation_rule": "For one candidate, an evidence-producing subject or key cannot hold standard.distribute, and a distribution decider subject or key cannot hold evidence.produce.",
+    "unsigned_or_replayed": "reject"
+  },
+  "role_presets_non_authoritative": {
+    "auditor": [
+      "projection.read",
+      "finding.record",
+      "finding.resolve",
+      "export.create"
+    ],
+    "root-owner": [
+      "standard.activate",
+      "authority.manage",
+      "task.plan",
+      "lease.manage",
+      "finding.resolve",
+      "finding.waive",
+      "candidate.promote",
+      "release.decide",
+      "export.create",
+      "migration.manage",
+      "projection.rebuild",
+      "projection.read"
+    ],
+    "validator": [
+      "projection.read",
+      "validation.evaluate",
+      "evidence.publish",
+      "finding.record"
+    ],
+    "worker": [
+      "projection.read",
+      "task.execute",
+      "evidence.publish"
+    ]
+  },
+  "schema_ref": "urn:promin:contracts:1#/$defs/AuthorityModel",
+  "scope_contract": {
+    "all_selector": {
+      "exclusive": true,
+      "kind": "all",
+      "value": "*"
+    },
+    "conjunctive_effect_scope": true,
+    "duplicate_selector": "reject",
+    "grant_scope_items_max": 32,
+    "kinds": [
+      "project",
+      "path",
+      "task",
+      "candidate",
+      "artifact",
+      "finding",
+      "all"
+    ],
+    "path_selector": {
+      "absolute": "reject",
+      "dot_segments": "reject",
+      "kind": "path",
+      "normalization": "NFC POSIX relative path"
+    },
+    "project_selector": {
+      "items_max": 1,
+      "kind": "project"
+    },
+    "requested_scope_items_max": 32,
+    "selector_fields": [
+      "kind",
+      "value"
+    ],
+    "unique_items": true,
+    "unknown_kind": "reject",
+    "value_max_length": 4096,
+    "value_min_length": 1,
+    "wildcard_outside_all": "reject"
+  },
+  "separation_of_duties": [
+    {
+      "forbid_lease_derived_capabilities": [
+        "validation.evaluate",
+        "finding.resolve",
+        "finding.waive",
+        "candidate.promote",
+        "release.decide"
+      ],
+      "id": "SOD-001",
+      "rule": "lease-is-not-acceptance",
+      "scope_kind": "lease"
+    },
+    {
+      "forbid_same_subject_for_same_candidate": [
+        "task.execute",
+        "release.decide"
+      ],
+      "id": "SOD-002",
+      "rule": "executor-not-release-decider",
+      "scope_kind": "candidate"
+    },
+    {
+      "forbid_same_subject_for_same_candidate": [
+        "validation.evaluate",
+        "candidate.promote"
+      ],
+      "id": "SOD-003",
+      "rule": "validator-not-self-promoter",
+      "scope_kind": "candidate"
+    },
+    {
+      "forbid_same_subject_for_same_finding": [
+        "finding.record",
+        "finding.waive"
+      ],
+      "id": "SOD-004",
+      "rule": "finder-not-sole-waiver",
+      "scope_kind": "finding"
+    },
+    {
+      "forbid_same_key_capabilities": [
+        "evidence.produce",
+        "standard.distribute"
+      ],
+      "forbid_same_subject_for_same_candidate": [
+        "evidence.produce",
+        "standard.distribute"
+      ],
+      "id": "SOD-005",
+      "rule": "evidence-producer-not-distribution-decider",
+      "scope_kind": "candidate-and-key"
+    }
+  ],
+  "separation_of_duties_contract": {
+    "base_fields": [
+      "id",
+      "rule",
+      "scope_kind"
+    ],
+    "capability_values_max": 32,
+    "external_capability_ids": [
+      "evidence.produce",
+      "standard.distribute"
+    ],
+    "rules_max": 64,
+    "supported_rule_fields": {
+      "forbid_lease_derived_capabilities": {
+        "cardinality": "unique-list",
+        "items_min": 1
+      },
+      "forbid_same_key_capabilities": {
+        "cardinality": "unique-pair",
+        "items_exact": 2
+      },
+      "forbid_same_subject_for_same_candidate": {
+        "cardinality": "unique-pair",
+        "items_exact": 2
+      },
+      "forbid_same_subject_for_same_finding": {
+        "cardinality": "unique-pair",
+        "items_exact": 2
+      }
+    },
+    "unknown_rule_field": "reject"
+  },
+  "standard_release_decision_rule": {
+    "chain": "exact candidate bytes -> StandardReleaseCandidateBinding -> seven unique stable-read authority-role records plus one non-authoritative exact eight-lane matrix and four CP314 supplemental records -> physically resolved StandardReleaseEvidenceManifest -> signed approve or reject StandardReleaseDecision -> independently pinned trust root -> derived distribution status",
+    "chronology": "Every evidence invocation starts no later than it completes; its attestation time equals completion and stays within bounded verifier skew. Nested physical runs complete no later than their outer saturation audit, human review occurs inside its signed invocation, and max_evidence_completed_at is derived from all seven authority records, all nested physical records, and all four CP314 supplemental records. decided_at follows that maximum, is no more than 300 seconds beyond verifier time, and every producer/decision key is valid at its event time.",
+    "decision_outcomes": [
+      "approve",
+      "reject"
+    ],
+    "derived_truths": "ExactPackageVerification is recomputed by the verifier and multi-platform implementation closure is derived only from fully authenticated Windows and Linux records; neither is an independently supplied required role or public command.",
+    "evidence_binding": "Every authority, supplemental, matrix, and nested physical record binds exact path, SHA-256, and byte count and is read through a bounded handle-relative no-follow component walk. The manifest rejects symlink/junction/reparse/root substitution and NFC/casefold collisions, validates exact Draft 2020-12 schemas, verifies domain-separated producer attestations, binds producer/tool, role, platform, invocation, raw artifacts, and exact candidate, and runs role-specific semantic recomputation. The aggregate matrix remains non-authoritative with pass_credit=false and all acceptance/public flags false.",
+    "history_and_current_state": "The signed StandardReleaseDecision and its digest remain immutable history. Current distribution eligibility is a derived view and becomes false when evidence, trust pin, candidate identity, chronology, key validity, or any required gate no longer validates.",
+    "independent_trust_binding": "Manifest construction and closure verification require an independently operator-pinned SHA-256 for the exact trust configuration bytes. Exactly seven evidence roles have one distinct key, subject, and public key each; CP313 and CP314 observations for one role reuse only that role's configured producer. A mismatched, missing, duplicate, over-broad, or invalid scope cannot yield evidence credit or approval.",
+    "location": "external-to-canonical-standard-folder",
+    "product_acceptance_pass": false,
+    "product_public_approval": "not_approved",
+    "publication_rule": "Only outcome approve signed by an active configured Ed25519 key with standard.distribute capability and verified against an independently pinned trust-root SHA-256 yields approved distribution status. Missing, rejected, stale, unsigned, mismatched, unpinned, fabricated, or unresolved records fail closed.",
+    "rule": "StandardReleaseDecision is external to the canonical standard bytes, binds candidate and evidence manifest digests, includes explicit outcome and anti-replay nonce, proves decider authority through a configured trust root and signature provider, and cannot elevate a trust root delivered by the same untrusted source without an independent digest pin.",
+    "signature_algorithm": "Ed25519",
+    "signature_provider_id": "cryptography-ed25519-v1",
+    "standard_name": "promin",
+    "version_source": "StandardReleaseCandidateBinding.version"
+  },
+  "trust_modes": {
+    "local-owner": {
+      "boundary": "single-machine owner-controlled root authority",
+      "signer_required": false
+    },
+    "team-signed": {
+      "boundary": "multiple actors or remote transport",
+      "minimum_threshold": 1,
+      "provider_capability": "signature",
+      "provider_resolution": "Resolve the exact technologies.json signature binding for init and every ActivationGuard, service, CLI, replay, and mutation path. A process-local injected adapter is explicitly non-reconstructable and valid only while bound to the same project, Activation, provider, and identity; cross-process CLI workflows require a reconstructable configured adapter.",
+      "signer_required": true,
+      "unsupported_binding": "reject-before-workflow"
+    }
+  },
+  "version": "1.0.0-alpha.1"
+}

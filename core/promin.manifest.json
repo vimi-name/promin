@@ -1,0 +1,42 @@
+{
+  "acceptance_predicate_count": 102,
+  "action_capability_count": 16,
+  "aliases": [],
+  "bundle_digest": "add3c0dd8891f154ad9f772dcc190d7c596c6b25f13ddc126f38ec3b15137a50",
+  "canonical_name": "promin",
+  "canonical_name_only": true,
+  "core_artifact_count": 6,
+  "core_components": [
+    {
+      "path": "semantic-model.json",
+      "sha256": "78116797783cf2db1401fe0bbc07df2ed6624679ede4d89f00d73de53a364ef3"
+    },
+    {
+      "path": "authority-model.json",
+      "sha256": "6a0c6f87d8bf5f7257d3aba915bbcbc4183ec97f101549a3a933abeb02c32016"
+    },
+    {
+      "path": "policy-set.json",
+      "sha256": "39da9ca0d02c5284fc1a3a4514f211d175dfe92a7533be6b1bff2c5aaca471f1"
+    },
+    {
+      "path": "contracts.schema.json",
+      "sha256": "3718c1485cc92a2a19ac7b780f8b8050888079b0db5d17319e0b3dfab3d57712"
+    },
+    {
+      "path": "conformance.json",
+      "sha256": "5417f45995b4937ce4a29600cc667d451889cb6e0dd7ef54559cff53e7ee7500"
+    }
+  ],
+  "function": "Own Core bundle identity and exact digest binding for the five other Core artifacts.",
+  "mutation_family_count": 77,
+  "persistent_entity_kind_count": 9,
+  "policy_count": 68,
+  "record_type": "StandardManifest",
+  "relation_kind_count": 6,
+  "schema_definition_count": 127,
+  "schema_ref": "urn:promin:contracts:1#/$defs/StandardManifest",
+  "selected_preset_count": 1,
+  "technology_capability_count": 9,
+  "version": "1.0.0-alpha.1"
+}

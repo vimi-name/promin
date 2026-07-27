@@ -1,0 +1,1034 @@
+"""Hash-driven, token-bounded documentation and navigation repair.
+
+The committed layer is intentionally tiny. Detailed summaries and the searchable
+projection are local/rebuildable. Git blob identities avoid rereading unchanged
+tracked files; only dirty/untracked content is hashed.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+from collections import Counter
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Mapping
+
+from .canonical import digest_value
+from .gitpolicy import estimate_tokens
+from .workspace import unit_for_path, workspace_navigation_summary
+
+_PORTABLE = Path(".promin/portable")
+_GENERATED = Path(".promin/generated/documentation")
+_CACHE = Path(".promin/cache/documentation")
+_STATE_FILE = _CACHE / "documentation-state.json"
+_REPOSITORY_MANIFEST_FILE = _CACHE / "repository-manifest.json"
+_FALLBACK_CACHE_FILE = _CACHE / "file-state.json"
+_ENTRY_FILE = _PORTABLE / "AGENT_ENTRY.md"
+_WORKSPACE_FILE = _PORTABLE / "workspace-map.json"
+_BRIEF_FILE = _PORTABLE / "project-brief.json"
+_HANDOFF_FILE = _PORTABLE / "handoff.json"
+_TEAM_STATE_FILE = _PORTABLE / "team-state.json"
+_CONTEXT_POLICY_FILE = _PORTABLE / "context-policy.json"
+_PROJECT_CONTEXT_FILE = _PORTABLE / "PROJECT_CONTEXT.md"
+_WORKSPACE_MARKDOWN_FILE = _PORTABLE / "WORKSPACE_MAP.md"
+_OPERATIONS_FILE = _PORTABLE / "OPERATIONS.md"
+_DOCUMENTATION_MANIFEST_FILE = _PORTABLE / "documentation-manifest.json"
+_MAX_ENTRY_BYTES = 4096
+_MAX_PROJECT_CONTEXT_BYTES = 6144
+_MAX_WORKSPACE_MARKDOWN_BYTES = 8192
+_MAX_OPERATIONS_BYTES = 4096
+_MAX_UNIT_SUMMARY_BYTES = 8192
+_MAX_MANIFEST_FILES = 250_000
+_MAX_REFERENCE_RECORDS = 256
+_MAX_REFERENCE_RECORD_BYTES = 64 * 1024
+_MAX_REFERENCE_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_TEAM_STATE_BYTES = 512 * 1024
+_MAX_TEAM_TASKS = 128
+_MAX_TEAM_FINDINGS = 64
+
+_IGNORE_DIRS = {
+    ".git", ".promin", ".promin-host", ".idea", ".vscode", ".venv", "venv",
+    "node_modules", "dist", "build", "target", "coverage", "vendor", "__pycache__",
+}
+_EXCLUDED_PATHS = {
+    "AGENTS.md", "CLAUDE.md", ".cursor/rules/promin.mdc",
+    ".agents/skills/promin/SKILL.md", ".claude/skills/promin/SKILL.md",
+    ".cursor/skills/promin/SKILL.md",
+}
+_DOC_NAMES = {
+    "readme.md", "readme_ua.md", "contributing.md", "architecture.md",
+    "roadmap.md", "backlog.md", "project.md", "brief.md", "security.md",
+}
+_MANIFEST_NAMES = {
+    "package.json", "pyproject.toml", "cargo.toml", "go.mod", "cmakelists.txt",
+    "cmakepresets.json", "build.gradle", "build.gradle.kts", "settings.gradle",
+    "settings.gradle.kts", "androidmanifest.xml", "supabase.toml", "pubspec.yaml",
+    "package.swift", "docker-compose.yml", "docker-compose.yaml", "dockerfile",
+}
+
+
+class DocumentationError(RuntimeError):
+    pass
+
+
+def _json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    _atomic_bytes(path, text.encode("utf-8"))
+
+
+def _atomic_json(path: Path, value: Any) -> None:
+    _atomic_bytes(path, _json_bytes(value))
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _git_bytes(root: Path, *args: str, timeout: float = 15.0) -> bytes | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _included_path(path: str) -> bool:
+    normalized = (lambda value: value[2:] if value.startswith("./") else value.lstrip("/"))(PurePosixPath(path).as_posix())
+    if not normalized or normalized in _EXCLUDED_PATHS:
+        return False
+    # Promin-owned native host wrappers are generated from the portable skill
+    # source and must not feed back into the product/documentation identity.
+    if (
+        normalized.startswith(".agents/skills/promin-")
+        or normalized.startswith(".claude/skills/promin-")
+        or normalized.startswith(".cursor/skills/promin-")
+    ) and normalized.endswith("/SKILL.md"):
+        return False
+    parts = PurePosixPath(normalized).parts
+    return bool(parts) and not any(part in _IGNORE_DIRS for part in parts)
+
+
+def _sha256_file(path: Path) -> tuple[str, int] | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest(), size
+
+
+def _git_worktree_identity(root: Path, relative: str) -> tuple[str, int] | None:
+    """Return the Git blob identity for working-tree bytes when possible.
+
+    Using the repository object format and clean filters keeps the documentation
+    digest stable when unchanged files move from dirty/untracked to committed.
+    """
+
+    path = root / relative
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    payload = _git_bytes(root, "hash-object", f"--path={relative}", "--", relative)
+    if payload:
+        oid = payload.decode("ascii", errors="replace").strip()
+        if oid:
+            return f"git:{oid}", size
+    observed = _sha256_file(path)
+    if observed is None:
+        return None
+    sha256, size = observed
+    return f"sha256:{sha256}", size
+
+
+def _zlist(payload: bytes | None) -> list[str]:
+    if not payload:
+        return []
+    return [item.decode("utf-8", errors="surrogateescape") for item in payload.split(b"\0") if item]
+
+
+def _git_repository_manifest(root: Path, workspace: Mapping[str, Any]) -> dict[str, Any] | None:
+    head_bytes = _git_bytes(root, "rev-parse", "HEAD")
+    index_bytes = _git_bytes(root, "write-tree")
+    if not head_bytes:
+        return None
+    head = head_bytes.decode("ascii", errors="replace").strip()
+    index_tree = None if not index_bytes else index_bytes.decode("ascii", errors="replace").strip()
+    dirty = set(_zlist(_git_bytes(root, "diff", "--name-only", "-z", "HEAD", "--")))
+    dirty.update(_zlist(_git_bytes(root, "diff", "--cached", "--name-only", "-z", "--")))
+    untracked = _zlist(_git_bytes(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    deleted = set(_zlist(_git_bytes(root, "ls-files", "--deleted", "-z")))
+
+    previous = _load_json(root / _REPOSITORY_MANIFEST_FILE)
+    reusable = bool(
+        isinstance(previous, Mapping)
+        and previous.get("kind") == "git-objects-plus-working-overlay"
+        and previous.get("algorithm_version") == 4
+        and previous.get("index_tree") == index_tree
+        and previous.get("truncated") is False
+        and isinstance(previous.get("records"), list)
+    )
+
+    index_records: list[tuple[str, str, str]] = []
+    if reusable:
+        for old in previous.get("records", []):
+            if not isinstance(old, Mapping):
+                reusable = False
+                break
+            path = str(old.get("path", ""))
+            oid = old.get("index_identity")
+            mode = old.get("mode")
+            if old.get("state") == "untracked":
+                continue
+            if not path or not isinstance(oid, str) or not isinstance(mode, str):
+                reusable = False
+                break
+            index_records.append((path, oid.removeprefix("git:"), mode))
+
+    if not reusable:
+        tracked_bytes = _git_bytes(root, "ls-files", "--stage", "-z")
+        if tracked_bytes is None:
+            return None
+        index_records = []
+        for raw in tracked_bytes.split(b"\0"):
+            if not raw:
+                continue
+            try:
+                metadata, path_bytes = raw.split(b"\t", 1)
+                mode, oid, stage = metadata.decode("ascii").split()
+                path = path_bytes.decode("utf-8", errors="surrogateescape")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if stage == "0":
+                index_records.append((path, oid, mode))
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path, oid, mode in index_records:
+        if not _included_path(path):
+            continue
+        seen.add(path)
+        unit = unit_for_path(workspace, path)
+        unit_id = "root-unknown" if unit is None else str(unit.get("unit_id", "root-unknown"))
+        base = {
+            "path": path,
+            "mode": mode,
+            "index_identity": f"git:{oid}",
+            "unit_id": unit_id,
+            "suffix": PurePosixPath(path).suffix.casefold(),
+        }
+        if path in deleted or not (root / path).exists():
+            record = {**base, "state": "deleted", "identity": f"git:{oid}"}
+        elif path in dirty:
+            observed = _git_worktree_identity(root, path)
+            if observed is None:
+                record = {**base, "state": "unreadable", "identity": f"git:{oid}"}
+            else:
+                identity, size = observed
+                record = {**base, "state": "dirty", "identity": identity, "bytes": size}
+        else:
+            record = {**base, "state": "tracked", "identity": f"git:{oid}"}
+        records.append(record)
+        if len(records) >= _MAX_MANIFEST_FILES:
+            break
+
+    for path in sorted(set(untracked), key=lambda value: value.encode("utf-8", errors="surrogateescape")):
+        if len(records) >= _MAX_MANIFEST_FILES or path in seen or not _included_path(path):
+            continue
+        observed = _git_worktree_identity(root, path)
+        if observed is None:
+            continue
+        identity, size = observed
+        unit = unit_for_path(workspace, path)
+        records.append({
+            "path": path,
+            "state": "untracked",
+            "identity": identity,
+            "index_identity": None,
+            "bytes": size,
+            "mode": None,
+            "unit_id": "root-unknown" if unit is None else str(unit.get("unit_id", "root-unknown")),
+            "suffix": PurePosixPath(path).suffix.casefold(),
+        })
+    records.sort(key=lambda item: str(item["path"]).encode("utf-8", errors="surrogateescape"))
+    truncated = len(records) >= _MAX_MANIFEST_FILES
+    content_records = [
+        {
+            "path": item["path"],
+            "presence": (
+                "deleted" if item.get("state") == "deleted"
+                else "unreadable" if item.get("state") == "unreadable"
+                else "present"
+            ),
+            "identity": item.get("identity"),
+        }
+        for item in records
+    ]
+    content_identity = {
+        "kind": "git-content-snapshot-v4",
+        "records": content_records,
+        "truncated": truncated,
+        "excluded_control_state": True,
+    }
+    return {
+        "kind": "git-objects-plus-working-overlay",
+        "algorithm_version": 4,
+        "head": head,
+        "index_tree": index_tree,
+        "records": records,
+        "truncated": truncated,
+        "excluded_control_state": True,
+        "tracked_index_reused": reusable,
+        "repository_content_digest": digest_value(content_identity),
+    }
+
+
+def _fallback_repository_manifest(root: Path, workspace: Mapping[str, Any]) -> dict[str, Any]:
+    previous = _load_json(root / _FALLBACK_CACHE_FILE) or {"files": {}}
+    old_files = previous.get("files", {}) if isinstance(previous.get("files"), dict) else {}
+    updated: dict[str, Any] = {}
+    records: list[dict[str, Any]] = []
+    for directory, directories, files in os.walk(root, followlinks=False):
+        relative_dir = Path(directory).relative_to(root)
+        directories[:] = sorted(
+            name for name in directories
+            if name not in _IGNORE_DIRS and _included_path((relative_dir / name).as_posix())
+        )
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if not _included_path(relative):
+                continue
+            try:
+                stat_value = path.stat()
+            except OSError:
+                continue
+            signature = f"{stat_value.st_size}:{stat_value.st_mtime_ns}:{getattr(stat_value, 'st_ctime_ns', 0)}:{getattr(stat_value, 'st_ino', 0)}"
+            old = old_files.get(relative)
+            if isinstance(old, dict) and old.get("signature") == signature and isinstance(old.get("sha256"), str):
+                sha256 = old["sha256"]
+            else:
+                observed = _sha256_file(path)
+                if observed is None:
+                    continue
+                sha256, _ = observed
+            updated[relative] = {"signature": signature, "sha256": sha256}
+            unit = unit_for_path(workspace, relative)
+            records.append({
+                "path": relative, "state": "observed", "identity": sha256,
+                "bytes": stat_value.st_size, "mode": None,
+                "unit_id": "root-unknown" if unit is None else str(unit.get("unit_id", "root-unknown")),
+                "suffix": PurePosixPath(relative).suffix.casefold(),
+            })
+            if len(records) >= _MAX_MANIFEST_FILES:
+                break
+        if len(records) >= _MAX_MANIFEST_FILES:
+            break
+    records.sort(key=lambda item: str(item["path"]).encode("utf-8", errors="surrogateescape"))
+    identity = {"kind": "cached-file-merkle", "records": records, "truncated": len(records) >= _MAX_MANIFEST_FILES, "excluded_control_state": True}
+    _atomic_json(root / _FALLBACK_CACHE_FILE, {"files": updated})
+    return {**identity, "repository_content_digest": digest_value(identity)}
+
+
+def repository_content_manifest(root: Path, workspace: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = _git_repository_manifest(root, workspace) or _fallback_repository_manifest(root, workspace)
+    _atomic_json(root / _REPOSITORY_MANIFEST_FILE, manifest)
+    return manifest
+
+
+def load_repository_manifest(project_root: Path | str) -> dict[str, Any] | None:
+    return _load_json(Path(project_root).resolve() / _REPOSITORY_MANIFEST_FILE)
+
+
+def _unit_records(manifest: Mapping[str, Any], unit_id: str) -> list[Mapping[str, Any]]:
+    return [item for item in manifest.get("records", []) if isinstance(item, Mapping) and item.get("unit_id") == unit_id]
+
+
+def _unit_source_digest(unit: Mapping[str, Any], records: Iterable[Mapping[str, Any]]) -> str:
+    return digest_value({
+        "unit_id": unit.get("unit_id"), "unit_digest": unit.get("unit_digest"),
+        "files": [{"path": item.get("path"), "state": item.get("state"), "identity": item.get("identity")} for item in records],
+    })
+
+
+def _reference_paths(records: Iterable[Mapping[str, Any]], requested: set[str], limit: int = 64) -> list[str]:
+    result: list[str] = []
+    for item in records:
+        path = str(item.get("path", ""))
+        name = PurePosixPath(path).name.casefold()
+        if name in _DOC_NAMES or name in _MANIFEST_NAMES or path in requested:
+            result.append(path)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _unit_summary(unit: Mapping[str, Any], records: list[Mapping[str, Any]], source_digest: str, requested: set[str]) -> str:
+    suffixes = Counter(str(item.get("suffix") or "<none>") for item in records)
+    suffix_text = ", ".join(f"{key}:{value}" for key, value in suffixes.most_common(12)) or "none"
+    references = _reference_paths(records, requested)
+    reference_lines = "\n".join(f"- `{path}`" for path in references) or "- none discovered"
+    technologies = ", ".join(str(value) for value in unit.get("technology_ids", [])) or "not resolved"
+    profiles = ", ".join(str(value) for value in unit.get("profile_layers", [])) or "general-development"
+    text = f"""# {unit.get('unit_id', 'project-unit')}
+
+- Path: `{unit.get('path', '.')}`
+- Kind: `{unit.get('kind', 'project-unit')}`
+- Files represented: `{len(records)}`
+- Technologies: {technologies}
+- Profile layers: {profiles}
+- Source digest: `{source_digest}`
+- Common suffixes: {suffix_text}
+
+## Navigation references
+
+{reference_lines}
+
+Use `promin context --unit {unit.get('unit_id')}` for bounded details. Load this
+unit only when the Task, changed path, or query targets it.
+"""
+    payload = text.encode("utf-8")
+    if len(payload) <= _MAX_UNIT_SUMMARY_BYTES:
+        return text
+    digest = hashlib.sha256(payload).hexdigest()
+    trimmed = payload[: _MAX_UNIT_SUMMARY_BYTES - 192].decode("utf-8", errors="ignore")
+    return trimmed.rstrip() + f"\n\n[Summary truncated; full digest `{digest}`]\n"
+
+
+def _portable_workspace(workspace: Mapping[str, Any]) -> dict[str, Any]:
+    units = []
+    for raw in workspace.get("units", []):
+        if isinstance(raw, Mapping):
+            units.append({
+                "unit_id": raw.get("unit_id"), "path": raw.get("path"), "kind": raw.get("kind"),
+                "technology_ids": list(raw.get("technology_ids", [])),
+                "profile_layers": list(raw.get("profile_layers", [])), "confidence": raw.get("confidence"),
+            })
+    relations = [
+        {
+            "from": item.get("from"),
+            "to": item.get("to"),
+            "kind": item.get("relation", item.get("kind")),
+        }
+        for item in workspace.get("relations", []) if isinstance(item, Mapping)
+    ]
+    identity = {
+        "record_type": "PortableWorkspaceMap", "workspace_kind": workspace.get("workspace_kind"),
+        "unit_count": len(units), "units": units, "relations": relations,
+        "one_control_layer": True, "authority": False, "pass_credit": False,
+    }
+    return {**identity, "workspace_map_digest": digest_value(identity)}
+
+
+def _portable_brief(plan: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {
+        "record_type": "PortableProjectBrief", "project_id": plan.get("project_id"),
+        "goal": plan.get("goal"), "success_criteria": list(plan.get("success_criteria", [])),
+        "constraints": list(plan.get("constraints", [])), "non_goals": list(plan.get("non_goals", [])),
+        "deliverables": list(plan.get("deliverables", [])), "references": list(plan.get("references", [])),
+        "work_sources": list(plan.get("work_sources", [])), "autonomy": plan.get("autonomy"),
+        "language": plan.get("reporting_language"),
+        "profile_overrides": [value for value in plan.get("profile_layers", []) if value not in {"general-development", "ask", "safe-auto", "unsafe-auto", "uk", "en"}],
+        "authority": False, "pass_credit": False,
+    }
+    return {**identity, "brief_digest": digest_value(identity)}
+
+
+def _portable_handoff(plan: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {
+        "record_type": "PortableTeamHandoff", "standard_version": plan.get("standard_version"),
+        "project_id": plan.get("project_id"), "source_plan_digest": plan.get("plan_digest"),
+        "workspace_map_digest": _portable_workspace(plan.get("workspace_map", {})).get("workspace_map_digest"),
+        "project_mode": plan.get("project_mode"), "profile_layers": list(plan.get("profile_layers", [])),
+        "reporting_language": plan.get("reporting_language"), "autonomy": plan.get("autonomy"),
+        "rehydration_command": "promin doctor --repair", "repository_identity_strategy": "recompute-on-clone-or-refresh",
+        "authoritative_operational_state_included": False,
+        "bounded_team_state_included": True,
+        "note": (
+            "Portable data contains intent, navigation and a bounded non-authoritative "
+            "team checkpoint. Re-resolve providers and authority on the receiving host."
+        ),
+        "authority": False, "pass_credit": False,
+    }
+    return {**identity, "handoff_digest": digest_value(identity)}
+
+
+def _portable_team_state(
+    root: Path,
+    plan: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a bounded, non-authoritative checkpoint for Git handoff.
+
+    The event journal, Grants, Leases, evidence bodies and SQLite databases stay
+    local.  A receiving host imports this record only as a proposal after it has
+    created a fresh Activation and verified the current repository content.
+    """
+
+    projection_path = root / ".promin" / "state" / "projection" / "promin.sqlite3"
+    tasks: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    latest_candidate: dict[str, Any] | None = None
+    projection_metadata: dict[str, str] = {}
+
+    if projection_path.is_file() and not projection_path.is_symlink():
+        try:
+            connection = sqlite3.connect(f"file:{projection_path}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            try:
+                projection_metadata = {
+                    str(row["key"]): str(row["value"])
+                    for row in connection.execute("SELECT key, value FROM metadata")
+                }
+                rows = connection.execute(
+                    """
+                    SELECT e.entity_type, e.payload_json,
+                           COALESCE(o.event_sequence, 0) AS event_sequence,
+                           COALESCE(o.event_index, 0) AS event_index
+                    FROM entities e
+                    LEFT JOIN operational_order o ON o.entity_id=e.id
+                    WHERE e.entity_type IN ('Task','Finding','Candidate')
+                    ORDER BY event_sequence DESC, event_index DESC, e.id
+                    """
+                )
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if row["entity_type"] == "Task" and len(tasks) < _MAX_TEAM_TASKS:
+                        if payload.get("state") in {"COMPLETED", "CANCELLED"}:
+                            continue
+                        tasks.append({
+                            key: payload.get(key)
+                            for key in (
+                                "task_id", "state", "required_capability",
+                                "acceptance_predicate", "allowed_paths",
+                                "candidate_digest", "created_at",
+                                "operation_profile_id", "recommended_model_tier",
+                            )
+                            if key in payload
+                        })
+                    elif row["entity_type"] == "Finding" and len(findings) < _MAX_TEAM_FINDINGS:
+                        if payload.get("status") not in {"OPEN", "BLOCKED", "WAIVED"}:
+                            continue
+                        findings.append({
+                            key: payload.get(key)
+                            for key in (
+                                "finding_id", "status", "severity", "blocking",
+                                "statement", "candidate_digest", "created_at",
+                            )
+                            if key in payload
+                        })
+                    elif row["entity_type"] == "Candidate" and latest_candidate is None:
+                        latest_candidate = {
+                            key: payload.get(key)
+                            for key in (
+                                "candidate_id", "candidate_digest", "baseline_kind",
+                                "creditable", "consistency_mode",
+                            )
+                            if key in payload
+                        }
+            finally:
+                connection.close()
+        except (OSError, sqlite3.DatabaseError):
+            projection_metadata = {"projection_read": "unavailable"}
+
+    identity = {
+        "record_type": "PortableTeamState",
+        "schema_version": 1,
+        "project_id": plan.get("project_id"),
+        "source_plan_digest": plan.get("plan_digest"),
+        "repository_content_digest": manifest.get("repository_content_digest"),
+        "projection_head_digest": projection_metadata.get("head_digest"),
+        "latest_candidate": latest_candidate,
+        "active_tasks": tasks,
+        "active_findings": findings,
+        "task_count_truncated": len(tasks) >= _MAX_TEAM_TASKS,
+        "finding_count_truncated": len(findings) >= _MAX_TEAM_FINDINGS,
+        "import_policy": "proposal-only-revalidate-under-receiving-activation",
+        "excluded": [
+            "grants", "leases", "trust-roots", "evidence-bodies",
+            "provider-receipts", "host-paths", "telemetry", "databases",
+        ],
+        "authoritative": False,
+        "authority": False,
+        "pass_credit": False,
+    }
+    result = {**identity, "team_state_digest": digest_value(identity)}
+    payload = _json_bytes(result)
+    if len(payload) > _MAX_TEAM_STATE_BYTES:
+        raise DocumentationError("portable team state exceeds the alpha budget")
+    return result
+
+
+def _agent_entry(plan: Mapping[str, Any]) -> str:
+    language = str(plan.get("reporting_language") or "en")
+    navigation = workspace_navigation_summary(plan.get("workspace_map", {}), limit=16)
+    profiles = ", ".join(str(item) for item in plan.get("profile_layers", []))
+    if language == "uk":
+        text = f"""# promin: старт агента
+
+**Мета:** {plan.get('goal', 'Продовжити проєкт надійно.')}
+
+- Версія: `{plan.get('standard_version', 'unknown')}`
+- Режим: `{plan.get('project_mode', 'unknown')}`
+- Автономність: `{plan.get('autonomy', 'safe-auto')}`
+- Профілі: {profiles}
+
+1. `promin doctor`
+2. `promin next`
+3. `promin context <запит> [--unit <id>]`
+4. Працюй лише в межах Task, authority та allowed paths.
+5. Після розподілених змін: `promin refresh`; за збою: `promin audit`.
+
+## Workspace
+
+{navigation}
+
+Не завантажуй увесь repository у prompt. Generated docs, indexes і telemetry не є source of truth.
+"""
+    else:
+        text = f"""# promin: agent start
+
+**Goal:** {plan.get('goal', 'Continue the project reliably.')}
+
+- Version: `{plan.get('standard_version', 'unknown')}`
+- Mode: `{plan.get('project_mode', 'unknown')}`
+- Autonomy: `{plan.get('autonomy', 'safe-auto')}`
+- Profiles: {profiles}
+
+1. `promin doctor`
+2. `promin next`
+3. `promin context <query> [--unit <id>]`
+4. Work only inside the Task, authority, and allowed paths.
+5. After distributed changes run `promin refresh`; after failures run `promin audit`.
+
+## Workspace
+
+{navigation}
+
+Do not load the whole repository into a prompt. Generated docs, indexes, and telemetry are not a source of truth.
+"""
+    payload = text.encode("utf-8")
+    if len(payload) <= _MAX_ENTRY_BYTES:
+        return text
+    return payload[:_MAX_ENTRY_BYTES].decode("utf-8", errors="ignore").rstrip() + "\n"
+
+
+def _truncate_text(text: str, limit: int, label: str) -> str:
+    payload = text.encode("utf-8")
+    if len(payload) <= limit:
+        return text
+    digest = hashlib.sha256(payload).hexdigest()
+    suffix = f"\n\n[{label} truncated; full digest `{digest}`]\n"
+    available = max(0, limit - len(suffix.encode("utf-8")))
+    return payload[:available].decode("utf-8", errors="ignore").rstrip() + suffix
+
+
+def _project_context_markdown(plan: Mapping[str, Any]) -> str:
+    language = str(plan.get("reporting_language") or "en")
+    profiles = ", ".join(str(value) for value in plan.get("profile_layers", [])) or "general-development"
+    technologies = sorted({
+        str(value)
+        for unit in plan.get("workspace_map", {}).get("units", [])
+        if isinstance(unit, Mapping)
+        for value in unit.get("technology_ids", [])
+    })
+    technology_text = ", ".join(technologies) or ("ще не визначено" if language == "uk" else "not resolved yet")
+    success = "\n".join(f"- {value}" for value in plan.get("success_criteria", [])) or "- none"
+    constraints = "\n".join(f"- {value}" for value in plan.get("constraints", [])) or "- none"
+    references = "\n".join(f"- `{value}`" for value in plan.get("references", [])) or "- none"
+    if language == "uk":
+        text = f"""# Контекст проєкту
+
+- Мета: {plan.get('goal', 'Продовжити проєкт надійно.')}
+- Режим: `{plan.get('project_mode', 'unknown')}`
+- Автономність: `{plan.get('autonomy', 'safe-auto')}`
+- Профілі: {profiles}
+- Технології: {technology_text}
+
+## Критерії успіху
+
+{success}
+
+## Обмеження
+
+{constraints}
+
+## Джерела
+
+{references}
+
+Це коротка generated-проєкція. Канонічні факти зберігаються у Core/init/events; деталі отримуються через `promin context`.
+"""
+    else:
+        text = f"""# Project context
+
+- Goal: {plan.get('goal', 'Continue the project reliably.')}
+- Mode: `{plan.get('project_mode', 'unknown')}`
+- Autonomy: `{plan.get('autonomy', 'safe-auto')}`
+- Profiles: {profiles}
+- Technologies: {technology_text}
+
+## Success criteria
+
+{success}
+
+## Constraints
+
+{constraints}
+
+## Sources
+
+{references}
+
+This is a short generated projection. Canonical facts live in Core/init/events; retrieve details through `promin context`.
+"""
+    return _truncate_text(text, _MAX_PROJECT_CONTEXT_BYTES, "project context")
+
+
+def _workspace_markdown(plan: Mapping[str, Any]) -> str:
+    language = str(plan.get("reporting_language") or "en")
+    units = [value for value in plan.get("workspace_map", {}).get("units", []) if isinstance(value, Mapping)]
+    rows = []
+    for unit in units:
+        technologies = ", ".join(str(value) for value in unit.get("technology_ids", [])) or "-"
+        rows.append(f"| `{unit.get('unit_id')}` | `{unit.get('path', '.')}` | {unit.get('kind', 'project-unit')} | {technologies} |")
+    table = "\n".join(rows) or "| `root` | `.` | project-unit | - |"
+    if language == "uk":
+        text = f"""# Карта workspace
+
+Один верхньорівневий promin-шар координує всі частини repository.
+
+| Unit | Path | Type | Technologies |
+|---|---|---|---|
+{table}
+
+- Показати unit: `promin context --unit <unit-id>`
+- Знайти факт: `promin context <запит>`
+- Оновити після розподілених змін: `promin refresh`
+
+Не завантажуйте весь monorepo у prompt; починайте з unit, пов'язаного з Task або changed path.
+"""
+    else:
+        text = f"""# Workspace map
+
+One top-level promin layer coordinates every repository unit.
+
+| Unit | Path | Type | Technologies |
+|---|---|---|---|
+{table}
+
+- Browse a unit: `promin context --unit <unit-id>`
+- Find a fact: `promin context <query>`
+- Refresh after distributed changes: `promin refresh`
+
+Do not load the whole monorepo into a prompt; start with the unit bound to the Task or changed path.
+"""
+    return _truncate_text(text, _MAX_WORKSPACE_MARKDOWN_BYTES, "workspace map")
+
+
+def _operations_markdown(plan: Mapping[str, Any]) -> str:
+    language = str(plan.get("reporting_language") or "en")
+    if language == "uk":
+        text = """# Операційний цикл
+
+1. `promin doctor` — перевірити Core, portability і derived surfaces.
+2. `promin next` — отримати bounded Task/WorkCard.
+3. `promin context <запит>` — завантажити лише потрібні факти.
+4. Виконати роботу в межах Task, authority та allowed paths.
+5. `promin refresh` — hash-driven оновлення коротких документів і локального індексу.
+6. `promin audit` — знайти loops, drift, дублікати, degradation і portability issues.
+
+У Git комітяться лише `.promin/portable/**`, `AGENTS.md`, `CLAUDE.md` та host skill/rule files. Events, databases, caches, evidence payloads і host paths залишаються локальними та rebuildable.
+
+Після перенесення папки на іншу ОС: `promin doctor --repair`.
+"""
+    else:
+        text = """# Operating loop
+
+1. `promin doctor` — verify Core, portability, and derived surfaces.
+2. `promin next` — obtain a bounded Task/WorkCard.
+3. `promin context <query>` — load only the required facts.
+4. Work inside the Task, authority, and allowed paths.
+5. `promin refresh` — hash-driven repair of short docs and the local index.
+6. `promin audit` — detect loops, drift, duplicates, degradation, and portability issues.
+
+Only `.promin/portable/**`, `AGENTS.md`, `CLAUDE.md`, and host skill/rule files belong in Git. Events, databases, caches, evidence payloads, and host paths remain local and rebuildable.
+
+After moving the folder to another OS: `promin doctor --repair`.
+"""
+    return _truncate_text(text, _MAX_OPERATIONS_BYTES, "operations")
+
+
+def _context_policy(entry: str) -> dict[str, Any]:
+    identity = {
+        "record_type": "ContextPolicy", "startup_entry_bytes_max": _MAX_ENTRY_BYTES,
+        "unit_summary_bytes_max": _MAX_UNIT_SUMMARY_BYTES, "query_result_bytes_default": 16 * 1024,
+        "query_result_bytes_max": 64 * 1024, "query_limit_default": 12,
+        "load_strategy": "short-host-instructions -> agent-entry -> task-scoped Python query",
+        "agent_entry_estimated_tokens": estimate_tokens(entry),
+        "token_estimate_kind": "modeled-conservative", "authority": False, "pass_credit": False,
+    }
+    return {**identity, "policy_digest": digest_value(identity)}
+
+
+def _expected_portable(root: Path, plan: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[Path, bytes]:
+    entry = _agent_entry(plan)
+    outputs: dict[Path, bytes] = {
+        _ENTRY_FILE: entry.encode("utf-8"),
+        _PROJECT_CONTEXT_FILE: _project_context_markdown(plan).encode("utf-8"),
+        _WORKSPACE_MARKDOWN_FILE: _workspace_markdown(plan).encode("utf-8"),
+        _OPERATIONS_FILE: _operations_markdown(plan).encode("utf-8"),
+        _WORKSPACE_FILE: _json_bytes(_portable_workspace(plan.get("workspace_map", {}))),
+        _BRIEF_FILE: _json_bytes(_portable_brief(plan)),
+        _HANDOFF_FILE: _json_bytes(_portable_handoff(plan)),
+        _TEAM_STATE_FILE: _json_bytes(_portable_team_state(root, plan, manifest)),
+        _CONTEXT_POLICY_FILE: _json_bytes(_context_policy(entry)),
+    }
+    manifest_identity = {
+        "record_type": "PortableDocumentationManifest",
+        "source_algorithm": manifest.get("kind"),
+        "repository_content_digest": manifest.get("repository_content_digest"),
+        "workspace_map_digest": plan.get("workspace_map", {}).get("workspace_map_digest"),
+        "outputs": {
+            path.as_posix(): hashlib.sha256(payload).hexdigest()
+            for path, payload in sorted(outputs.items(), key=lambda item: item[0].as_posix())
+        },
+        "generated": True,
+        "authoritative": False,
+        "pass_credit": False,
+    }
+    outputs[_DOCUMENTATION_MANIFEST_FILE] = _json_bytes({
+        **manifest_identity,
+        "manifest_digest": digest_value(manifest_identity),
+    })
+    return outputs
+
+
+def _build_snapshot(plan: Mapping[str, Any], manifest: Mapping[str, Any], unit_states: Mapping[str, Any], portable: Mapping[Path, bytes]) -> dict[str, Any]:
+    identity = {
+        "record_type": "DocumentationSnapshot", "algorithm": "git-objects-plus-dirty-overlay-or-cached-merkle",
+        "plan_digest": plan.get("plan_digest"), "workspace_map_digest": plan.get("workspace_map", {}).get("workspace_map_digest"),
+        "repository_content_digest": manifest.get("repository_content_digest"), "repository_identity_kind": manifest.get("kind"),
+        "units": unit_states,
+        "portable_outputs": {path.as_posix(): hashlib.sha256(payload).hexdigest() for path, payload in sorted(portable.items(), key=lambda item: item[0].as_posix())},
+        "authority": False, "pass_credit": False,
+    }
+    return {**identity, "documentation_snapshot_digest": digest_value(identity)}
+
+
+def _reference_records(
+    root: Path,
+    plan: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    summaries: Mapping[str, str],
+    portable: Mapping[Path, bytes],
+) -> list[dict[str, Any]]:
+    requested = {str(value) for value in (*plan.get("references", []), *plan.get("work_sources", []))}
+    result: list[dict[str, Any]] = []
+    used = 0
+    for item in manifest.get("records", []):
+        if not isinstance(item, Mapping):
+            continue
+        relative = str(item.get("path", ""))
+        name = PurePosixPath(relative).name.casefold()
+        if name not in _DOC_NAMES and name not in _MANIFEST_NAMES and relative not in requested:
+            continue
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in raw or len(raw) > _MAX_REFERENCE_RECORD_BYTES or used + len(raw) > _MAX_REFERENCE_TOTAL_BYTES:
+            continue
+        used += len(raw)
+        result.append({
+            "record_id": f"file:{relative}", "unit_id": item.get("unit_id"), "path": relative,
+            "kind": "project-reference" if relative in requested or name in _DOC_NAMES else "technology-manifest",
+            "title": PurePosixPath(relative).name, "content": raw.decode("utf-8", errors="replace"),
+            "source_sha256": hashlib.sha256(raw).hexdigest(), "trust_class": "untrusted-project-source",
+        })
+        if len(result) >= _MAX_REFERENCE_RECORDS:
+            break
+    for relative, payload in sorted(portable.items(), key=lambda item: item[0].as_posix()):
+        if relative.suffix.casefold() not in {".md", ".json"}:
+            continue
+        if used + len(payload) > _MAX_REFERENCE_TOTAL_BYTES:
+            break
+        used += len(payload)
+        result.append({
+            "record_id": f"portable:{relative.as_posix()}",
+            "unit_id": None,
+            "path": relative.as_posix(),
+            "kind": "portable-project-context",
+            "title": relative.name,
+            "content": payload.decode("utf-8", errors="replace"),
+            "source_sha256": hashlib.sha256(payload).hexdigest(),
+            "trust_class": "generated-non-authoritative",
+        })
+        if len(result) >= _MAX_REFERENCE_RECORDS:
+            return result
+
+    for unit_id, summary in summaries.items():
+        if len(result) >= _MAX_REFERENCE_RECORDS:
+            break
+        payload = summary.encode("utf-8")
+        if used + len(payload) > _MAX_REFERENCE_TOTAL_BYTES:
+            break
+        used += len(payload)
+        result.append({
+            "record_id": f"unit-summary:{unit_id}", "unit_id": unit_id,
+            "path": f".promin/generated/documentation/units/{unit_id}.md", "kind": "generated-navigation",
+            "title": f"workspace unit {unit_id}", "content": summary,
+            "source_sha256": hashlib.sha256(payload).hexdigest(), "trust_class": "generated-non-authoritative",
+        })
+    return result
+
+
+def _calculate(project_root: Path | str, plan: Mapping[str, Any]) -> tuple[Path, dict[str, Any], dict[str, str], dict[str, Any], dict[Path, bytes], dict[str, Any]]:
+    root = Path(project_root).resolve()
+    workspace = plan.get("workspace_map", {})
+    manifest = repository_content_manifest(root, workspace)
+    requested = {str(value) for value in (*plan.get("references", []), *plan.get("work_sources", []))}
+    summaries: dict[str, str] = {}
+    states: dict[str, Any] = {}
+    for unit in workspace.get("units", []):
+        if not isinstance(unit, Mapping):
+            continue
+        unit_id = str(unit.get("unit_id", "unit"))
+        records = _unit_records(manifest, unit_id)
+        source_digest = _unit_source_digest(unit, records)
+        summary = _unit_summary(unit, records, source_digest, requested)
+        summaries[unit_id] = summary
+        states[unit_id] = {
+            "path": unit.get("path"), "kind": unit.get("kind"), "source_digest": source_digest,
+            "summary_path": (_GENERATED / "units" / f"{unit_id}.md").as_posix(),
+            "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(), "file_count": len(records),
+        }
+    portable = _expected_portable(root, plan, manifest)
+    snapshot = _build_snapshot(plan, manifest, states, portable)
+    return root, manifest, summaries, states, portable, snapshot
+
+
+def documentation_status(project_root: Path | str, plan: Mapping[str, Any] | None) -> dict[str, Any]:
+    if plan is None:
+        return {"record_type": "DocumentationStatus", "status": "uninitialized", "stale_units": [], "authority": False, "pass_credit": False}
+    root, manifest, summaries, states, portable, snapshot = _calculate(project_root, plan)
+    previous = _load_json(root / _STATE_FILE)
+    stale_units = []
+    for unit_id, state in states.items():
+        path = root / state["summary_path"]
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None
+        prior = previous.get("units", {}).get(unit_id) if isinstance(previous, Mapping) else None
+        if not isinstance(prior, Mapping) or prior.get("source_digest") != state["source_digest"] or actual != state["summary_sha256"]:
+            stale_units.append(unit_id)
+    stale_paths = []
+    for relative, payload in portable.items():
+        path = root / relative
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None
+        if actual != hashlib.sha256(payload).hexdigest():
+            stale_paths.append(relative.as_posix())
+    if previous is None or previous.get("documentation_snapshot_digest") != snapshot["documentation_snapshot_digest"]:
+        stale_paths.append(_STATE_FILE.as_posix())
+    return {
+        "record_type": "DocumentationStatus", "status": "stale" if stale_units or stale_paths else "current",
+        "stale_units": sorted(stale_units), "stale_paths": sorted(set(stale_paths)), "unit_count": len(states),
+        "repository_content_digest": manifest.get("repository_content_digest"), "repository_identity_kind": manifest.get("kind"),
+        "repair_command": "promin refresh", "authority": False, "pass_credit": False,
+    }
+
+
+def sync_documentation(project_root: Path | str, plan: Mapping[str, Any], *, apply: bool = True) -> dict[str, Any]:
+    root, manifest, summaries, states, portable, snapshot = _calculate(project_root, plan)
+    previous = _load_json(root / _STATE_FILE) or {}
+    previous_units = previous.get("units", {}) if isinstance(previous.get("units"), dict) else {}
+    changed_units: list[str] = []
+    written: list[str] = []
+    expected_summary_paths: set[Path] = set()
+
+    for unit_id, summary in summaries.items():
+        relative = _GENERATED / "units" / f"{unit_id}.md"
+        expected_summary_paths.add(relative)
+        path = root / relative
+        expected_sha = states[unit_id]["summary_sha256"]
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None
+        prior = previous_units.get(unit_id) if isinstance(previous_units.get(unit_id), Mapping) else {}
+        if prior.get("source_digest") != states[unit_id]["source_digest"] or actual != expected_sha:
+            changed_units.append(unit_id)
+            if apply:
+                _atomic_text(path, summary)
+            written.append(relative.as_posix())
+
+    removed: list[str] = []
+    units_dir = root / _GENERATED / "units"
+    if units_dir.is_dir() and not units_dir.is_symlink():
+        for old in units_dir.glob("*.md"):
+            relative = old.relative_to(root)
+            if relative not in expected_summary_paths:
+                if apply:
+                    old.unlink()
+                removed.append(relative.as_posix())
+
+    for relative, payload in sorted(portable.items(), key=lambda item: item[0].as_posix()):
+        path = root / relative
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() and not path.is_symlink() else None
+        if actual != hashlib.sha256(payload).hexdigest():
+            if apply:
+                _atomic_bytes(path, payload)
+            written.append(relative.as_posix())
+    if apply:
+        _atomic_json(root / _STATE_FILE, snapshot)
+    written.append(_STATE_FILE.as_posix()) if previous.get("documentation_snapshot_digest") != snapshot["documentation_snapshot_digest"] else None
+
+    refs = _reference_records(root, plan, manifest, summaries, portable)
+    entry = portable[_ENTRY_FILE].decode("utf-8")
+    return {
+        "record_type": "DocumentationSyncResult",
+        "status": "updated" if written or removed else "current" if apply else "planned",
+        "changed_units": sorted(changed_units), "unit_count": len(states), "written": sorted(set(written)), "removed": sorted(removed),
+        "repository_content_digest": manifest.get("repository_content_digest"), "repository_identity_kind": manifest.get("kind"),
+        "repository_manifest_file_count": len(manifest.get("records", [])), "repository_manifest_truncated": bool(manifest.get("truncated")),
+        "agent_entry_bytes": len(entry.encode("utf-8")), "agent_entry_estimated_tokens": estimate_tokens(entry),
+        "unit_summary_bytes": sum(len(value.encode("utf-8")) for value in summaries.values()),
+        "portable_documentation_bytes": sum(len(payload) for payload in portable.values()),
+        "reference_record_count": len(refs), "reference_records": refs,
+        "documentation_snapshot_digest": snapshot["documentation_snapshot_digest"],
+        "full_content_scan": manifest.get("kind") != "git-objects-plus-working-overlay",
+        "authority": False, "pass_credit": False,
+    }

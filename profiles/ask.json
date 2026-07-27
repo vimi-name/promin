@@ -1,0 +1,15 @@
+{
+  "authority_effect": "none",
+  "category": "autonomy",
+  "defaults": {
+    "autonomy": "ask"
+  },
+  "detect": [],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "profile_id": "ask",
+  "purpose": "Ask before mutating or material actions",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

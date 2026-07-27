@@ -1,0 +1,15 @@
+{
+  "project": {
+    "goal": "Describe the result that matters.",
+    "success_criteria": [],
+    "constraints": [],
+    "non_goals": [],
+    "references": [],
+    "backlog": null
+  },
+  "preferences": {
+    "autonomy": "safe-auto",
+    "language": "auto",
+    "profile_overrides": []
+  }
+}

@@ -1,0 +1,868 @@
+{
+  "derived_result_contracts": {
+    "DoctorResult": {
+      "archival_diagnostics_effect": "none",
+      "claim_scope": "runtime-health-only",
+      "component_status_values": [
+        "healthy",
+        "degraded",
+        "failed",
+        "incomplete"
+      ],
+      "current_components": [
+        "core",
+        "init",
+        "providers",
+        "recovery",
+        "replay",
+        "projection"
+      ],
+      "forbidden_allocation_scopes": [
+        "batch",
+        "goal",
+        "per-run",
+        "session",
+        "workspace"
+      ],
+      "forbidden_metric_families": [
+        "cost",
+        "token",
+        "usage"
+      ],
+      "live_only": true,
+      "metrics": [
+        "core_artifacts_verified",
+        "event_batches",
+        "init_records_verified",
+        "projection_entities",
+        "projection_relations",
+        "provider_healthchecks_executed"
+      ],
+      "pass_credit": false,
+      "product_acceptance_pass": false,
+      "product_public_approval": "not_approved",
+      "product_tree_scans": 0,
+      "report_authoritative": false,
+      "rollup_precedence": [
+        "failed",
+        "incomplete",
+        "degraded",
+        "healthy"
+      ],
+      "source_scope": "installed-core-and-live-operational-state-only"
+    },
+    "OperationMetrics": {
+      "authoritative": false,
+      "claim_scope": "single-command-observation-only",
+      "forbidden_allocation_scopes": [
+        "batch",
+        "goal",
+        "per-run",
+        "session",
+        "workspace"
+      ],
+      "forbidden_metric_families": [
+        "cost",
+        "token",
+        "usage"
+      ],
+      "live_only": true,
+      "metric_groups": [
+        "duration_ms",
+        "changed_records",
+        "event_write",
+        "projection_update",
+        "runtime_checkpoint",
+        "physical_payload_bytes",
+        "bytes_per_changed_record"
+      ]
+    },
+    "ReadyFrontier": {
+      "blocking_finding_statuses": [
+        "OPEN"
+      ],
+      "cycle": "reject",
+      "dependency_relation_kind": "DEPENDS_ON",
+      "eligible_task_state": "READY",
+      "gate_currentness_bindings": [
+        "activation_digest",
+        "candidate_digest",
+        "definition_digest"
+      ],
+      "gate_outcome": "pass",
+      "gate_pass_credit": true,
+      "live_only": true,
+      "ordering": [
+        "created_at-ascending",
+        "task_id-ascending"
+      ],
+      "projection_authoritative": false,
+      "required_dependency_state": "COMPLETED",
+      "silent_truncation": false
+    },
+    "RetrievalPage": {
+      "canonical_cursor_fields": [
+        "stream_cursor",
+        "next_stream_cursor"
+      ],
+      "forbidden_compatibility_fields": [
+        "seed_cursor",
+        "next_seed_cursor"
+      ],
+      "live_only": true,
+      "projection_authoritative": false,
+      "query_bytes_max": 4096,
+      "refinement_hints_max": 8,
+      "silent_truncation": false
+    },
+    "WorkCardProjection": {
+      "continuation_exposed": false,
+      "live_only": true,
+      "projection_authoritative": false,
+      "selected_task_only": true
+    }
+  },
+  "document": "promin.policy-set",
+  "function": "Own executable cross-record invariants through stable validator identifiers and no duplicated budget values.",
+  "gate_run_definition_contract": {
+    "artifact_binding_fields": [
+      "artifact_id",
+      "artifact_record_digest",
+      "run_id",
+      "run_digest"
+    ],
+    "artifact_record_digest_rule": "sha256(canonical finalized record with exact artifact and authoritative commit_binding)",
+    "authorization_scope_contract": {
+      "all_selector": "reject",
+      "allowed_extra_kinds": [
+        "project",
+        "task"
+      ],
+      "lease_bound_task_selector_required": true,
+      "project_items_max": 1,
+      "target_scope_relation": "subset",
+      "task_items_max": 1,
+      "task_value_rule": "GateResult.task_id",
+      "unrelated_selector": "reject"
+    },
+    "command_binding": "CommandRequest.definition_digest equals the immutable GateRunDefinition digest and the payload definition_digest",
+    "definition_change": "reject after Task creation; define a new Task identity for changed requirements",
+    "definition_digest_rule": "sha256(canonical GateRunDefinition)",
+    "definition_owner": "Task.gate_run_definitions",
+    "definition_provenance_fields": [
+      "owner_kind",
+      "owner_digest",
+      "defined_at_head_digest"
+    ],
+    "evidence_class_purpose_pairs": {
+      "diagnostic": [
+        "validator"
+      ],
+      "gate": [
+        "validator",
+        "product-execution"
+      ],
+      "product": [
+        "product-execution"
+      ]
+    },
+    "expected_owner_fields": [
+      "expected_evidence_class",
+      "expected_evidence_purpose",
+      "product_credit_required",
+      "target_kind",
+      "target_digest",
+      "target_scope",
+      "candidate_digest",
+      "policy_digest",
+      "tool_digest",
+      "implementation_closure_digest",
+      "provider_binding_digest",
+      "input_digests"
+    ],
+    "implementation_closure_binding_rule": "GateRunDefinition, Run, and every exact bound Artifact EvidenceBinding carry the same implementation_closure_digest",
+    "inline_definition_submission": "reject",
+    "mixed_evidence_classes": "reject",
+    "payload_digest_as_artifact_record_binding": "forbidden",
+    "persistence": "immutable-definition-input",
+    "product_credit_required_rule": "true requires the product purpose and product-execution class; false may use any declared evidence class-purpose pair",
+    "provider_binding_digest_rule": "sha256(canonical installed provider-binding evidence array); actual ProviderInvocationEvidence records remain exact immutable Artifact inputs and are independently validated against the active provider bindings when present",
+    "run_binding_rule": "GateResult.run_id and run_digest and every GateEvidenceArtifactBinding.run_id and run_digest bind the exact canonical Run record",
+    "status_outcome_rules": {
+      "blocked": {
+        "evidence_binding": "required",
+        "outcome": "blocked",
+        "pass_credit": false,
+        "reason": "required"
+      },
+      "fail": {
+        "evidence_binding": "required",
+        "outcome": "fail",
+        "pass_credit": false,
+        "reason": "optional"
+      },
+      "pass": {
+        "diagnostic_pass_with_no_credit": true,
+        "evidence_binding": "required",
+        "outcome": "pass",
+        "pass_credit_rule": "true only when definition product_credit_required is true and every exact bound Artifact is fresh, resolved, passing, product-execution evidence"
+      },
+      "skipped": {
+        "evidence_binding": "forbidden",
+        "outcome": "skipped",
+        "pass_credit": false,
+        "reason": "required"
+      }
+    },
+    "submitted_artifacts_define_expectations": false,
+    "target_binding_rule": "candidate target_digest equals candidate_digest; finding target_digest is the immutable exact OPEN Finding record digest captured at definition time and is not recomputed from later mutable Finding state",
+    "task_binding": "GateResult.task_id and definition_digest resolve one exact embedded Task definition",
+    "task_owner_digest_rule": "sha256(canonical immutable Task fields excluding state and gate_run_definitions)"
+  },
+  "optimization_gate": {
+    "base_predicate": "NetValue>0",
+    "formula": "NetValue=3*RiskReduction+2*AutomationGain+1.5*QueryabilityGain+ReuseGain-1.5*ImplementationCost-2*MaintenanceCost-2*CognitiveNoise-1.5*ReferenceCost-MigrationCost",
+    "stress_predicate": "NetValue remains >0 when benefits decrease 20 percent and costs increase 20 percent"
+  },
+  "policies": [
+    {
+      "id": "P-001",
+      "name": "no-false-success",
+      "severity": "P0",
+      "statement": "Gate pass credit is true exactly when normalized status is pass and every required gate passes.",
+      "validator_id": "no_false_success"
+    },
+    {
+      "id": "P-002",
+      "name": "activation-binding",
+      "severity": "P0",
+      "statement": "Every authoritative record binds the exact active Core, preset, init, and profile configuration.",
+      "validator_id": "activation_binding"
+    },
+    {
+      "id": "P-003",
+      "name": "grant-validity",
+      "severity": "P0",
+      "statement": "Subject, capability, conjunctive scope, interval, nonce, exact claim digest, proof chain, revocation state, and Activation all match.",
+      "validator_id": "grant_validity"
+    },
+    {
+      "id": "P-004",
+      "name": "lease-fence",
+      "severity": "P0",
+      "statement": "Every mutation uses the current active Lease generation and monotonic fencing token.",
+      "validator_id": "lease_fence"
+    },
+    {
+      "id": "P-005",
+      "name": "candidate-evidence-binding",
+      "severity": "P0",
+      "statement": "Every evidence Artifact requires an explicit diagnostic, gate, or product purpose and binds Activation, candidate, policy, provider/tool, and input digests inside the immutable event payload.",
+      "validator_id": "candidate_evidence_binding"
+    },
+    {
+      "id": "P-006",
+      "name": "atomic-event-commit",
+      "severity": "P0",
+      "statement": "One command produces one immutable batch under lock, compare-head, sync, atomic replace, and recovery.",
+      "validator_id": "atomic_event_commit"
+    },
+    {
+      "id": "P-007",
+      "name": "projection-is-derived",
+      "severity": "P0",
+      "statement": "Projection deletion and deterministic replay cannot change normative meaning.",
+      "validator_id": "projection_derived"
+    },
+    {
+      "id": "P-008",
+      "name": "minimal-graph",
+      "severity": "P1",
+      "statement": "Each verified raw file creates exactly one non-authoritative derived Artifact proxy. Raw inventory creates no Task, READS, or PRODUCES record; Tasks and typed relations require explicit semantic content.",
+      "validator_id": "minimal_graph"
+    },
+    {
+      "id": "P-009",
+      "name": "bounded-workcard",
+      "severity": "P0",
+      "statement": "Every WorkCard stays within both Core hard ceilings and its selected profile byte, entity, relation, fanout, and top-k budgets; every truncation is explicit and losslessly resumable.",
+      "validator_id": "bounded_workcard"
+    },
+    {
+      "id": "P-010",
+      "name": "size-independent-init",
+      "severity": "P0",
+      "statement": "Initialization performs zero product-tree scans and creates exactly five init records.",
+      "validator_id": "zero_scan_init"
+    },
+    {
+      "id": "P-011",
+      "name": "explicit-external-bindings",
+      "severity": "P1",
+      "statement": "External standards and providers exist only in explicit digest-bound init records.",
+      "validator_id": "explicit_bindings"
+    },
+    {
+      "id": "P-012",
+      "name": "canonical-name-only",
+      "severity": "P0",
+      "statement": "The canonical identity is promin; aliases, redirects, and compatibility names are rejected.",
+      "validator_id": "canonical_name"
+    },
+    {
+      "id": "P-013",
+      "name": "safe-export",
+      "severity": "P0",
+      "statement": "Export is allowlisted, recursively bounded, symlink-safe, secret-aware, and path-sanitized.",
+      "validator_id": "safe_export"
+    },
+    {
+      "id": "P-014",
+      "name": "closed-acknowledgement",
+      "severity": "P0",
+      "statement": "Only a valid CLOSED transition with explicit close acknowledgement releases a mutation slot.",
+      "validator_id": "closed_ack"
+    },
+    {
+      "id": "P-015",
+      "name": "fail-closed-critical-fields",
+      "severity": "P0",
+      "statement": "Missing, unknown, stale, downgraded, or unbound critical fields reject before mutation.",
+      "validator_id": "critical_fields"
+    },
+    {
+      "id": "P-016",
+      "name": "preset-capability-ceiling",
+      "severity": "P0",
+      "statement": "A preset may configure provider needs and budgets but cannot grant action authority.",
+      "validator_id": "preset_no_authority"
+    },
+    {
+      "id": "P-017",
+      "name": "single-scan-inventory",
+      "severity": "P1",
+      "statement": "One requested inventory performs at most one full product-tree pass; all projections derive from its stream.",
+      "validator_id": "single_scan"
+    },
+    {
+      "id": "P-018",
+      "name": "idempotent-commands",
+      "severity": "P0",
+      "statement": "A duplicate idempotency key under the same activation and subject returns the original result or a conflict.",
+      "validator_id": "idempotent_commands"
+    },
+    {
+      "id": "P-019",
+      "name": "core-preset-separation",
+      "severity": "P1",
+      "statement": "Core bundle identity excludes replaceable presets; Activation binds the selected preset separately.",
+      "validator_id": "core_preset_separation"
+    },
+    {
+      "id": "P-020",
+      "name": "acyclic-bootstrap-authority",
+      "severity": "P0",
+      "statement": "Init config defines root ceilings, never pre-activation runtime Grants.",
+      "validator_id": "bootstrap_authority"
+    },
+    {
+      "id": "P-021",
+      "name": "normalization-collision-rejection",
+      "severity": "P1",
+      "statement": "Duplicate JSON keys and path or ID collisions after NFC/casefold normalization are rejected.",
+      "validator_id": "normalization_collision"
+    },
+    {
+      "id": "P-022",
+      "name": "provider-substitution-binding",
+      "severity": "P1",
+      "statement": "A provider identity or implementation-closure change invalidates the Activation and every dependent continuation, evidence Artifact, projection, replay result, and current release closure; it never silently changes authority.",
+      "validator_id": "provider_substitution"
+    },
+    {
+      "id": "P-023",
+      "name": "exact-init-keyset",
+      "severity": "P1",
+      "statement": "Activation binds exactly project.json, standards.json, technologies.json, and authority.json.",
+      "validator_id": "exact_init_keyset"
+    },
+    {
+      "id": "P-024",
+      "name": "stale-projection-rejection",
+      "severity": "P1",
+      "statement": "Status, next, and WorkCard generation reject a projection whose source head or activation differs.",
+      "validator_id": "stale_projection"
+    },
+    {
+      "id": "P-025",
+      "name": "one-command-one-batch",
+      "severity": "P0",
+      "statement": "Every committed batch binds exactly one subject, validated command digest, command intent digest, authorization digest, and idempotency key.",
+      "validator_id": "one_command_one_batch"
+    },
+    {
+      "id": "P-026",
+      "name": "deterministic-retrieval",
+      "severity": "P1",
+      "statement": "Ranking ties are deterministic and acceptance-critical facts are added by typed closure, not fuzzy ranking.",
+      "validator_id": "deterministic_retrieval"
+    },
+    {
+      "id": "P-027",
+      "name": "strict-time-order",
+      "severity": "P1",
+      "statement": "Timestamps use canonical UTC seconds and issued, heartbeat, expiry, finish, and decision order is semantically checked.",
+      "validator_id": "strict_time"
+    },
+    {
+      "id": "P-028",
+      "name": "exact-standard-files",
+      "severity": "P1",
+      "statement": "Core and selected preset inputs reject symlinks and unexpected shadow files.",
+      "validator_id": "exact_standard_files"
+    },
+    {
+      "id": "P-029",
+      "name": "root-authorization-is-bootstrap-only",
+      "severity": "P0",
+      "statement": "Root command authorization signs one command intent and may issue the first authority.manage Grant only; it cannot execute ordinary project commands.",
+      "validator_id": "root_authorization_limit"
+    },
+    {
+      "id": "P-030",
+      "name": "configuration-exact-idempotency",
+      "severity": "P1",
+      "statement": "Repeated initialization succeeds only when the requested canonical configuration digest exactly equals the existing Activation; otherwise it reports conflict.",
+      "validator_id": "config_exact_idempotency"
+    },
+    {
+      "id": "P-031",
+      "name": "truthful-observability",
+      "severity": "P1",
+      "statement": "A command may report a scan, healthcheck, validation, or durability action only when that action was actually executed and evidence-bound.",
+      "validator_id": "truthful_observability"
+    },
+    {
+      "id": "P-032",
+      "name": "depth-aware-retrieval-budget",
+      "severity": "P1",
+      "statement": "Effective retrieval seed count reserves entity and relation capacity for typed closure at the requested dependency depth; top_k is a ceiling, byte/entity/relation/fanout budgets all remain effective, and no removed or unknown budget field may bypass a ceiling.",
+      "validator_id": "depth_aware_retrieval"
+    },
+    {
+      "id": "P-033",
+      "name": "lease-only-for-mutation",
+      "severity": "P1",
+      "statement": "Mutation WorkCards require the current Lease; read-only WorkCards must not acquire or carry a mutation Lease.",
+      "validator_id": "lease_only_for_mutation"
+    },
+    {
+      "id": "P-034",
+      "name": "command-capability-scope",
+      "severity": "P0",
+      "statement": "Every command resolves to exactly one Core-owned capability; requested scope retains every authorization constraint and explicitly contains every command effect target.",
+      "validator_id": "command_capability_scope"
+    },
+    {
+      "id": "P-035",
+      "name": "grant-issuance-chain",
+      "severity": "P0",
+      "statement": "Every Grant proof binds claim_digest and is either the one bootstrap root issuance, a verified team threshold, or an active authority.manage issuer Grant.",
+      "validator_id": "grant_issuance_chain"
+    },
+    {
+      "id": "P-036",
+      "name": "verified-team-signatures",
+      "severity": "P0",
+      "statement": "Team-signature fields are never valid without threshold evaluation by the signature adapter resolved from the exact technologies binding; process-local injected adapters are explicitly non-reconstructable and cannot prove a cross-process CLI workflow.",
+      "validator_id": "verified_team_signatures"
+    },
+    {
+      "id": "P-037",
+      "name": "provider-preflight-before-activation",
+      "severity": "P1",
+      "statement": "Every required provider identity and healthcheck succeeds before initialization is committed; a declared provider is not evidence of availability.",
+      "validator_id": "provider_preflight"
+    },
+    {
+      "id": "P-038",
+      "name": "canonical-state-machines",
+      "severity": "P0",
+      "statement": "Task and Lease transitions are accepted only by the policy-owned state machines; generated lifecycle views cannot invent transitions.",
+      "validator_id": "state_machine_transition"
+    },
+    {
+      "id": "P-039",
+      "name": "decision-target-binding",
+      "severity": "P0",
+      "statement": "Every Decision names one typed target and the decision kind, requested scope, candidate, and authority are consistent with that target.",
+      "validator_id": "decision_target_binding"
+    },
+    {
+      "id": "P-040",
+      "name": "credit-requires-evidence",
+      "severity": "P0",
+      "statement": "Pass, fail, and blocked gate results cite at least one exact immutable Artifact record reference; skipped results never receive pass credit.",
+      "validator_id": "credit_requires_evidence"
+    },
+    {
+      "id": "P-041",
+      "name": "command-event-correspondence",
+      "severity": "P0",
+      "statement": "One command batch binds the exact authorization claim and contains exactly one primary event equal to the validated command payload; auxiliary events are typed relations only and event IDs are unique.",
+      "validator_id": "command_event_correspondence"
+    },
+    {
+      "id": "P-042",
+      "name": "continuation-authorization-and-completeness",
+      "severity": "P0",
+      "statement": "A continuation is authenticated by a random per-Activation secret and binds the exact subject, projection.read Grant claim, capability, requested scope, revocation state, normalized query, deterministic cursor, Activation, HEAD, projection, ranking, complete budgets, depth, implementation closure, issue time, and expiry; its complete page union emits every reachable entity and relation exactly once without loss.",
+      "validator_id": "continuation_completeness"
+    },
+    {
+      "id": "P-043",
+      "name": "candidate-snapshot-consistency",
+      "severity": "P0",
+      "statement": "The candidate recipe is applied in the single inventory pass; promin v1 permits only provider-proven immutable VCS trees for credit, while best-effort observations are explicit and receive no pass credit.",
+      "validator_id": "candidate_snapshot_consistency"
+    },
+    {
+      "id": "P-044",
+      "name": "provider-adapter-dispatch",
+      "severity": "P0",
+      "statement": "Every technologies.json binding resolves to the adapter actually invoked and carries a recomputed capability-specific implementation closure for the promin runtime, Python interpreter, jsonschema or SQLite component where used, and adapter. Unsupported or drifted tuples reject, and dependent evidence binds the exact implementation_closure_digest.",
+      "validator_id": "provider_adapter_dispatch"
+    },
+    {
+      "id": "P-045",
+      "name": "current-release-closure",
+      "severity": "P0",
+      "statement": "A project-operational release Decision is immutable history; current product release eligibility is derived and becomes false after a blocker, failed gate, stale or missing evidence, implementation drift, or Activation drift. It is separate from the external StandardReleaseDecision for promin distribution.",
+      "validator_id": "current_release_closure"
+    },
+    {
+      "id": "P-046",
+      "name": "finding-disposition-evidence",
+      "severity": "P0",
+      "statement": "Every Finding cites exact immutable Artifact record references. Every resolve or waive Decision cites evidence bound to the exact canonical Finding digest; waiver also requires an exception-policy digest, future expiry, and separation of duties.",
+      "validator_id": "finding_disposition_evidence"
+    },
+    {
+      "id": "P-047",
+      "name": "candidate-delta-scope",
+      "severity": "P0",
+      "statement": "A diff Artifact binds base and new Candidate digests, the exact WorkCard digest, and the complete changed-path set; every changed path is contained by both Task allowed_paths and the authorizing Grant effect scope.",
+      "validator_id": "candidate_delta_scope"
+    },
+    {
+      "id": "P-048",
+      "name": "verified-state-checkpoint",
+      "severity": "P1",
+      "statement": "Events remain the sole authority. A normal command appends O(batch), incrementally updates changed projection rows/shards, and advances a verified bounded replay tail. Full derived-state compaction occurs only after declared batch/byte thresholds or explicit recovery, publishes crash-safely against exact HEAD, and missing, stale, or corrupt checkpoints require full verified fallback with equal semantic digest.",
+      "validator_id": "verified_state_checkpoint"
+    },
+    {
+      "id": "P-049",
+      "name": "profile-default-depth",
+      "severity": "P1",
+      "statement": "A profile default_dependency_depth applies only when depth is omitted; explicit depth is accepted through the single Core dependency_depth_hard_max of 12 and remains subject to all retrieval budgets.",
+      "validator_id": "profile_default_depth"
+    },
+    {
+      "id": "P-050",
+      "name": "canonical-distribution-archive",
+      "severity": "P0",
+      "statement": "The sole package builder emits immutable candidate bytes and an external StandardReleaseCandidateBinding. VERSION.json describes SemVer and package identity only; approval is derived later and never changes the candidate ZIP.",
+      "validator_id": "canonical_distribution_archive"
+    },
+    {
+      "id": "P-051",
+      "name": "verified-inventory-provenance",
+      "severity": "P0",
+      "statement": "Public rebuild accepts only a verified InventoryResult or its persisted manifest; caller provenance fields are reserved, data_class is forced to untrusted-source, and runtime injects the exact path and digest.",
+      "validator_id": "verified_inventory_provenance"
+    },
+    {
+      "id": "P-052",
+      "name": "supported-command-surface",
+      "severity": "P1",
+      "statement": "The v1 preset advertises exactly init, doctor, status, next, validate, and continue; no optional or administrative command catalogue may claim an absent executable path.",
+      "validator_id": "supported_command_surface"
+    },
+    {
+      "id": "P-053",
+      "name": "profile-bound-scale",
+      "severity": "P0",
+      "statement": "Physical 100k evidence binds content-addressed raw inventory, query, continuation, process-sample, phase-log, and operation-metric artifacts for at least 198999 explicitly recorded Core-valid typed Relations and a representative mixed workload. The verifier recomputes every summary and fails closed on truthful process/invocation status, commit p95/p99, bytes per changed record, checkpoint count, semantic-ingestion time, search latency, incremental inventory memory amplification, absolute peak RSS, database bytes, projection amplification, semantic inflation, continuation completeness, or traversal-pass ceiling.",
+      "validator_id": "profile_bound_scale"
+    },
+    {
+      "id": "P-054",
+      "name": "cross-platform-release-evidence",
+      "severity": "P0",
+      "statement": "The exact candidate ZIP must pass authenticated Windows and Linux platform observations, clean-install, package, handle-relative path/race, locking, crash, replay, physical scale, offline installed no-degradation, online compatibility, dependency/SBOM/RECORD/license closure, and typed PDF gates. One StandardReleaseEvidenceManifest physically resolves exactly seven unique authority roles, the exact non-authoritative eight-lane CPython 3.13/3.14 online/offline matrix, all four CPython 3.14 supplemental records, and every nested physical record by path, SHA-256, and byte count. All producer attestations bind the same candidate and participate in one replay/SOD/chronology graph; matrix_authoritative, pass_credit, acceptance_pass, product_acceptance_pass, and public approval remain false.",
+      "validator_id": "cross_platform_release"
+    },
+    {
+      "id": "P-055",
+      "name": "standard-release-separation",
+      "severity": "P0",
+      "statement": "An external StandardReleaseDecision has explicit approve or reject outcome, binds candidate and evidence manifest digests, follows the manifest-derived maximum evidence completion time, stays within 300 seconds of verifier clock skew, and verifies decider, standard.distribute capability, independently pinned trust root, Ed25519 provider, event-time key validity, nonce, signed claim digest, and signature. The signed decision remains immutable history; current eligibility is derived; product_acceptance_pass is false and product_public_approval is not_approved.",
+      "validator_id": "standard_release_separation"
+    },
+    {
+      "id": "P-056",
+      "name": "required-gates-fail-closed",
+      "severity": "P0",
+      "statement": "No-degradation runs the complete required suite only through the clean installed interpreter outside the install source, with isolated mode, cleared PYTHONPATH, import-origin assertion, zero skipped tests, and full hash-bound JUnit/stdout/stderr bytes. Distribution acceptance executes every required positive, mutation, concurrency, crash, replay, path, package, platform, Python-minor, offline/online, scale, search, PDF, evidence-resolution, chronology, and signature gate; a skipped, missing, stale, blocked, failed, unsigned, unresolved, source-shadowed, or unpinned gate receives no pass credit.",
+      "validator_id": "required_gates_fail_closed"
+    },
+    {
+      "id": "P-057",
+      "name": "research-draft-sanitation",
+      "severity": "P0",
+      "statement": "Research crosses into normative owners only through the non-persistent MIGRATE_FACTS_NOT_FILES intake: every cited source is digest- and license-plan-bound, citation-required claims cite allowed sources or remain blocked with a reason, and marketing, proof, distribution, acceptance, or public-approval claims cannot become normative text.",
+      "validator_id": "research_draft_sanitation"
+    },
+    {
+      "id": "P-058",
+      "name": "doctor-result-is-live-non-authority",
+      "severity": "P0",
+      "statement": "DoctorResult is an exact live-only derived health report with report_authoritative=false, pass_credit=false, product_acceptance_pass=false, product_public_approval=not_approved, zero product scans, and only its Core-owned operational metrics; token, cost, usage, and goal/session/batch/workspace/per-run allocation are forbidden.",
+      "validator_id": "doctor_result_non_authority"
+    },
+    {
+      "id": "P-059",
+      "name": "semantic-inheritance-is-structural",
+      "severity": "P0",
+      "statement": "The compiled projection preserves the complete SemanticModel owner: admission, five independent granularities, promotion rules, exact entity purposes and admission rules, exact relation domain/range/rules, and structured provider forbidden boundaries.",
+      "validator_id": "semantic_inheritance"
+    },
+    {
+      "id": "P-060",
+      "name": "authority-owner-is-structural",
+      "severity": "P0",
+      "statement": "AuthorityModel is the single owner of the capability catalogue, delegation depth, and exact separation-of-duty pairs; runtime policy may derive from that Activation-bound owner but may not substitute hardcoded authority facts.",
+      "validator_id": "authority_owner"
+    },
+    {
+      "id": "P-061",
+      "name": "gate-run-definition-is-independent",
+      "severity": "P0",
+      "statement": "An immutable GateRunDefinition independently owns the expected evidence class, product-credit requirement, exact target scope, and candidate, policy, tool, provider, and input digests. A run or gate command binds its exact definition digest before submitted Artifacts are evaluated.",
+      "validator_id": "gate_run_definition_integrity"
+    },
+    {
+      "id": "P-062",
+      "name": "authority-runtime-policy-is-derived-live-only",
+      "severity": "P0",
+      "statement": "AuthorityRuntimePolicy is rebuilt from the installed AuthorityModel for every mutation and replay, binds the exact owner digest, ordered capability IDs, structured separation-of-duty rules and delegation ceiling, and is never persisted or imported as authority.",
+      "validator_id": "authority_runtime_policy_projection"
+    },
+    {
+      "id": "P-063",
+      "name": "semantic-export-is-export-only",
+      "severity": "P0",
+      "statement": "SemanticExport is a strict bounded export-only semantic-state record binding the exact Candidate, Activation, HEAD, Core, preset, implementation closure, providers, inputs, and output. It is neither a package nor archive and cannot carry product acceptance, pass credit, public approval, or release approval.",
+      "validator_id": "semantic_export_integrity"
+    },
+    {
+      "id": "P-064",
+      "name": "operation-metrics-are-live-observations",
+      "severity": "P0",
+      "statement": "OperationMetrics is a strict live-only non-authoritative observation for one command. It permits only Core-owned duration, changed-record, write, projection, checkpoint, and physical-byte fields and forbids token, cost, usage, and goal/session/batch/workspace/per-run allocation.",
+      "validator_id": "operation_metrics_non_authority"
+    },
+    {
+      "id": "P-065",
+      "name": "workcard-projection-is-v2-live-only",
+      "severity": "P0",
+      "statement": "RetrievalPage is the strict bounded live-only v2 retrieval result and exclusively owns stream_cursor, next_stream_cursor, and retrieval continuation. WorkCardProjection is internal selected-Task materialization and exposes no continuation or cursor fields.",
+      "validator_id": "workcard_projection_v2"
+    },
+    {
+      "id": "P-066",
+      "name": "event-store-policy-is-derived-live-only",
+      "severity": "P0",
+      "statement": "EventStorePolicy is rebuilt from the installed AuthorityModel before normalization, mutation, and replay. It binds exact command and batch bounds, envelope and commitment fields, lease-bound commands and states, primary-event mapping, and UTC-second timestamps, with no defaults or nullable critical fields.",
+      "validator_id": "event_store_policy_projection"
+    },
+    {
+      "id": "P-067",
+      "name": "depends-on-graph-is-acyclic",
+      "severity": "P0",
+      "statement": "Every command, import, replay, and rebuild rejects a DEPENDS_ON cycle. Relation domain and range validity alone cannot admit a cyclic dependency graph.",
+      "validator_id": "dependency_graph_acyclicity"
+    },
+    {
+      "id": "P-068",
+      "name": "ready-frontier-is-current-derived-state",
+      "severity": "P0",
+      "statement": "ReadyFrontier is derived live-only from the current acyclic DEPENDS_ON graph. A READY Task is returned only after every dependency is currently COMPLETED, every required GateResult is current passing credit, and no current OPEN Finding blocks it; ordering and continuation are deterministic and truncation is explicit.",
+      "validator_id": "ready_frontier_projection"
+    }
+  ],
+  "record_type": "PolicySet",
+  "research_draft_sanitation": {
+    "allowed_license_disposition": "allowed",
+    "canonical_bytes_max": 1048576,
+    "citation_required_rule": "source-refs-or-blocked-with-reason",
+    "claim_digest_rule": "sha256(canonical complete claim excluding claim_digest and derived normative_use_allowed)",
+    "claim_kinds": [
+      "research_question",
+      "hypothesis",
+      "assumption",
+      "evidence_claim",
+      "blocked_claim"
+    ],
+    "evidence_reference_rule": "citation_refs identify research sources; evidence_refs identify independently resolved Artifact records; the sets are semantically distinct",
+    "forbidden_normative_claim_classes": [
+      "distribution",
+      "marketing",
+      "proof"
+    ],
+    "forbidden_requested_flag_mutations": [
+      "acceptance_pass",
+      "pass_credit",
+      "product_acceptance_pass",
+      "product_public_approval",
+      "public_release_approved"
+    ],
+    "metadata_only_rule": "missing payload receipt is representable only by source_mode metadata-only and every referencing claim remains blocked, non-authoritative, and normative_use_allowed=false",
+    "migration_rule": "MIGRATE_FACTS_NOT_FILES",
+    "normative_candidate_rule": "only a source-bound or verified evidence_claim classified fact with eligible citations and resolved evidence_refs may become a sanitized normative candidate",
+    "persistence": "transient-ingress-only",
+    "result_flags": {
+      "pass_credit": false,
+      "product_acceptance_pass": false,
+      "product_public_approval": "not_approved",
+      "public_release_approved": false
+    },
+    "result_persistence": "derived-live-only",
+    "result_record_type": "SanitizedResearchDraft",
+    "source_binding": "source-id+trusted-source-locator+provenance-digest+artifact-id+artifact-record-digest+recomputed-content-digest+size+media-type+active-license-plan-digest",
+    "source_license_rule": "allowed only when the active LicensesPlan binding review_state is reviewed or source-verified",
+    "source_payload_bytes_max": 16777216,
+    "source_payload_total_bytes_max": 67108864,
+    "verification_statuses": [
+      "unverified",
+      "source-bound",
+      "verified",
+      "blocked"
+    ]
+  },
+  "schema_ref": "urn:promin:contracts:1#/$defs/PolicySet",
+  "semantic_export_contract": {
+    "export_kind": "semantic-state",
+    "input_digests_max": 128,
+    "input_digests_rule": "sorted unique sha256(canonical exported record) values for the exact replay-derived record set",
+    "output_artifact_kind": "evidence",
+    "output_artifact_record_digest_rule": "sha256(canonical finalized record with exact artifact and authoritative commit_binding)",
+    "output_bytes_max": 1073741824,
+    "output_bytes_rule": "exact canonical SemanticStatePayload bytes stored in content-addressed storage",
+    "output_media_type": "application/vnd.promin.semantic-state+json",
+    "output_record_type": "SemanticStatePayload",
+    "output_records_max": 400000,
+    "package_or_archive": false,
+    "persistence": "export-only",
+    "product_flags": {
+      "pass_credit": false,
+      "product_acceptance_pass": false,
+      "product_public_approval": "not_approved",
+      "public_release_approved": false
+    },
+    "record_order": "record-digest-ascending after exact digest deduplication",
+    "required_bindings": [
+      "candidate_digest",
+      "activation_digest",
+      "head_event_id",
+      "head_sequence",
+      "head_digest",
+      "core_bundle_digest",
+      "preset_digest",
+      "implementation_closure_digest",
+      "provider_binding_digest",
+      "input_digests",
+      "output_artifact_id",
+      "output_artifact_record_digest",
+      "output_digest",
+      "output_size_bytes",
+      "output_media_type"
+    ]
+  },
+  "state_machines": {
+    "capacity_release": {
+      "closed_release": {
+        "requires_field": "close_ack",
+        "slot_reusable": true,
+        "state": "CLOSED"
+      },
+      "terminal_reconciliation": {
+        "fencing_token_binding": "exact-lease-fencing-token",
+        "field": "capacity_reconciliation",
+        "generation_binding": "exact-lease-generation",
+        "manager_capability": "lease.manage",
+        "required_fields": [
+          "reconciled_by",
+          "grant_id",
+          "grant_claim_digest",
+          "reconciled_at",
+          "generation",
+          "fencing_token"
+        ],
+        "slot_reusable_after_record": true,
+        "states": [
+          "EXPIRED",
+          "REVOKED"
+        ]
+      },
+      "unreconciled_slot_reusable": false
+    },
+    "lease": {
+      "ACTIVE": [
+        "CLOSING",
+        "EXPIRED",
+        "REVOKED"
+      ],
+      "CLOSED": [],
+      "CLOSING": [
+        "CLOSED",
+        "EXPIRED",
+        "REVOKED"
+      ],
+      "EXPIRED": [],
+      "REVOKED": []
+    },
+    "task": {
+      "BLOCKED": [
+        "READY",
+        "CANCELLED"
+      ],
+      "CANCELLED": [],
+      "COMPLETED": [],
+      "LEASED": [
+        "RUNNING",
+        "READY",
+        "BLOCKED",
+        "CANCELLED"
+      ],
+      "PLANNED": [
+        "READY",
+        "BLOCKED",
+        "CANCELLED"
+      ],
+      "READY": [
+        "LEASED",
+        "BLOCKED",
+        "CANCELLED"
+      ],
+      "RUNNING": [
+        "COMPLETED",
+        "BLOCKED",
+        "CANCELLED"
+      ]
+    }
+  },
+  "validator_registry_version": 1,
+  "version": "1.0.0-alpha.1"
+}

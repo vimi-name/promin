@@ -1,0 +1,15 @@
+{
+  "canonical_name": "promin",
+  "core_bundle_digest": "add3c0dd8891f154ad9f772dcc190d7c596c6b25f13ddc126f38ec3b15137a50",
+  "integrity": {
+    "archive_sha256": "external",
+    "checksums": "SHA256SUMS.txt",
+    "manifest": "MANIFEST.json"
+  },
+  "record_type": "StandardVersion",
+  "selected_preset": {
+    "path": "presets/semantic-morok-tower.json",
+    "sha256": "306746fcef30ca96ad88f11b3e53e855c956fdd55af33e942e65f9edaf6a924a"
+  },
+  "version": "1.0.0-alpha.1"
+}

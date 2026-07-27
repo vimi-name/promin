@@ -1,0 +1,17 @@
+{
+  "authority_effect": "none",
+  "category": "base",
+  "defaults": {
+    "bounded_context": true,
+    "incremental_validation": true,
+    "single_source_of_truth": true
+  },
+  "detect": [],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "profile_id": "general-development",
+  "purpose": "General evidence-first software development",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

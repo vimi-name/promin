@@ -1,0 +1,934 @@
+{
+  "admission": {
+    "derived_by_default": "Each raw inventory file yields exactly one derived Artifact proxy. Raw-file proxies never create a persistent Task or relation; persistence still requires an independent invariant.",
+    "entity": "EntityUtility=QueriesEnabled+RulesEnabled+AutomationEnabled-StorageCost-MaintenanceCost-NavigationNoise > 0",
+    "relation": "RelationUtility=QueriesEnabled+RulesEnabled+SchedulingGain-WriteCost-FanoutNoise-Ambiguity > 0"
+  },
+  "derived_projection_kinds": [
+    "InventoryEntry",
+    "SearchDocument",
+    "InventoryProjectionRow",
+    "ProjectionLimits",
+    "RetrievalPage",
+    "ReadyFrontier",
+    "WorkCardProjection",
+    "WorkCard",
+    "NextResult",
+    "ContinueResult",
+    "NavigationView",
+    "StateCheckpoint",
+    "CurrentReleaseStatus",
+    "DoctorResult",
+    "OperationMetrics",
+    "Report"
+  ],
+  "design_rules": {
+    "artifact_subtypes": {
+      "candidate-delta": "An Artifact with kind diff binds one base Candidate, one new Candidate, one WorkCard, and the complete normalized changed-path set.",
+      "evidence": "An evidence Artifact binds exact Candidate, policy, tool, inputs, and every invoked provider adapter; Finding disposition evidence additionally binds the canonical Finding digest."
+    },
+    "candidate_consistency": {
+      "creditable": "Only an immutable-vcs-tree provider may produce a creditable Candidate in promin v1.",
+      "observational": "A best-effort filesystem observation is explicit, non-creditable, and cannot receive product or release pass credit.",
+      "recipe_binding": "Candidate identity binds the exact candidate_recipe digest, including include, exclude, path identity, collision, and symlink rules."
+    },
+    "granularities_are_independent": [
+      "semantic",
+      "public",
+      "compilation",
+      "runtime-dispatch",
+      "documentation"
+    ],
+    "implementation_closure": {
+      "activation_binding": "Activation binds the aggregate digest of every capability-specific implementation closure.",
+      "binding_shape": "Each TechnologiesInit binding carries runtime, interpreter, zero or more capability components, exactly one matching adapter, and a recomputed closure_digest.",
+      "required_components": {
+        "control-runtime": [
+          "promin-runtime",
+          "python-interpreter"
+        ],
+        "query-projection": [
+          "promin-runtime",
+          "python-interpreter",
+          "sqlite"
+        ],
+        "shape-validation": [
+          "promin-runtime",
+          "python-interpreter",
+          "jsonschema"
+        ]
+      },
+      "stale_rule": "A runtime, interpreter, component, adapter, or closure digest change invalidates the Activation and every dependent evidence Artifact, projection, continuation, and current release closure."
+    },
+    "inventory_projection": {
+      "current_inventory_persistence": "derived-rebuild-only",
+      "current_inventory_record_type": "CurrentInventory",
+      "data_class": "untrusted-source",
+      "derived_entity_type": "Artifact",
+      "input": "Only a verified InventoryResult or its persisted manifest may enter the public rebuild path.",
+      "input_manifest_persistence": "transient-ingress-only",
+      "input_manifest_record_type": "InventoryInputManifest",
+      "jsonl_row_fields": [
+        "path",
+        "digest",
+        "size",
+        "search_text"
+      ],
+      "one_file_rule": "Each verified raw file produces exactly one InventoryProjectionRow and one deterministic derived Artifact proxy.",
+      "prohibited_derivations": [
+        "Task",
+        "READS",
+        "PRODUCES"
+      ],
+      "reserved_provenance": [
+        "data_class",
+        "inventory_path",
+        "inventory_digest"
+      ],
+      "runtime_owned_fields": [
+        "path",
+        "digest",
+        "size",
+        "inventory_path",
+        "inventory_digest"
+      ],
+      "search_text_rule": "exact NFC-normalized canonical path, UTF-8 bounded by Conformance scale_contracts.inventory.search_text_bytes_max",
+      "stream_artifact_kind": "report",
+      "stream_artifact_record_digest_rule": "sha256(canonical finalized record with exact artifact and authoritative commit_binding)",
+      "stream_media_type": "application/x-ndjson"
+    },
+    "promotion_test": [
+      "independent-invariant",
+      "independent-policy",
+      "replaceability",
+      "measurable-algorithm",
+      "failure-boundary",
+      "reuse",
+      "domain-significance"
+    ],
+    "provider_invocation_evidence": {
+      "diagnostic_capture_bytes_max": 1048576,
+      "diagnostic_capture_fields": [
+        "stdout_capture_digest",
+        "stdout_capture_size_bytes",
+        "stdout_capture_truncated",
+        "stderr_capture_digest",
+        "stderr_capture_size_bytes",
+        "stderr_capture_truncated"
+      ],
+      "full_output_bytes_hard_max": 1099511627776,
+      "full_output_fields": [
+        "output_digest",
+        "output_size_bytes",
+        "output_size_ceiling_bytes"
+      ],
+      "full_output_rule": "output_digest and output_size_bytes cover the complete provider operation output stream; they are never derived from the bounded diagnostic captures",
+      "immutable_tree_stream_rule": "filesystem-inventory immutable-tree-stream digests and counts the complete raw archive stream while stdout/stderr captures remain bounded diagnostics",
+      "invocation_receipt_digest_rule": "sha256(canonical ProviderInvocationEvidence without invocation_receipt_digest)",
+      "invocation_request_digest_rule": "sha256(canonical pre-invocation request receipt binding exact argv or module call, configured cwd, stdin digest, selected output ceiling, environment allowlist, provider identity, dependency receipt, and implementation closure)",
+      "selected_ceiling_rule": "output_size_ceiling_bytes is the exact operation or configured-workspace ceiling selected before invocation, does not exceed full_output_bytes_hard_max, and rejects output_size_bytes above it"
+    },
+    "semantic_objects_default": [
+      "private",
+      "final",
+      "immutable-or-stateless",
+      "no-runtime-dispatch",
+      "no-separate-build-root",
+      "bounded-context-local"
+    ]
+  },
+  "document": "promin.semantic-model",
+  "function": "Own the minimal persistent vocabulary, relation grammar, derived-projection boundary, and provider capability contracts.",
+  "persistent_entities": [
+    {
+      "admission_rule": "independent-scheduling-and-acceptance-boundary",
+      "kind": "Task",
+      "purpose": "Represent one schedulable unit with one acceptance predicate and bounded mutation scope."
+    },
+    {
+      "admission_rule": "independent-candidate-identity-and-consistency-boundary",
+      "kind": "Candidate",
+      "purpose": "Identify either one provider-proven immutable product snapshot or one explicitly non-creditable observation, independently from control state and bound to the exact candidate recipe."
+    },
+    {
+      "admission_rule": "independent-content-identity-provenance-and-retention-boundary",
+      "kind": "Artifact",
+      "purpose": "Identify immutable product, evidence, log, report, or diff bytes with provenance and retention metadata; raw-file inventory produces only derived Artifact proxies, while a diff may carry the canonical Candidate-delta change manifest without creating another persistent entity."
+    },
+    {
+      "admission_rule": "independent-execution-attempt-and-evidence-boundary",
+      "kind": "Run",
+      "purpose": "Record one execution or validation attempt against exact candidate, policy, tool, and input digests."
+    },
+    {
+      "admission_rule": "independent-defect-lifecycle-and-blocking-boundary",
+      "kind": "Finding",
+      "purpose": "Record an observed defect or policy violation with explicit effective-blocking semantics."
+    },
+    {
+      "admission_rule": "independent-human-judgement-and-target-binding-boundary",
+      "kind": "Decision",
+      "purpose": "Record a project-operational acceptance, rejection, resolution, waiver, promotion, or release judgement. It is distinct from the external StandardReleaseDecision for the standard distribution."
+    },
+    {
+      "admission_rule": "immutable-task-owned-gate-definition-plus-current-run-and-finalized-artifact-record-bindings",
+      "kind": "GateResult",
+      "purpose": "Record one gate outcome against the exact immutable Task-owned GateRunDefinition, current Run, and finalized evidence Artifact records; skipped, blocked, failed, stale, or unresolved evidence never receives pass credit."
+    },
+    {
+      "admission_rule": "independent-capability-claim-and-revocation-boundary",
+      "kind": "Grant",
+      "purpose": "Prove one subject capability within one activation, time interval, nonce, and scope."
+    },
+    {
+      "admission_rule": "independent-mutation-ownership-and-fencing-boundary",
+      "kind": "Lease",
+      "purpose": "Coordinate temporary mutation ownership through generation, fencing, expiry, heartbeat, and close acknowledgement."
+    }
+  ],
+  "record_type": "SemanticModel",
+  "relations": [
+    {
+      "kind": "DEPENDS_ON",
+      "rules": [
+        "acyclic-for-ready-frontier",
+        "accepted-current-outcome-required"
+      ],
+      "source": [
+        "Task"
+      ],
+      "target": [
+        "Task"
+      ]
+    },
+    {
+      "kind": "READS",
+      "rules": [
+        "read-does-not-imply-authority"
+      ],
+      "source": [
+        "Task",
+        "Run"
+      ],
+      "target": [
+        "Candidate",
+        "Artifact"
+      ]
+    },
+    {
+      "kind": "PRODUCES",
+      "rules": [
+        "content-or-record-identity-required"
+      ],
+      "source": [
+        "Task",
+        "Run"
+      ],
+      "target": [
+        "Candidate",
+        "Artifact",
+        "Finding",
+        "Decision"
+      ]
+    },
+    {
+      "kind": "VALIDATES",
+      "rules": [
+        "candidate-policy-tool-input-binding-required"
+      ],
+      "source": [
+        "Run"
+      ],
+      "target": [
+        "Candidate",
+        "Artifact",
+        "Task"
+      ]
+    },
+    {
+      "kind": "CITES",
+      "rules": [
+        "selector-and-content-resolution-required"
+      ],
+      "source": [
+        "Finding",
+        "Decision"
+      ],
+      "target": [
+        "Artifact",
+        "Run",
+        "Finding"
+      ]
+    },
+    {
+      "kind": "BLOCKS",
+      "rules": [
+        "effective-only-while-open-and-blocking"
+      ],
+      "source": [
+        "Finding"
+      ],
+      "target": [
+        "Task",
+        "Candidate",
+        "Decision"
+      ]
+    }
+  ],
+  "schema_ref": "urn:promin:contracts:1#/$defs/SemanticModel",
+  "technology_capabilities": [
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "continue": {
+            "request": "validated-continuation-token",
+            "response": "WorkCardProjection"
+          },
+          "doctor": {
+            "request": "installed-activation",
+            "response": "DoctorResult"
+          },
+          "healthcheck": {
+            "request": "configured-healthcheck",
+            "response": "bounded-process-observation"
+          },
+          "init": {
+            "request": "explicit-init-plans",
+            "response": "InitResult"
+          },
+          "next": {
+            "request": "authorized-bounded-query",
+            "response": "WorkCardProjection"
+          },
+          "provider-binding": {
+            "request": "configured-provider-binding",
+            "response": "content-addressed-receipt"
+          },
+          "status": {
+            "request": "installed-activation",
+            "response": "StatusResult"
+          },
+          "validate": {
+            "request": "installed-activation",
+            "response": "ValidationResult"
+          }
+        },
+        "protocol_id": "promin.control-runtime.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "python-runtime-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "python-runtime"
+          }
+        ],
+        "supported_commands": [
+          "continue",
+          "doctor",
+          "healthcheck",
+          "init",
+          "next",
+          "provider-binding",
+          "status",
+          "validate"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "authority-invention",
+          "policy-invention",
+          "provider-binding-invention"
+        ],
+        "normative_authority": false
+      },
+      "id": "control-runtime",
+      "task": "Parse explicit configuration, canonicalize JSON, and run local CLI orchestration."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "command": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          },
+          "continue": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          },
+          "export": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          },
+          "healthcheck": {
+            "request": "configured-healthcheck",
+            "response": "bounded-process-observation"
+          },
+          "import": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          },
+          "provider-binding": {
+            "request": "configured-provider-binding",
+            "response": "content-addressed-receipt"
+          },
+          "rebuild": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          },
+          "replay": {
+            "request": "strict-json-record",
+            "response": "Draft-2020-12-plus-semantic-result"
+          }
+        },
+        "protocol_id": "promin.shape-validation.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "python-runtime-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "python-runtime"
+          }
+        ],
+        "supported_commands": [
+          "command",
+          "continue",
+          "export",
+          "healthcheck",
+          "import",
+          "provider-binding",
+          "rebuild",
+          "replay"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "authority-decision",
+          "cross-record-semantic-decision"
+        ],
+        "normative_authority": false
+      },
+      "id": "shape-validation",
+      "task": "Validate the single Draft 2020-12 contract bundle with enforced formats and local references."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "digest-bytes": {
+            "request": "bounded-bytes",
+            "response": "lowercase-sha256"
+          },
+          "digest-file": {
+            "request": "no-follow-regular-file",
+            "response": "lowercase-sha256"
+          },
+          "digest-value": {
+            "request": "canonical-json-value",
+            "response": "lowercase-sha256"
+          },
+          "healthcheck": {
+            "request": "configured-healthcheck",
+            "response": "bounded-process-observation"
+          },
+          "provider-binding": {
+            "request": "configured-provider-binding",
+            "response": "content-addressed-receipt"
+          }
+        },
+        "protocol_id": "promin.content-identity.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "python-runtime-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "python-runtime"
+          }
+        ],
+        "supported_commands": [
+          "digest-bytes",
+          "digest-file",
+          "digest-value",
+          "healthcheck",
+          "provider-binding"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "digest-as-action-authority"
+        ],
+        "normative_authority": false
+      },
+      "id": "content-identity",
+      "task": "Compute content digests and content-addressed object identities."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "atomic-replace": {
+            "request": "same-directory-staged-bytes",
+            "response": "durable-replacement"
+          },
+          "directory-sync": {
+            "request": "owning-directory",
+            "response": "durability-observation"
+          },
+          "file-sync": {
+            "request": "open-regular-file",
+            "response": "durability-observation"
+          },
+          "healthcheck": {
+            "request": "configured-healthcheck",
+            "response": "bounded-process-observation"
+          },
+          "local-writer-lock": {
+            "request": "activation-bound-lock",
+            "response": "exclusive-lease"
+          },
+          "provider-binding": {
+            "request": "configured-provider-binding",
+            "response": "content-addressed-receipt"
+          },
+          "recover": {
+            "request": "durable-journal-state",
+            "response": "verified-head"
+          }
+        },
+        "protocol_id": "promin.local-serialization.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "python-runtime-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "python-runtime"
+          }
+        ],
+        "supported_commands": [
+          "atomic-replace",
+          "directory-sync",
+          "file-sync",
+          "healthcheck",
+          "local-writer-lock",
+          "provider-binding",
+          "recover"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "distributed-consensus-claim"
+        ],
+        "normative_authority": false
+      },
+      "id": "local-serialization",
+      "task": "Provide one local-writer lock, atomic replace, file sync, directory sync, and recovery primitives."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "continue": {
+            "request": "authenticated-ready-frontier-continuation",
+            "response": "ContinueResult"
+          },
+          "healthcheck": {
+            "request": "configured-healthcheck",
+            "response": "bounded-process-observation"
+          },
+          "next": {
+            "request": "authorized-bounded-ready-query",
+            "response": "NextResult"
+          },
+          "provider-binding": {
+            "request": "configured-provider-binding",
+            "response": "content-addressed-receipt"
+          },
+          "rebuild": {
+            "request": "verified-event-and-inventory-input",
+            "response": "current-projection-state"
+          },
+          "status": {
+            "request": "projection-file",
+            "response": "current-projection-state"
+          }
+        },
+        "protocol_id": "promin.query-projection.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "python-runtime-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "python-runtime"
+          }
+        ],
+        "supported_commands": [
+          "continue",
+          "healthcheck",
+          "next",
+          "provider-binding",
+          "rebuild",
+          "status"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "projection-as-normative-authority"
+        ],
+        "normative_authority": false
+      },
+      "id": "query-projection",
+      "task": "Build disposable status and bounded typed-retrieval projections; derive ReadyFrontier, materialize one exact WorkCardProjection, and return Core-owned NextResult or ContinueResult envelopes for the six supported CLI commands."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "healthcheck": {
+            "request": "configured-bounded-git-healthcheck",
+            "response": "exit-zero-captured-stdout-stderr"
+          },
+          "immutable-tree-object": {
+            "request": "argv:rev-parse --verify HEAD^{tree};cwd:configured-root;stdin:none",
+            "response": "exit-zero;stdout:one-lowercase-hex-object-id-plus-LF;stderr:captured"
+          },
+          "immutable-tree-stream": {
+            "request": "argv:archive --format=tar <verified-tree-object>;cwd:configured-root;stdin:none",
+            "response": "exit-zero;stdout:raw-git-tar-stream;stderr:captured"
+          },
+          "provider-binding": {
+            "request": "configured-executable-file-digest",
+            "response": "content-addressed-receipt"
+          }
+        },
+        "protocol_id": "promin.filesystem-inventory.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "git-executable-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "executable"
+          }
+        ],
+        "supported_commands": [
+          "healthcheck",
+          "immutable-tree-object",
+          "immutable-tree-stream",
+          "provider-binding"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "implicit-initialization-scan"
+        ],
+        "normative_authority": false
+      },
+      "id": "filesystem-inventory",
+      "task": "Apply the exact candidate recipe in one product pass, use no-follow reads, and publish either a provider-proven immutable VCS tree stream or an explicit non-creditable observation."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "bounded-export-scan": {
+            "request": "canonical-json-stdin:{operation,root,allowlist_digest,max_files,max_bytes}",
+            "response": "exit-zero;canonical-json-stdout:{status,files_scanned,bytes_scanned,violations,output_digest};stderr:captured"
+          },
+          "healthcheck": {
+            "request": "configured-bounded-healthcheck",
+            "response": "exit-zero-captured-stdout-stderr"
+          },
+          "provider-binding": {
+            "request": "configured-executable-file-digest",
+            "response": "content-addressed-receipt"
+          }
+        },
+        "protocol_id": "promin.export-scan.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "executable-export-scan-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "executable"
+          }
+        ],
+        "supported_commands": [
+          "bounded-export-scan",
+          "healthcheck",
+          "provider-binding"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "package-as-authorization-boundary"
+        ],
+        "normative_authority": false
+      },
+      "id": "export-scan",
+      "task": "Perform bounded recursive export inspection, allowlisting, secret classification, and symlink rejection."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "healthcheck": {
+            "request": "configured-bounded-signature-healthcheck",
+            "response": "exit-zero-captured-stdout-stderr"
+          },
+          "provider-binding": {
+            "request": "configured-module-or-executable-digest",
+            "response": "content-addressed-receipt"
+          },
+          "sign-digest": {
+            "request": "domain-separated-canonical-claim-digest",
+            "response": "configured-adapter-signature"
+          },
+          "verify-digest": {
+            "request": "domain-separated-canonical-claim-digest-plus-signature",
+            "response": "strict-boolean-verification"
+          }
+        },
+        "protocol_id": "promin.signature.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "executable-signature-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "executable"
+          },
+          {
+            "adapter_id": "python-module-signature-v1",
+            "identity_kind": "module-file-digest",
+            "invocation_kind": "python-module"
+          }
+        ],
+        "supported_commands": [
+          "healthcheck",
+          "provider-binding",
+          "sign-digest",
+          "verify-digest"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "core-signer-implementation-lock-in"
+        ],
+        "normative_authority": false
+      },
+      "id": "signature",
+      "task": "Dispatch the exact configured signature adapter to sign or verify activation, Grant, and Decision digests for team trust mode, and evidence the invoked adapter identity."
+    },
+    {
+      "adapter_protocol": {
+        "dependency_receipt_rule": {
+          "aggregate_digest_rule": "sha256(canonical receipt without aggregate_digest)",
+          "complete": true,
+          "component_fields": [
+            "component_id",
+            "component_kind",
+            "source",
+            "version",
+            "digest",
+            "size_bytes"
+          ],
+          "component_order": "component-id-ascending",
+          "os_substrate_excluded": true,
+          "provider_owned_scope": "configured-provider-root-and-runtime-components",
+          "unresolved_dependencies": "reject"
+        },
+        "operation_contracts": {
+          "healthcheck": {
+            "request": "configured-bounded-healthcheck",
+            "response": "exit-zero-captured-stdout-stderr"
+          },
+          "import-build-facts": {
+            "request": "canonical-json-stdin:{operation,project_root,input_digests,max_files,max_bytes}",
+            "response": "exit-zero;canonical-json-stdout:{status,facts,input_digests,output_digest};stderr:captured"
+          },
+          "provider-binding": {
+            "request": "configured-executable-file-digest",
+            "response": "content-addressed-receipt"
+          }
+        },
+        "protocol_id": "promin.build-dependency.v1",
+        "receipt_persistence": "content-addressed-receipt",
+        "supported_bindings": [
+          {
+            "adapter_id": "executable-build-dependency-v1",
+            "identity_kind": "file-digest",
+            "invocation_kind": "executable"
+          }
+        ],
+        "supported_commands": [
+          "healthcheck",
+          "import-build-facts",
+          "provider-binding"
+        ],
+        "unknown_binding": "reject"
+      },
+      "forbidden_boundary": {
+        "effect": "reject",
+        "forbids": [
+          "semantic-model-redefinition"
+        ],
+        "normative_authority": false
+      },
+      "id": "build-dependency",
+      "task": "Import project-specific build and dependency facts as derived projections."
+    }
+  ],
+  "value_objects": {
+    "CandidateDelta": "A diff Artifact payload binding base and new Candidate digests, WorkCard digest, and the complete normalized changed-path set.",
+    "Command": "A state-changing request validated before commit.",
+    "Comparator": "A pure ordering or equality rule.",
+    "ContinuationToken": "An authenticated bounded runtime value signed with the random per-Activation secret. It binds subject, exact projection.read Grant claim, requested scope, revocation state, normalized query, cursor, Activation, HEAD, projection, ranking, complete budgets, depth, implementation closure, issue time, and expiry; it never grants authority by itself.",
+    "CurrentReleaseStatus": "A derived evaluation of an immutable historical release Decision against the current closure, blockers, evidence, providers, and Activation.",
+    "ImplementationClosure": "A canonical capability-specific binding of the promin runtime, Python interpreter, jsonschema or SQLite component where used, exactly one adapter, and the recomputed aggregate closure digest.",
+    "Operation": "One completed semantic step with explicit input, output, failure, and evidence semantics.",
+    "PlanProposal": "A non-authoritative bounded proposal that derives candidate Tasks and relations from project intent, repository facts, backlog, and references; it cannot mutate operational state or grant authority.",
+    "Policy": "A machine-addressable invariant owned by policy-set.json.",
+    "Predicate": "A pure decision rule.",
+    "ProviderInvocationEvidence": "The exact capability, provider, invocation kind, identity kind and digest, and adapter ID actually used by one operation.",
+    "Query": "A read-only request that cannot mutate authoritative state.",
+    "StandardReleaseDecision": "An external human-reviewable distribution record bound to the exact promin ZIP, Core, preset, tools, implementation closure, tests, platform results, saturation, PDFs, and evidence manifest. It never grants product acceptance.",
+    "StateCheckpoint": "A disposable self-digested state or journal index bound to an exact authoritative HEAD; it cannot grant authority or acceptance.",
+    "WorkCard": "A bounded generated context package for one Task that separately binds the projection.read query Grant claim and the task.execute holder Grant; neither binding implies acceptance."
+  },
+  "version": "1.0.0-alpha.1"
+}

@@ -1,0 +1,32 @@
+{
+  "authority_effect": "none",
+  "category": "domain",
+  "defaults": {
+    "security": [
+      "input-validation",
+      "secret-separation",
+      "supabase-rls-review"
+    ]
+  },
+  "detect": [
+    "package.json",
+    "vite.config.*",
+    "next.config.*",
+    "supabase/**",
+    "src/**/*.jsx",
+    "src/**/*.tsx"
+  ],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "official_sources": [
+    "https://react.dev/",
+    "https://developer.mozilla.org/",
+    "https://supabase.com/docs",
+    "https://owasp.org/"
+  ],
+  "profile_id": "web-application",
+  "purpose": "Modern web application development and security",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

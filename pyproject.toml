@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promin"
+version = "1.0.0a1"
+description = "Morok Tower operational standard"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+license = { file = "LICENSE" }
+dependencies = [
+  "cryptography>=44,<47",
+  "jsonschema>=4.20,<5",
+  "pypdf>=5,<7",
+]
+
+[project.optional-dependencies]
+docs = [
+  "reportlab>=4.2,<5",
+]
+test = [
+  "pytest>=8,<10",
+]
+
+[project.scripts]
+promin = "promin.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["promin*"]
+
+[tool.setuptools.data-files]
+"share/promin" = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "VERSION.json"]
+"share/promin/core" = ["core/*.json"]
+"share/promin/presets" = ["presets/*.json"]
+"share/promin/profiles" = ["profiles/*.json", "profiles/README.md"]
+"share/promin/skills" = ["skills/README.md", "skills/skill.schema.json"]
+"share/promin/skills/example" = ["skills/example/SKILL.md", "skills/example/promin.skill.json"]
+"share/promin/prompts" = ["prompts/*.txt"]
+
+[tool.pytest.ini_options]
+markers = [
+  "scale: physical 100k runtime saturation",
+]
