@@ -1589,7 +1589,7 @@ def test_executable_signature_provider_uses_platform_subprocess_path(
     binding = _standalone_provider_binding(
         project, capability_id="signature", timeout_ms=100
     )
-    observed: list[list[str]] = []
+    observed: list[tuple[list[str], str | None]] = []
 
     monkeypatch.setattr(
         init_runtime,
@@ -1598,7 +1598,7 @@ def test_executable_signature_provider_uses_platform_subprocess_path(
     )
 
     def complete(argv: list[str], **kwargs: object):
-        observed.append(list(argv))
+        observed.append((list(argv), kwargs.get("executable")))
         return init_runtime.subprocess.CompletedProcess(
             argv, 0, canonical_bytes({"verified": True}), b""
         )
@@ -1606,7 +1606,9 @@ def test_executable_signature_provider_uses_platform_subprocess_path(
     monkeypatch.setattr(init_runtime.subprocess, "run", complete)
     verifier = init_runtime._executable_signature_verifier(binding, project)
     assert verifier({"claim_digest": "a" * 64}, {"key_id": "key-1"}) is True
-    assert observed[0][0].startswith("EXTENDED::")
+    argv, executable = observed[0]
+    assert not argv[0].startswith("EXTENDED::")
+    assert isinstance(executable, str) and executable.startswith("EXTENDED::")
 
 
 def test_signature_provider_timeout_fails_closed(

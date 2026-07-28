@@ -97,8 +97,8 @@ def _is_link_or_reparse(
     path: Path,
     inspected: os.stat_result | None = None,
 ) -> bool:
-    value = inspected if inspected is not None else path.lstat()
-    if stat.S_ISLNK(value.st_mode) or path.is_symlink():
+    value = inspected if inspected is not None else os.lstat(filesystem_path(path))
+    if stat.S_ISLNK(value.st_mode) or os.path.islink(filesystem_path(path)):
         return True
     is_junction = getattr(path, "is_junction", None)
     if callable(is_junction) and is_junction():
@@ -141,7 +141,7 @@ def ensure_exact_regular_files(
 ) -> tuple[Path, ...]:
     base = Path(directory)
     try:
-        mode = base.stat(follow_symlinks=False).st_mode
+        mode = os.stat(filesystem_path(base), follow_symlinks=False).st_mode
     except OSError as exc:
         raise CanonicalError(f"directory cannot be inspected: {base}: {exc}") from exc
     if _is_link_or_reparse(base) or not stat.S_ISDIR(mode):
@@ -149,14 +149,18 @@ def ensure_exact_regular_files(
     expected_names = tuple(expected)
     if len(expected_names) != len(set(expected_names)):
         raise CanonicalError("expected file set contains duplicates")
-    entries = tuple(base.iterdir())
-    actual_names = {entry.name for entry in entries}
-    if actual_names != set(expected_names) or len(entries) != len(expected_names):
+    try:
+        actual_names = {entry.name for entry in os.scandir(filesystem_path(base))}
+    except OSError as exc:
+        raise CanonicalError(f"directory cannot be enumerated: {base}: {exc}") from exc
+    if actual_names != set(expected_names) or len(actual_names) != len(expected_names):
         raise CanonicalError(
             f"exact file-set mismatch at {base}: "
             f"expected={sorted(expected_names)} actual={sorted(actual_names)}"
         )
-    by_name = {entry.name: require_regular_file(entry, root=base) for entry in entries}
+    by_name = {
+        name: require_regular_file(base / name, root=base) for name in actual_names
+    }
     return tuple(by_name[name] for name in expected_names)
 
 
@@ -316,7 +320,7 @@ def digest_file(
 def fsync_directory(directory: str | os.PathLike[str]) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        descriptor = os.open(Path(directory), flags)
+        descriptor = os.open(filesystem_path(directory), flags)
     except OSError:
         if os.name == "nt":
             return
@@ -329,9 +333,9 @@ def fsync_directory(directory: str | os.PathLike[str]) -> None:
 
 def atomic_write_bytes(path: str | os.PathLike[str], data: bytes, *, mode: int = 0o600) -> None:
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(filesystem_path(target.parent), exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".p-", suffix=".tmp", dir=target.parent
+        prefix=".p-", suffix=".tmp", dir=filesystem_path(target.parent)
     )
     temporary = Path(temporary_name)
     try:
@@ -339,12 +343,14 @@ def atomic_write_bytes(path: str | os.PathLike[str], data: bytes, *, mode: int =
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, target)
+        os.chmod(filesystem_path(temporary), mode)
+        os.replace(filesystem_path(temporary), filesystem_path(target))
         fsync_directory(target.parent)
     except BaseException:
         try:
-            temporary.unlink(missing_ok=True)
+            os.unlink(filesystem_path(temporary))
+        except FileNotFoundError:
+            pass
         finally:
             raise
 

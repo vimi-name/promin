@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .canonical import digest_value
+from .platform_paths import resolved_temporary_directory
 from .resources import bundle_root
 
 _SKILL_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
@@ -687,8 +687,7 @@ def install_skill(
     payload, directory, source_kind, source_digest = _read_source(
         source, allow_network=allow_network, expected_sha256=expected_sha256
     )
-    with tempfile.TemporaryDirectory(prefix="promin-skill-") as temporary:
-        staging = Path(temporary)
+    with resolved_temporary_directory(prefix="promin-skill-") as staging:
         if directory is not None:
             source_root = _locate_skill_root(directory)
             candidate = staging / source_root.name

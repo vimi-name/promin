@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import unicodedata
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
@@ -23,6 +24,7 @@ from .canonical import (
     load_json_strict,
     parse_json_strict,
 )
+from .platform_paths import filesystem_path, resolve_identity_path
 
 
 CORE_FILES = (
@@ -572,10 +574,10 @@ def _bundle_cache_key(
     core_digests: list[tuple[str, str]] = []
     for name in CORE_FILES:
         path = core_dir / name
-        if path.is_symlink() or not path.is_file():
+        if os.path.islink(filesystem_path(path)) or not os.path.isfile(filesystem_path(path)):
             raise ContractError(f"Core artifact must be a regular file: {path}")
         core_digests.append((name, digest_file(path, root=core_dir)))
-    if preset.is_symlink() or not preset.is_file():
+    if os.path.islink(filesystem_path(preset)) or not os.path.isfile(filesystem_path(preset)):
         raise ContractError(f"preset must be a regular file: {preset}")
     return (
         str(root),
@@ -595,16 +597,22 @@ def load_contract_bundle(
     verify_schema_meta: bool = True,
 ) -> ContractBundle:
     root_input = Path(bundle_root)
-    if root_input.is_symlink():
+    if os.path.islink(filesystem_path(root_input)):
         raise ContractError(f"standard bundle must not be a symbolic link: {root_input}")
-    root = root_input.resolve(strict=True)
-    if not root.is_dir():
+    try:
+        root = resolve_identity_path(root_input, strict=True)
+    except ValueError as exc:
+        raise ContractError(f"standard bundle is unavailable: {root_input}") from exc
+    if not os.path.isdir(filesystem_path(root)):
         raise ContractError(f"standard bundle must be a real directory: {root}")
-    core_dir = root / "core" if (root / "core").is_dir() else root
+    core_dir = root / "core" if os.path.isdir(filesystem_path(root / "core")) else root
     preset_input = Path(preset_path)
-    if preset_input.is_symlink():
+    if os.path.islink(filesystem_path(preset_input)):
         raise ContractError(f"preset must not be a symbolic link: {preset_input}")
-    selected_preset = preset_input.resolve(strict=True)
+    try:
+        selected_preset = resolve_identity_path(preset_input, strict=True)
+    except ValueError as exc:
+        raise ContractError(f"preset is unavailable: {preset_input}") from exc
     key = _bundle_cache_key(
         root, core_dir, selected_preset, verify_schema_meta=verify_schema_meta
     )

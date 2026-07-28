@@ -17,6 +17,7 @@ from .documentation import documentation_status, sync_documentation
 from .context_index import context_index_status, sync_context_index
 from .host_integration import host_surface_status, sync_host_surfaces
 from .gitpolicy import commit_surface_status
+from .platform_paths import filesystem_path, resolve_identity_path
 from .refresh import refresh_project
 from .service import ProminService
 from .telemetry import record_observation, utc_now
@@ -26,8 +27,51 @@ class PortabilityError(RuntimeError):
     pass
 
 
+def _is_file(path: Path) -> bool:
+    return os.path.isfile(filesystem_path(path))
+
+
+def _is_directory(path: Path) -> bool:
+    return os.path.isdir(filesystem_path(path))
+
+
+def _is_link(path: Path) -> bool:
+    return os.path.islink(filesystem_path(path))
+
+
+def _exists(path: Path) -> bool:
+    return os.path.exists(filesystem_path(path))
+
+
+def _read_text(path: Path) -> str:
+    with open(filesystem_path(path), encoding="utf-8") as reader:
+        return reader.read()
+
+
+def _json_files(directory: Path) -> list[Path]:
+    """Enumerate regular JSON files through the final filesystem boundary.
+
+    Returned paths retain their canonical spelling for records and containment
+    checks. Only directory enumeration is transport-adapted for long Windows
+    roots.
+    """
+
+    try:
+        with os.scandir(filesystem_path(directory)) as entries:
+            names = [
+                entry.name
+                for entry in entries
+                if entry.name.endswith(".json")
+                and entry.is_file(follow_symlinks=False)
+                and not entry.is_symlink()
+            ]
+    except OSError:
+        return []
+    return [directory / name for name in sorted(names, key=str.casefold)]
+
+
 def host_binding() -> dict[str, Any]:
-    executable = Path(sys.executable).resolve(strict=True)
+    executable = resolve_identity_path(sys.executable, strict=True)
     identity = {
         "record_type": "HostBinding",
         "system": {"windows": "windows", "darwin": "darwin", "linux": "linux"}.get(platform.system().casefold(), "other"),
@@ -55,7 +99,7 @@ def _host_binding_integrity(value: Mapping[str, Any] | None) -> str:
 
 def _load_previous(root: Path) -> dict[str, Any] | None:
     path = root / ".promin" / "host" / "host.json"
-    if not path.is_file():
+    if not _is_file(path):
         return None
     value = load_json_strict(path, root=path.parent)
     return dict(value) if isinstance(value, Mapping) else None
@@ -75,10 +119,10 @@ def _load_portable_plan(root: Path) -> dict[str, Any] | None:
     """Load the compact team brief and strip generated envelope fields."""
 
     path = root / ".promin" / "portable" / "project-brief.json"
-    if not path.is_file() or path.is_symlink():
+    if not _is_file(path) or _is_link(path):
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(_read_text(path))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict) or value.get("record_type") != "PortableProjectBrief":
@@ -95,10 +139,10 @@ def _load_portable_plan(root: Path) -> dict[str, Any] | None:
 
 def _load_portable_team_state(root: Path) -> dict[str, Any] | None:
     path = root / ".promin" / "portable" / "team-state.json"
-    if not path.is_file() or path.is_symlink():
+    if not _is_file(path) or _is_link(path):
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(_read_text(path))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict) or value.get("record_type") != "PortableTeamState":
@@ -111,9 +155,7 @@ def _load_portable_team_state(root: Path) -> dict[str, Any] | None:
 
 def _event_batches(root: Path) -> int:
     journal = root / ".promin" / "state" / "events" / "journal"
-    if not journal.is_dir():
-        return 0
-    return sum(1 for path in journal.glob("*.json") if path.is_file() and not path.is_symlink())
+    return len(_json_files(journal)) if _is_directory(journal) else 0
 
 
 def _classify_absolute_paths(root: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -134,8 +176,8 @@ def _classify_absolute_paths(root: Path) -> tuple[list[dict[str, str]], list[dic
     ]
     files: list[Path] = []
     for directory in locations:
-        if directory.is_dir() and not directory.is_symlink():
-            files.extend(sorted(directory.glob("*.json"), key=lambda item: item.name.casefold()))
+        if _is_directory(directory) and not _is_link(directory):
+            files.extend(_json_files(directory))
 
     def is_host_binding_location(relative_file: str, location: str) -> bool:
         # TechnologiesInit is the explicit host/provider binding. Absolute
@@ -145,7 +187,7 @@ def _classify_absolute_paths(root: Path) -> tuple[list[dict[str, str]], list[dic
 
     for path in files:
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(_read_text(path))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         relative_file = path.relative_to(root / ".promin").as_posix()
@@ -182,18 +224,15 @@ def _absolute_path_issues(root: Path) -> list[dict[str, str]]:
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(filesystem_path(path.parent), exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    os.replace(temporary, path)
+    with open(filesystem_path(temporary), "w", encoding="utf-8", newline="\n") as writer:
+        writer.write(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    os.replace(filesystem_path(temporary), filesystem_path(path))
 
 
 def doctor_with_portability(project_root: Path | str, *, replay: bool = True) -> dict[str, Any]:
-    root = Path(project_root).resolve()
+    root = resolve_identity_path(project_root, strict=True)
     current = host_binding()
     previous = _load_previous(root)
     host_integrity = _host_record_integrity(previous)
@@ -202,7 +241,7 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
         and previous is not None
         and previous.get("host_binding_digest") != current["host_binding_digest"]
     )
-    host_binding_missing = previous is None and (root / ".promin").exists()
+    host_binding_missing = previous is None and _exists(root / ".promin")
     core: dict[str, Any]
     try:
         core = ProminService(root).doctor(replay=replay)
@@ -453,4 +492,3 @@ def repair_project(project_root: Path | str, *, apply: bool = False) -> dict[str
             details={"actions": len(actions), "performed": performed, "component": "portability"},
         )
     return result
-

@@ -37,6 +37,7 @@ from .events import (
     state_binding_leaf_id,
     utc_now,
 )
+from .platform_paths import filesystem_path, sqlite_path
 
 
 _BUDGET_FIELDS = frozenset(
@@ -411,7 +412,9 @@ def _replace_durable(source: Path, destination: Path) -> None:
         import ctypes
 
         flags = 0x1 | 0x8
-        if not ctypes.windll.kernel32.MoveFileExW(str(source), str(destination), flags):
+        if not ctypes.windll.kernel32.MoveFileExW(
+            str(filesystem_path(source)), str(filesystem_path(destination)), flags
+        ):
             raise OSError(ctypes.get_last_error(), "MoveFileExW failed", str(destination))
     else:
         os.replace(source, destination)
@@ -527,9 +530,9 @@ class Projection:
             raise ProjectionError("projection inventory must be a verified InventoryResult marker")
         if inventory is not None and inventory.activation_digest != event_store.active_activation_digest:
             raise ProjectionError("verified inventory Activation differs from event store")
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(filesystem_path(self.db_path.parent), exist_ok=True)
         descriptor, temp_name = tempfile.mkstemp(
-            prefix=".p-", suffix=".tmp", dir=self.db_path.parent
+            prefix=".p-", suffix=".tmp", dir=filesystem_path(self.db_path.parent)
         )
         os.close(descriptor)
         temporary = Path(temp_name)
@@ -544,7 +547,7 @@ class Projection:
             "inventory_stream_bytes": 0,
         }
         try:
-            connection = sqlite3.connect(temporary)
+            connection = sqlite3.connect(sqlite_path(temporary))
             try:
                 self._create_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
@@ -587,7 +590,7 @@ class Projection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             finally:
                 connection.close()
-            with temporary.open("r+b") as stream:
+            with open(filesystem_path(temporary), "r+b") as stream:
                 os.fsync(stream.fileno())
             _replace_durable(temporary, self.db_path)
             raw_file_proxy_ratio = (
@@ -595,7 +598,7 @@ class Projection:
                 if stats["inventory_entries"]
                 else 1.0
             )
-            projection_bytes = self.db_path.stat().st_size
+            projection_bytes = os.stat(filesystem_path(self.db_path)).st_size
             inventory_projection_amplification = (
                 projection_bytes / stats["inventory_stream_bytes"]
                 if stats["inventory_stream_bytes"]
@@ -619,7 +622,10 @@ class Projection:
         except (sqlite3.Error, EventStoreError) as exc:
             raise ProjectionError(f"projection rebuild failed: {exc}") from exc
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                os.unlink(filesystem_path(temporary))
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
@@ -1267,7 +1273,7 @@ class Projection:
     ) -> dict[str, Any]:
         """Stream every missing authoritative batch into one projection commit."""
 
-        if not self.db_path.is_file():
+        if not os.path.isfile(filesystem_path(self.db_path)):
             return {
                 "status": "missing",
                 "projection_authoritative": False,
@@ -1338,7 +1344,7 @@ class Projection:
                 "batch_digest": before["head_digest"],
             }
 
-        before_bytes = self.db_path.stat().st_size
+        before_bytes = os.stat(filesystem_path(self.db_path)).st_size
         changed_shards: set[int] = set()
         changed_relations: list[str] = []
         changed_records = 0
@@ -1346,7 +1352,7 @@ class Projection:
         applied_batches = 0
         applied_events = 0
         final_head = dict(bound_head)
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(sqlite_path(self.db_path))
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
@@ -1419,7 +1425,7 @@ class Projection:
             raise
         finally:
             connection.close()
-        after_bytes = self.db_path.stat().st_size
+        after_bytes = os.stat(filesystem_path(self.db_path)).st_size
         growth_bytes = max(0, after_bytes - before_bytes)
         physical_payload_bytes = logical_payload_bytes + growth_bytes
         return {
@@ -3148,12 +3154,20 @@ class Projection:
 
     @contextlib.contextmanager
     def _connect_readonly(self) -> Iterator[sqlite3.Connection]:
-        if not self.db_path.is_file():
+        if not os.path.isfile(filesystem_path(self.db_path)):
             raise ProjectionError("projection database does not exist")
-        uri = self.db_path.resolve().as_uri() + "?mode=ro"
+        database_path = sqlite_path(self.db_path)
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(uri, uri=True, isolation_level=None)
+            if database_path.startswith("\\\\?\\"):
+                # SQLite accepts an extended Windows filename for a direct
+                # connection, but its URI parser treats the transport prefix
+                # as an invalid authority.  The existing-file check above
+                # prevents creation; query_only keeps this connection read-only.
+                connection = sqlite3.connect(database_path, isolation_level=None)
+            else:
+                uri = Path(database_path).absolute().as_uri() + "?mode=ro"
+                connection = sqlite3.connect(uri, uri=True, isolation_level=None)
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
         except sqlite3.Error as exc:
@@ -3172,11 +3186,11 @@ class Projection:
 
     @contextlib.contextmanager
     def _connect_mutable(self) -> Iterator[sqlite3.Connection]:
-        if not self.db_path.is_file():
+        if not os.path.isfile(filesystem_path(self.db_path)):
             raise ProjectionError("projection database does not exist")
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(self.db_path, isolation_level=None)
+            connection = sqlite3.connect(sqlite_path(self.db_path), isolation_level=None)
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")

@@ -53,6 +53,7 @@ from promin_validate import (  # noqa: E402
     verify_human_documents,
     verify_package_inventory,
     verify_package_integrity,
+    verify_reconciliation_path_ownership,
 )
 from promin_no_degradation import (  # noqa: E402
     _run_required_tests,
@@ -261,7 +262,7 @@ class PackageValidationTests(unittest.TestCase):
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
         self.assertTrue(result["closure"])
-        self.assertEqual(result["inventory"]["files"], 121)
+        self.assertEqual(result["inventory"]["files"], 122)
         self.assertEqual(result["inventory"]["directories"], 14)
         manifest = json.loads((self.root / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["builder"], "tools/promin_package.py")
@@ -270,7 +271,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_integrity(self.root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 121)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 122)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 14)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -423,6 +424,33 @@ class PackageValidationTests(unittest.TestCase):
         )
         self.assertNotIn("acceptance", report.checks["version"])
         self.assertNotIn("distribution_status", report.checks["version"])
+        self.assertEqual(report.checks["path_ownership"]["status"], "pass")
+
+    def test_reconciliation_path_ownership_gate_is_reported_and_passes(self) -> None:
+        result = verify_reconciliation_path_ownership(self.root)
+
+        self.assertEqual(result["gate_id"], "REC-006")
+        self.assertEqual(result["status"], "pass", result["violations"])
+        self.assertTrue(result["pass_credit"])
+        self.assertEqual(
+            result["identity"]["definitions"], ["promin/platform_paths.py"]
+        )
+        self.assertEqual(result["process_transport"]["provider_subprocess_run_count"], 1)
+        self.assertTrue(result["temporary_boundaries"]["all_routed_through_platform_owner"])
+
+    def test_reconciliation_path_ownership_gate_fails_closed(self) -> None:
+        init_source = self.root / "promin" / "init.py"
+        init_source.write_text(
+            init_source.read_text(encoding="utf-8")
+            + "\n\ndef _provider_path():\n    return None\n",
+            encoding="utf-8",
+        )
+
+        report = verify_reconciliation_path_ownership(self.root)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertFalse(report["pass_credit"])
+        self.assertIn("forbidden provider identity helper", report["violations"][0])
 
     def test_no_degradation_required_owners_match_core(self) -> None:
         result = _required_predicates(self.root)

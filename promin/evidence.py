@@ -23,6 +23,7 @@ from .authority import AuthorityError, canonical_digest, parse_timestamp
 from .resources import bundle_root
 from .version import standard_version
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, parse_json_strict
+from .platform_paths import filesystem_path
 
 
 class EvidenceError(ValueError):
@@ -1328,7 +1329,7 @@ def _digest_bytes(payload: bytes) -> str:
 
 def _digest_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with open(filesystem_path(path), "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -6302,9 +6303,9 @@ class EvidenceStore:
         self.objects = self.root / "objects" / "sha256"
         self.pending = self.root / "pending"
         self.records = self.root / "records"
-        self.objects.mkdir(parents=True, exist_ok=True)
-        self.pending.mkdir(parents=True, exist_ok=True)
-        self.records.mkdir(parents=True, exist_ok=True)
+        os.makedirs(filesystem_path(self.objects), exist_ok=True)
+        os.makedirs(filesystem_path(self.pending), exist_ok=True)
+        os.makedirs(filesystem_path(self.records), exist_ok=True)
         self._records: dict[str, dict[str, Any]] = {}
         self._by_digest: dict[str, list[str]] = {}
         self._authoritative_ids: set[str] = set()
@@ -6315,13 +6316,15 @@ class EvidenceStore:
         cursor = Path(self.root.anchor)
         for part in self.root.parts[1:]:
             cursor = cursor / part
-            if cursor.exists() and cursor.is_symlink():
+            if os.path.lexists(filesystem_path(cursor)) and os.path.islink(
+                filesystem_path(cursor)
+            ):
                 raise EvidenceError("evidence root must not traverse a symlink")
-        self.root.mkdir(parents=True, exist_ok=True)
+        os.makedirs(filesystem_path(self.root), exist_ok=True)
         cursor = Path(self.root.anchor)
         for part in self.root.parts[1:]:
             cursor = cursor / part
-            if cursor.is_symlink():
+            if os.path.islink(filesystem_path(cursor)):
                 raise EvidenceError("evidence root must not traverse a symlink")
 
     @staticmethod
@@ -6555,28 +6558,45 @@ class EvidenceStore:
 
     def _validate_object(self, artifact: Mapping[str, Any]) -> None:
         path = self._object_path(artifact["digest"])
+        native = filesystem_path(path)
         if (
-            not path.is_file()
-            or path.is_symlink()
-            or path.stat().st_size != artifact["size_bytes"]
+            not os.path.isfile(native)
+            or os.path.islink(native)
+            or os.stat(native).st_size != artifact["size_bytes"]
             or _digest_file(path) != artifact["digest"]
         ):
             raise EvidenceError(f"evidence object mismatch for {artifact['artifact_id']}")
 
     @staticmethod
     def _read_json_file(path: Path, label: str) -> dict[str, Any]:
-        if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+        native = filesystem_path(path)
+        if os.path.islink(native) or not stat.S_ISREG(os.stat(native).st_mode):
             raise EvidenceError(f"{label} entry is not a regular file")
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            with open(native, encoding="utf-8") as stream:
+                value = json.load(stream)
         except (OSError, json.JSONDecodeError) as exc:
             raise EvidenceError(f"unreadable {label}: {path.name}") from exc
         if not isinstance(value, dict):
             raise EvidenceError(f"{label} is not an object")
         return value
 
+    @staticmethod
+    def _metadata_paths(directory: Path) -> tuple[Path, ...]:
+        """List metadata through the final filesystem boundary only.
+
+        Returned paths retain their ordinary spelling so artifact identity and
+        collision checks cannot accidentally persist a Windows transport prefix.
+        """
+
+        with os.scandir(filesystem_path(directory)) as entries:
+            names = sorted(
+                entry.name for entry in entries if entry.name.endswith(".json")
+            )
+        return tuple(directory / name for name in names)
+
     def _load_records(self) -> None:
-        for path in sorted(self.records.glob("*.json")):
+        for path in self._metadata_paths(self.records):
             record = self._read_json_file(path, "evidence metadata")
             self._validate_record(record)
             artifact = record["artifact"]
@@ -6588,7 +6608,7 @@ class EvidenceStore:
             self._by_digest.setdefault(artifact["digest"], []).append(artifact_id)
 
     def _validate_pending(self) -> None:
-        for path in sorted(self.pending.glob("*.json")):
+        for path in self._metadata_paths(self.pending):
             record = self._read_json_file(path, "staged evidence metadata")
             self._validate_stage_record(record)
             artifact = record["artifact"]
@@ -6600,7 +6620,7 @@ class EvidenceStore:
     def _fsync_directory(path: Path) -> None:
         if os.name == "nt":
             return
-        descriptor = os.open(path, os.O_RDONLY)
+        descriptor = os.open(filesystem_path(path), os.O_RDONLY)
         try:
             os.fsync(descriptor)
         finally:
@@ -6608,13 +6628,14 @@ class EvidenceStore:
 
     def _write_object_once(self, digest: str, payload: bytes) -> None:
         path = self._object_path(digest)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if path.is_symlink() or _digest_file(path) != digest:
+        native = filesystem_path(path)
+        os.makedirs(filesystem_path(path.parent), exist_ok=True)
+        if os.path.lexists(native):
+            if os.path.islink(native) or _digest_file(path) != digest:
                 raise EvidenceError("CAS digest path contains different content")
             return
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".p-", suffix=".tmp", dir=path.parent
+            prefix=".p-", suffix=".tmp", dir=filesystem_path(path.parent)
         )
         temporary = Path(temporary_name)
         try:
@@ -6627,14 +6648,14 @@ class EvidenceStore:
             os.close(descriptor)
         try:
             try:
-                os.link(temporary, path)
+                os.link(filesystem_path(temporary), native)
             except FileExistsError:
-                if path.is_symlink() or _digest_file(path) != digest:
+                if os.path.islink(native) or _digest_file(path) != digest:
                     raise EvidenceError("CAS digest raced with different content")
         finally:
-            temporary.unlink(missing_ok=True)
+            os.unlink(filesystem_path(temporary))
         try:
-            path.chmod(0o444)
+            os.chmod(native, 0o444)
         except OSError:
             pass
         self._fsync_directory(path.parent)
@@ -6650,13 +6671,14 @@ class EvidenceStore:
             json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             + "\n"
         ).encode("utf-8")
-        if path.exists():
+        native = filesystem_path(path)
+        if os.path.lexists(native):
             existing = self._read_json_file(path, path.parent.name)
             if canonical_digest(existing) != canonical_digest(value):
                 raise EvidenceError(conflict)
             return
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".p-", suffix=".tmp", dir=path.parent
+            prefix=".p-", suffix=".tmp", dir=filesystem_path(path.parent)
         )
         temporary = Path(temporary_name)
         try:
@@ -6669,16 +6691,16 @@ class EvidenceStore:
             os.close(descriptor)
         try:
             try:
-                os.link(temporary, path)
+                os.link(filesystem_path(temporary), native)
             except FileExistsError:
                 existing = self._read_json_file(path, path.parent.name)
                 if canonical_digest(existing) != canonical_digest(value):
                     raise EvidenceError(conflict)
             self._fsync_directory(path.parent)
         finally:
-            temporary.unlink(missing_ok=True)
+            os.unlink(filesystem_path(temporary))
         try:
-            path.chmod(0o444)
+            os.chmod(native, 0o444)
         except OSError:
             pass
 
@@ -6710,7 +6732,11 @@ class EvidenceStore:
         else:
             staged = {"artifact": deepcopy(dict(artifact)), "command_digest": command_digest}
             path = self._pending_path(artifact_id)
-            status = "already-staged" if path.exists() else "staged"
+            status = (
+                "already-staged"
+                if os.path.lexists(filesystem_path(path))
+                else "staged"
+            )
             self._write_object_once(artifact["digest"], payload)
             self._write_json_once(
                 path,
@@ -6815,7 +6841,7 @@ class EvidenceStore:
             status = "already-finalized"
         else:
             pending_path = self._pending_path(artifact_id)
-            if not pending_path.is_file():
+            if not os.path.isfile(filesystem_path(pending_path)):
                 raise EvidenceError("Artifact cannot finalize without its staged CAS record")
             staged = self._read_json_file(pending_path, "staged evidence metadata")
             self._validate_stage_record(staged)
@@ -6831,12 +6857,12 @@ class EvidenceStore:
             self._by_digest.setdefault(artifact["digest"], []).append(artifact_id)
             status = "finalized"
         pending_path = self._pending_path(artifact_id)
-        if pending_path.exists():
+        if os.path.lexists(filesystem_path(pending_path)):
             try:
-                pending_path.chmod(0o600)
+                os.chmod(filesystem_path(pending_path), 0o600)
             except OSError:
                 pass
-            pending_path.unlink(missing_ok=True)
+            os.unlink(filesystem_path(pending_path))
         self._fsync_directory(self.pending)
         return {
             "record_type": "EvidenceFinalizeReceipt",
@@ -6934,7 +6960,7 @@ class EvidenceStore:
 
     def pending_artifact_ids(self) -> tuple[str, ...]:
         values: list[str] = []
-        for path in sorted(self.pending.glob("*.json")):
+        for path in self._metadata_paths(self.pending):
             staged = self._read_json_file(path, "staged evidence metadata")
             self._validate_stage_record(staged)
             values.append(staged["artifact"]["artifact_id"])
@@ -6955,7 +6981,7 @@ class EvidenceStore:
         """Return one validated staged record for authoritative journal recovery."""
 
         path = self._pending_path(artifact_id)
-        if not path.is_file():
+        if not os.path.isfile(filesystem_path(path)):
             raise EvidenceError("staged evidence Artifact is unresolved")
         staged = self._read_json_file(path, "staged evidence metadata")
         self._validate_stage_record(staged)
@@ -6986,11 +7012,17 @@ class EvidenceStore:
             path = self._object_path(artifact_digest)
         except EvidenceError:
             return False
-        if not path.is_file() or path.is_symlink() or _digest_file(path) != artifact_digest:
+        native = filesystem_path(path)
+        if (
+            not os.path.isfile(native)
+            or os.path.islink(native)
+            or _digest_file(path) != artifact_digest
+        ):
             return False
         return any(
             artifact_id in self._authoritative_ids
-            and self._records[artifact_id]["artifact"]["size_bytes"] == path.stat().st_size
+            and self._records[artifact_id]["artifact"]["size_bytes"]
+            == os.stat(native).st_size
             for artifact_id in ids
         )
 

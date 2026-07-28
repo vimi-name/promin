@@ -12,11 +12,9 @@ import json
 import os
 import platform
 import re
-import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unicodedata
 from functools import lru_cache
 from dataclasses import dataclass
@@ -35,6 +33,12 @@ from .init import (
 )
 from .service import ProminService, ServiceError
 from .resources import bundle_root
+from .platform_paths import (
+    filesystem_path,
+    resolve_identity_path,
+    resolved_temporary_directory,
+    windows_extended_path,
+)
 from .provider_store import ensure_blob
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .skills import discover_skills
@@ -1015,10 +1019,13 @@ def compile_core_plans(plan: Mapping[str, Any], project_root: Path) -> dict[str,
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(filesystem_path(path.parent), exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(_json_bytes(value))
-    os.replace(temporary, path)
+    with open(filesystem_path(temporary), "xb") as handle:
+        handle.write(_json_bytes(value))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(filesystem_path(temporary), filesystem_path(path))
 
 
 def _config_documents(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1169,18 +1176,59 @@ def _cleanup_partial_control_state(project_root: Path) -> None:
     """
 
     control = project_root / ".promin"
-    if not control.is_dir() or control.is_symlink():
+    if not os.path.isdir(filesystem_path(control)) or os.path.islink(filesystem_path(control)):
         return
-    for child in tuple(control.iterdir()):
+    for child in tuple(Path(filesystem_path(control)).iterdir()):
         if child.name in {"portable", ".gitignore"}:
             continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child, ignore_errors=True)
+        if os.path.isdir(filesystem_path(child)) and not os.path.islink(filesystem_path(child)):
+            _remove_owner_tree(child)
         else:
-            child.unlink(missing_ok=True)
-    remaining = tuple(control.iterdir())
+            os.unlink(filesystem_path(child))
+    remaining = tuple(Path(filesystem_path(control)).iterdir())
     if not remaining:
-        control.rmdir()
+        os.rmdir(filesystem_path(control))
+
+
+def _remove_owner_tree(root: Path) -> None:
+    """Remove a tree created by this init attempt, including read-only files.
+
+    Standards are intentionally made read-only before publication.  A failed
+    guided init must nevertheless clean only its own unpublished tree so that
+    a corrected retry can restore a previously archived partial control tree.
+    All host calls use the final filesystem spelling; the ordinary ``Path`` is
+    retained solely for project identity and reporting.
+    """
+
+    native_root = (
+        windows_extended_path(root.absolute()) if os.name == "nt" else filesystem_path(root)
+    )
+    if not os.path.lexists(native_root):
+        return
+    if os.path.islink(native_root):
+        os.unlink(native_root)
+        return
+    if not os.path.isdir(native_root):
+        os.chmod(native_root, stat.S_IREAD | stat.S_IWRITE)
+        os.unlink(native_root)
+        return
+    for directory, directories, filenames in os.walk(
+        native_root, topdown=False, followlinks=False
+    ):
+        for name in filenames:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+            os.unlink(path)
+        for name in directories:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                os.unlink(path)
+                continue
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+            os.rmdir(path)
+    os.chmod(native_root, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+    os.rmdir(native_root)
 
 def apply_plan(
     project_root: Path | str,
@@ -1238,18 +1286,18 @@ def apply_plan(
 
     control = root / ".promin"
     host_state = root / ".promin-host"
-    control_existed = control.exists()
-    host_existed = host_state.exists()
+    control_existed = os.path.lexists(filesystem_path(control))
+    host_existed = os.path.lexists(filesystem_path(host_state))
     partial_archive: Path | None = None
     if control_existed:
         # No Activation means the directory is not canonical initialized state.
         # Preserve it outside the control root so a corrected init can proceed
         # without manual deletion while retaining forensic evidence.
         recovery = host_state / "recovery"
-        recovery.mkdir(parents=True, exist_ok=True)
+        os.makedirs(filesystem_path(recovery), exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         partial_archive = recovery / f"partial-control-{stamp}"
-        shutil.move(str(control), str(partial_archive))
+        os.rename(filesystem_path(control), filesystem_path(partial_archive))
         control_existed = False
 
     bundle = (standard_bundle or PACKAGE_ROOT).resolve()
@@ -1258,8 +1306,7 @@ def apply_plan(
         plans = compile_core_plans(plan, root)
         bundle_contracts = load_contract_bundle(bundle, preset)
         validate_definition(bundle_contracts.schema, "ProjectInit", plans["project.json"])
-        with tempfile.TemporaryDirectory(prefix="promin-alpha-init-") as temporary:
-            staging = Path(temporary)
+        with resolved_temporary_directory(prefix="promin-alpha-init-") as staging:
             for name, value in plans.items():
                 _write_json(staging / name, value)
             request = InitRequest(
@@ -1278,12 +1325,14 @@ def apply_plan(
         from .refresh import refresh_project
         refresh = refresh_project(root, apply=True)
     except Exception:
-        if not control_existed and control.exists():
-            shutil.rmtree(control, ignore_errors=True)
-        if partial_archive is not None and partial_archive.exists():
-            shutil.move(str(partial_archive), str(control))
-        elif not host_existed and host_state.exists():
-            shutil.rmtree(host_state, ignore_errors=True)
+        if not control_existed and os.path.lexists(filesystem_path(control)):
+            _remove_owner_tree(control)
+        if partial_archive is not None and os.path.lexists(filesystem_path(control)):
+            _remove_owner_tree(control)
+        if partial_archive is not None and os.path.lexists(filesystem_path(partial_archive)):
+            os.rename(filesystem_path(partial_archive), filesystem_path(control))
+        elif not host_existed and os.path.lexists(filesystem_path(host_state)):
+            _remove_owner_tree(host_state)
         raise
 
     record_observation(
@@ -1317,7 +1366,7 @@ def apply_plan(
 
 def load_resolved_plan(project_root: Path | str) -> dict[str, Any] | None:
     path = Path(project_root).resolve() / ".promin" / "generated" / "resolved-plan.json"
-    if not path.is_file():
+    if not os.path.isfile(filesystem_path(path)):
         return None
     value = load_json_strict(path, root=path.parent)
     return dict(value) if isinstance(value, Mapping) else None
@@ -1325,7 +1374,7 @@ def load_resolved_plan(project_root: Path | str) -> dict[str, Any] | None:
 
 def load_plan_proposal(project_root: Path | str) -> dict[str, Any] | None:
     path = Path(project_root).resolve() / ".promin" / "generated" / "plan-proposal.json"
-    if not path.is_file():
+    if not os.path.isfile(filesystem_path(path)):
         return None
     value = load_json_strict(path, root=path.parent)
     return dict(value) if isinstance(value, Mapping) else None
@@ -1353,7 +1402,7 @@ def next_proposal(project_root: Path | str) -> dict[str, Any]:
         raise ExperienceError("no alpha PlanProposal exists; run promin init")
     progress_path = root / ".promin" / "state" / "experience" / "progress.json"
     completed: set[str] = set()
-    if progress_path.is_file():
+    if os.path.isfile(filesystem_path(progress_path)):
         value = load_json_strict(progress_path, root=progress_path.parent)
         if isinstance(value, Mapping) and isinstance(value.get("completed_task_ids"), list):
             completed = {str(item) for item in value["completed_task_ids"]}
@@ -1590,7 +1639,7 @@ def load_bootstrap_state(project_root: Path | str) -> dict[str, Any] | None:
         / "generated"
         / "bootstrap-state.json"
     )
-    if not path.is_file():
+    if not os.path.isfile(filesystem_path(path)):
         return None
     value = load_json_strict(path, root=path.parent)
     return dict(value) if isinstance(value, Mapping) else None

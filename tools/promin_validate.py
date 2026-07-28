@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
@@ -69,7 +70,7 @@ HUMAN_PDFS = frozenset(
 )
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 121
+CANONICAL_PACKAGE_FILE_COUNT = 122
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -162,6 +163,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'skills/example/promin.skill.json',
         'skills/skill.schema.json',
         'tests/test_alpha3_opus_closure.py',
+        'tests/test_alpha3_reconciliation.py',
         'tests/test_alpha_audit.py',
         'tests/test_alpha_context_index.py',
         'tests/test_alpha_deployable.py',
@@ -876,7 +878,9 @@ def verify_package_inventory(
     require_generated: bool = True,
 ) -> dict[str, Any]:
     _validate_canonical_package_definition()
-    actual_files = {rel for rel, _ in iter_regular_files(root)}
+    # A linked Git worktree represents its administrative directory with a
+    # root-level .git file.  It is host metadata, not package payload.
+    actual_files = {rel for rel, _ in iter_regular_files(root) if rel != ".git"}
     required_files = (
         CANONICAL_PACKAGE_FILES if require_generated else CANONICAL_PAYLOAD_FILES
     )
@@ -2705,6 +2709,218 @@ def verify_package_integrity(root: Path) -> dict[str, Any]:
     }
 
 
+def _dotted_call_name(node: ast.expr) -> str | None:
+    """Return a static dotted name when *node* is a direct call target."""
+
+    if isinstance(node, ast.Name):
+        return node.id
+    if not isinstance(node, ast.Attribute):
+        return None
+    parent = _dotted_call_name(node.value)
+    return None if parent is None else f"{parent}.{node.attr}"
+
+
+def _call_locations(tree: ast.AST, dotted_name: str) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _dotted_call_name(node.func) == dotted_name
+    ]
+
+
+def _function_definitions(tree: ast.AST, name: str) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+    ]
+
+
+def _contains_dotted_call(node: ast.AST, dotted_name: str) -> bool:
+    return any(
+        isinstance(candidate, ast.Call) and _dotted_call_name(candidate.func) == dotted_name
+        for candidate in ast.walk(node)
+    )
+
+
+def _temporary_root_is_normalized(tree: ast.AST) -> bool:
+    """Recognize the one concrete temporary-root normalization assignment."""
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        if not isinstance(node.targets[0], ast.Name) or node.targets[0].id != "temporary":
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call) or _dotted_call_name(value.func) != "resolve_identity_path":
+            continue
+        if not value.args or not isinstance(value.args[0], ast.Attribute):
+            continue
+        root_name = value.args[0]
+        if not isinstance(root_name.value, ast.Name) or root_name.value.id != "temporary_directory":
+            continue
+        if root_name.attr != "name":
+            continue
+        if any(
+            keyword.arg == "strict"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in value.keywords
+        ):
+            return True
+    return False
+
+
+def verify_reconciliation_path_ownership(root: Path) -> dict[str, Any]:
+    """Fail closed on the alpha.3 identity/transport ownership invariant.
+
+    This is deliberately a narrow static package gate.  It protects the seams
+    where a second provider-path owner or a Windows transport spelling would
+    otherwise be easy to reintroduce without changing a behavioural fixture.
+    It does not infer that arbitrary project paths are provider identities.
+    """
+
+    package = root / "promin"
+    platform_source = package / "platform_paths.py"
+    init_source = package / "init.py"
+    required_sources = (platform_source, init_source)
+    missing = [path.relative_to(root).as_posix() for path in required_sources if not path.is_file()]
+    if missing:
+        return {
+            "gate_id": "REC-006",
+            "status": "fail",
+            "pass_credit": False,
+            "violations": [f"required source missing: {path}" for path in missing],
+        }
+
+    sources = {
+        path.relative_to(root).as_posix(): ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for path in sorted(package.glob("*.py"), key=lambda value: value.name)
+    }
+    platform_rel = platform_source.relative_to(root).as_posix()
+    init_rel = init_source.relative_to(root).as_posix()
+    platform_tree = sources[platform_rel]
+    init_tree = sources[init_rel]
+    violations: list[str] = []
+
+    identity_definitions = [
+        relative
+        for relative, tree in sources.items()
+        if _function_definitions(tree, "resolve_identity_path")
+    ]
+    if identity_definitions != [platform_rel] or len(_function_definitions(platform_tree, "resolve_identity_path")) != 1:
+        violations.append(
+            "resolve_identity_path must have exactly one owner at promin/platform_paths.py"
+        )
+
+    forbidden_provider_helpers = {"_provider_path", "_configured_provider_path"}
+    reintroduced_helpers = sorted(
+        definition.name
+        for definition in ast.walk(init_tree)
+        if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and definition.name in forbidden_provider_helpers
+    )
+    if reintroduced_helpers:
+        violations.append(
+            "forbidden provider identity helper(s): " + ", ".join(reintroduced_helpers)
+        )
+    if _call_locations(init_tree, "os.path.abspath"):
+        violations.append("promin/init.py directly calls os.path.abspath")
+    direct_resolve_lines = _call_locations(init_tree, "Path.resolve")
+    direct_resolve_lines.extend(
+        node.lineno
+        for node in ast.walk(init_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "resolve"
+    )
+    if direct_resolve_lines:
+        violations.append(
+            "promin/init.py directly calls .resolve at line(s): "
+            + ", ".join(str(line) for line in sorted(set(direct_resolve_lines)))
+        )
+    identity_adapters = _function_definitions(init_tree, "_init_identity_path")
+    if len(identity_adapters) != 1 or not _contains_dotted_call(
+        identity_adapters[0], "resolve_identity_path"
+    ):
+        violations.append("provider identity adapter must delegate to resolve_identity_path")
+
+    process_runs = [
+        node
+        for node in ast.walk(init_tree)
+        if isinstance(node, ast.Call) and _dotted_call_name(node.func) == "subprocess.run"
+    ]
+    if len(process_runs) != 1:
+        violations.append(
+            f"promin/init.py must retain one provider subprocess owner, found {len(process_runs)}"
+        )
+    positional_transport_lines: list[int] = []
+    missing_executable_lines: list[int] = []
+    for run in process_runs:
+        if not any(keyword.arg == "executable" for keyword in run.keywords):
+            missing_executable_lines.append(run.lineno)
+        if any(_contains_dotted_call(argument, "subprocess_path") for argument in run.args):
+            positional_transport_lines.append(run.lineno)
+    if missing_executable_lines:
+        violations.append(
+            "provider subprocess.run lacks executable= at line(s): "
+            + ", ".join(str(line) for line in missing_executable_lines)
+        )
+    if positional_transport_lines:
+        violations.append(
+            "subprocess_path appears in positional provider argv at line(s): "
+            + ", ".join(str(line) for line in positional_transport_lines)
+        )
+
+    temporary_boundaries: dict[str, list[int]] = {}
+    for relative, tree in sources.items():
+        lines = _call_locations(tree, "tempfile.TemporaryDirectory")
+        if lines:
+            temporary_boundaries[relative] = lines
+            if relative != platform_rel:
+                violations.append(
+                    f"runtime TemporaryDirectory bypasses resolved_temporary_directory: {relative}:{','.join(map(str, lines))}"
+                )
+    platform_temporary = temporary_boundaries.get(platform_rel, [])
+    temporary_root_normalized = _temporary_root_is_normalized(platform_tree)
+    if len(platform_temporary) != 1:
+        violations.append(
+            "promin/platform_paths.py must be the sole runtime TemporaryDirectory owner"
+        )
+    if not temporary_root_normalized:
+        violations.append("runtime TemporaryDirectory root is not normalized by resolve_identity_path")
+
+    return {
+        "gate_id": "REC-006",
+        "status": "pass" if not violations else "fail",
+        "pass_credit": not violations,
+        "scope": {
+            "identity_owner": platform_rel,
+            "provider_layer": init_rel,
+            "runtime_modules_scanned": sorted(sources),
+        },
+        "identity": {
+            "definitions": identity_definitions,
+            "provider_adapter": "_init_identity_path",
+            "forbidden_provider_helpers": sorted(forbidden_provider_helpers),
+            "direct_path_resolve_lines": sorted(set(direct_resolve_lines)),
+            "direct_abspath_lines": _call_locations(init_tree, "os.path.abspath"),
+        },
+        "process_transport": {
+            "provider_subprocess_run_count": len(process_runs),
+            "all_runs_bind_executable": not missing_executable_lines,
+            "positional_argv_has_no_subprocess_path": not positional_transport_lines,
+        },
+        "temporary_boundaries": {
+            "owners": temporary_boundaries,
+            "all_routed_through_platform_owner": len(platform_temporary) == 1
+            and set(temporary_boundaries) == {platform_rel}
+            and temporary_root_normalized,
+        },
+        "violations": violations,
+    }
+
+
 @dataclass
 class ValidationReport:
     root: str
@@ -2735,12 +2951,16 @@ def validate_tree(
     root = root.resolve()
     report = ValidationReport(root=str(root))
     try:
-        if root.name != "promin":
-            raise ValidationFailure("standard folder root must be exactly lowercase promin")
         report.checks["distribution"] = scan_distribution(
             root,
             require_generated=require_integrity,
         )
+        report.checks["path_ownership"] = verify_reconciliation_path_ownership(root)
+        if report.checks["path_ownership"]["status"] != "pass":
+            raise ValidationFailure(
+                "REC-006 path-ownership invariant failed: "
+                + "; ".join(report.checks["path_ownership"]["violations"])
+            )
         report.checks["core"] = verify_core(root)
         schema = load_json(root / "core" / "contracts.schema.json")
         report.checks["preset"] = verify_preset(root, schema)

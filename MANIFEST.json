@@ -2,9 +2,14 @@
   "builder": "tools/promin_package.py",
   "files": [
     {
+      "path": ".git",
+      "sha256": "63b397a98f75736a3e4d5c8c69175e0308ec6dfaba163ad18ac286c6662e4c4e",
+      "size": 102
+    },
+    {
       "path": ".github/workflows/alpha-portability.yml",
-      "sha256": "3dc30053c9b1a9d743f04f07505a2bf8fe154ec06dd7357118659bd8b52c6646",
-      "size": 3712
+      "sha256": "9e1ada149bd206b1fcd638fb3e62a24a89d7f0e6ae193d0705603f8c8f45a800",
+      "size": 5201
     },
     {
       "path": ".gitignore",
@@ -263,8 +268,8 @@
     },
     {
       "path": "promin/canonical.py",
-      "sha256": "606441d377340a7eb1edc644a2674370a3c77b39f993a0bce360385fc1e0faaa",
-      "size": 12618
+      "sha256": "68d60aa443c9eba57e7b26ef6135694d683b0ede34a535da46a02547ea6f44ec",
+      "size": 12963
     },
     {
       "path": "promin/conformance.py",
@@ -273,18 +278,18 @@
     },
     {
       "path": "promin/context_index.py",
-      "sha256": "7b0394bca8a084702b4023b0d8644e2da632d20d43dba45461ab563f8fd4e83c",
-      "size": 19503
+      "sha256": "606d4874975602f0064d852c0c0e1851c305561492f559976acfc1f7c1546e75",
+      "size": 20032
     },
     {
       "path": "promin/contracts.py",
-      "sha256": "99c3062cfd84ab646af99c3489d2ccf6d4196e4465a74aa62bd5d675cccfbe44",
-      "size": 61521
+      "sha256": "737e61b8d1067b79bafd94668b49fef10d9b000dad6bf526ba5828a34483719f",
+      "size": 62049
     },
     {
       "path": "promin/documentation.py",
-      "sha256": "888bdb8ad7469e2773216df6f819ae032db2db8e624c24da50b69ee04a6e8414",
-      "size": 46336
+      "sha256": "c1baf67d5ed654821246dc47bc80fb095cbcdbdbfbbb7b0534efd604764aa7b8",
+      "size": 47807
     },
     {
       "path": "promin/domain.py",
@@ -293,18 +298,18 @@
     },
     {
       "path": "promin/events.py",
-      "sha256": "6bcbc9cb590f6c256d4db54c2b18dd3cb2eb1ab9311b90542a838daf8c117def",
-      "size": 209879
+      "sha256": "04e8009a388d1e930b1384fb83c29db64a7a19e68563a8ce259b5ea0847bdc77",
+      "size": 211435
     },
     {
       "path": "promin/evidence.py",
-      "sha256": "fe5ca0452017b57369cf4afd5f78bf18c6e5faf48321e50e3ca666c2a7b6f1f6",
-      "size": 315795
+      "sha256": "0aac2e8671a8d2bca2a8dcf66d6c6396b2920ed89246dab087b7e0e5241ba1de",
+      "size": 317224
     },
     {
       "path": "promin/experience.py",
-      "sha256": "405aed1cf2bc76f3f6437fe73fb742df57e08a35ae737ccfd30a6cf7c47722b5",
-      "size": 71049
+      "sha256": "80862a32e6271e48fdd9a5897b19852056289c7119b7aaea686ee10b46ddca3c",
+      "size": 73384
     },
     {
       "path": "promin/gitpolicy.py",
@@ -318,8 +323,8 @@
     },
     {
       "path": "promin/init.py",
-      "sha256": "65d01d5531fea8a4723dc81e6dc9ff55110c5288057d710fb619a8b54b61da5a",
-      "size": 178891
+      "sha256": "94c9512148afd2781d54ada784005fdee40f791af996234e750e3f94d6742b91",
+      "size": 182523
     },
     {
       "path": "promin/limits.py",
@@ -333,18 +338,18 @@
     },
     {
       "path": "promin/platform_paths.py",
-      "sha256": "871f3b9a764fa821ced0bf884145d1b26d92e1f28ab4a5eaa455a8d0062e99ff",
-      "size": 7183
+      "sha256": "1d55c31efe4494e2ce7b12f60394402958812efa8361591bee7129d4bc34f8aa",
+      "size": 10957
     },
     {
       "path": "promin/portability.py",
-      "sha256": "df876f6e9884bddfd0a5278b2b0c8ee7fa409b1aec5f9e81dca72ab824995267",
-      "size": 20307
+      "sha256": "9a0ba6618d94ec5d157652ff28803709710183c0b5450421be007075fa622049",
+      "size": 21504
     },
     {
       "path": "promin/projection.py",
-      "sha256": "089ebe0766a8eb940ff17c3d624b494a2d4d5a0c171033d8274bcfc6d5827dbc",
-      "size": 139985
+      "sha256": "89ff3145248714d0895a438edbcaac6bed68bc74c2e775ef5604d8241e8d7ed4",
+      "size": 140921
     },
     {
       "path": "promin/provider_store.py",
@@ -373,13 +378,13 @@
     },
     {
       "path": "promin/skills.py",
-      "sha256": "6d970aee41786bc6e06a1525933d36eea989e0f7a7996e1dd56ee5096a7b791b",
-      "size": 34220
+      "sha256": "db1a788e52a4343d6e9078d3e5fecfec5f19b0454cdbb47ef02198648ce00434",
+      "size": 34226
     },
     {
       "path": "promin/system_check.py",
-      "sha256": "780f74a34303c14083afca238763cf0df5dd69996f3f0c98ba173885dfac1a34",
-      "size": 20787
+      "sha256": "528e6454a738702ba5b9b97bf14616ee50a6afe7c33664965460fccc8bfdabb6",
+      "size": 20789
     },
     {
       "path": "promin/telemetry.py",
@@ -435,6 +440,11 @@
       "path": "tests/test_alpha3_opus_closure.py",
       "sha256": "ae23964420bbd5917d65da30f9c1c6bbe26800e32f759e98e4ba4a71a08e124a",
       "size": 16641
+    },
+    {
+      "path": "tests/test_alpha3_reconciliation.py",
+      "sha256": "2d175e9e7a7cfe1986aab893b98b5c160dce8a4c21b83b178d139a897f703904",
+      "size": 5694
     },
     {
       "path": "tests/test_alpha_audit.py",
@@ -493,8 +503,8 @@
     },
     {
       "path": "tests/test_canonical_init.py",
-      "sha256": "ffd32282b65b1fbaaf44a4df1e30f1a1a9dd56766946df3deedbb07c70646937",
-      "size": 78743
+      "sha256": "066641b31cdc65b03df23717c5377694f6a9b709514c9ca2b9046818b19b0064",
+      "size": 78901
     },
     {
       "path": "tests/test_concurrency_crash.py",
@@ -518,8 +528,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "11293794513d5a9bf9671b96675f032cb7fdbc62eabddf25e5b79f8d700dace2",
-      "size": 56661
+      "sha256": "15a9b8818f9d44ec7bf742a4dfc3400299660c5ad0058c9153b8467b21e9f5fe",
+      "size": 57971
     },
     {
       "path": "tests/test_scale_orchestration.py",
@@ -593,8 +603,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "4fa7d38b1d8ac90b81e5e430b1c09a7847790e518efb40ba2e76df53082c918d",
-      "size": 124415
+      "sha256": "469a883952ccba66842bb8ee78ebd8ff47dee681c2887f0c48b9678e592de897",
+      "size": 133576
     }
   ],
   "generated_surfaces": [

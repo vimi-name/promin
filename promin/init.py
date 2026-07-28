@@ -10,11 +10,10 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -44,6 +43,7 @@ from .platform_paths import (
     PlatformPathError,
     filesystem_path,
     resolve_identity_path,
+    resolved_temporary_directory,
     subprocess_path,
 )
 
@@ -352,7 +352,15 @@ def _init_identity_path(
 def _spawn_provider_argv(
     binding: Mapping[str, Any], argv: Sequence[str], project_root: Path
 ) -> list[str]:
-    """Apply host process-path syntax only at the process-spawn boundary."""
+    """Resolve provider path arguments at the process-spawn boundary.
+
+    The Windows extended-length prefix is deliberately NOT applied here. Python
+    passes this list as ``lpCommandLine``, and ``\\\\?\\`` is only honoured by the
+    file APIs and by ``lpApplicationName`` -- inside a command line Windows
+    rejects it with ERROR_FILENAME_EXCED_RANGE (206). Over-long executables are
+    handled by ``_spawn_provider_executable`` below, which feeds
+    ``subprocess(executable=...)`` i.e. ``lpApplicationName``.
+    """
 
     result = list(argv)
     if not result:
@@ -361,8 +369,50 @@ def _spawn_provider_argv(
     for index in path_indices:
         if index >= len(result):
             raise InitError(f"provider invocation lacks required path argument: {binding.get('provider_id')}")
-        result[index] = subprocess_path(_init_identity_path(str(result[index]), project_root))
+        result[index] = str(_init_identity_path(str(result[index]), project_root))
     return result
+
+
+def _spawn_provider_executable(argv: Sequence[str]) -> str | None:
+    """Return the ``lpApplicationName`` spelling for a provider spawn.
+
+    ``lpApplicationName`` is the only process-creation parameter that accepts the
+    Windows extended-length prefix, so this is where a receipt path beyond
+    MAX_PATH has to be carried. Returns None when there is nothing to spawn.
+    """
+
+    if not argv:
+        return None
+    return subprocess_path(argv[0])
+
+
+def _run_identity_process(
+    argv: Sequence[str], **kwargs: Any
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one executable identity with transport spelling kept out of argv."""
+
+    spawn_argv = [str(value) for value in argv]
+    if not spawn_argv:
+        raise InitError("provider invocation argv is empty")
+    return subprocess.run(
+        spawn_argv,
+        executable=_spawn_provider_executable(spawn_argv),
+        **kwargs,
+    )
+
+
+def _run_provider_process(
+    binding: Mapping[str, Any],
+    argv: Sequence[str],
+    project_root: Path,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[bytes]:
+    """Normalize provider identities once, then invoke through one spawn owner."""
+
+    return _run_identity_process(
+        _spawn_provider_argv(binding, argv, project_root),
+        **kwargs,
+    )
 
 
 @dataclass(frozen=True)
@@ -1028,8 +1078,10 @@ class ProviderDispatch:
         timeout = _provider_timeout_seconds(self.binding(capability_id))
         started_at = _utc_second_text()
         try:
-            completed = subprocess.run(
-                _spawn_provider_argv(self.binding(capability_id), plan.argv, self._project_root),
+            completed = _run_provider_process(
+                self.binding(capability_id),
+                plan.argv,
+                self._project_root,
                 cwd=plan.cwd,
                 input=plan.stdin,
                 stdout=subprocess.PIPE,
@@ -1090,8 +1142,10 @@ class ProviderDispatch:
         )
         started_at = _utc_second_text()
         try:
-            completed = subprocess.run(
-                _spawn_provider_argv(self.binding("filesystem-inventory"), plan.argv, self._project_root),
+            completed = _run_provider_process(
+                self.binding("filesystem-inventory"),
+                plan.argv,
+                self._project_root,
                 cwd=plan.cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -1334,7 +1388,7 @@ def _provider_tree_source_file(root: Path, path: Path) -> Path:
             target_mode = os.stat(filesystem_path(target), follow_symlinks=False).st_mode
         except OSError as exc:
             raise InitError(f"provider dependency link target is unavailable: {path}") from exc
-        if not stat.S_ISREG(target_mode) or target.is_symlink():
+        if not stat.S_ISREG(target_mode) or os.path.islink(filesystem_path(target)):
             raise InitError(f"provider dependency link target is not a regular file: {path}")
         return target
     if not stat.S_ISREG(mode):
@@ -1351,20 +1405,25 @@ def _provider_tree_files(root: Path) -> tuple[list[dict[str, Any]], int]:
         resolved = resolve_identity_path(root, strict=True)
     except OSError as exc:
         raise InitError(f"provider dependency tree is unavailable: {root}: {exc}") from exc
-    if not resolved.is_dir() or resolved.is_symlink():
+    if (
+        not os.path.isdir(filesystem_path(resolved))
+        or os.path.islink(filesystem_path(resolved))
+    ):
         raise InitError(f"provider dependency tree is not a real directory: {root}")
     files: list[dict[str, Any]] = []
     total = 0
     for directory, directories, filenames in os.walk(
-        resolved, topdown=True, followlinks=False
+        _native_path(resolved), topdown=True, followlinks=False
     ):
-        base = Path(directory)
+        base = resolve_identity_path(directory, strict=True)
         for name in tuple(directories):
             child = base / name
             is_junction = bool(
-                getattr(os.path, "isjunction", lambda _value: False)(child)
+                getattr(os.path, "isjunction", lambda _value: False)(
+                    filesystem_path(child)
+                )
             )
-            if child.is_symlink() or is_junction:
+            if os.path.islink(filesystem_path(child)) or is_junction:
                 raise InitError(f"provider dependency tree contains a link: {child}")
         for name in filenames:
             logical_path = base / name
@@ -1654,7 +1713,7 @@ def _materialize_dependency_component(
     project_root: Path,
 ) -> None:
     target = _component_receipt_path(receipt_root, binding, component)
-    target.mkdir(parents=True, exist_ok=False)
+    _make_directory(target, parents=True, exist_ok=False)
     source = _init_identity_path(str(component["source"]), project_root)
     kind = component["component_kind"]
     selected: list[tuple[Path, Path, str]] = []
@@ -1692,7 +1751,7 @@ def materialize_provider_receipts(
 ) -> None:
     """Copy verified provider payloads once into immutable content-addressed paths."""
 
-    receipt_root.mkdir(parents=True, exist_ok=False)
+    _make_directory(receipt_root, parents=True, exist_ok=False)
     created: dict[Path, str] = {}
     created_components: dict[Path, str] = {}
     for binding in technologies.get("bindings", []):
@@ -1726,12 +1785,18 @@ def verify_provider_receipt_inventory(
     technologies: Mapping[str, Any], receipt_root: Path, project_root: Path
 ) -> None:
     try:
-        receipt_mode = receipt_root.stat(follow_symlinks=False).st_mode
+        receipt_mode = os.stat(
+            filesystem_path(receipt_root), follow_symlinks=False
+        ).st_mode
     except OSError as exc:
         raise InitError(f"provider receipt root is unavailable: {exc}") from exc
     if (
-        receipt_root.is_symlink()
-        or bool(getattr(os.path, "isjunction", lambda _value: False)(receipt_root))
+        os.path.islink(filesystem_path(receipt_root))
+        or bool(
+            getattr(os.path, "isjunction", lambda _value: False)(
+                filesystem_path(receipt_root)
+            )
+        )
         or not stat.S_ISDIR(receipt_mode)
     ):
         raise InitError("provider receipt root must be a real directory")
@@ -1760,13 +1825,15 @@ def verify_provider_receipt_inventory(
                 )
                 expected_files.add(materialized.relative_to(receipt_root).as_posix())
                 actual_digest = digest_file(materialized)
-                actual_size = materialized.stat(follow_symlinks=False).st_size
+                actual_size = os.stat(
+                    filesystem_path(materialized), follow_symlinks=False
+                ).st_size
             elif kind in {"provider-tree", "python-distribution"}:
                 actual_digest, actual_size = _provider_tree_digest(target)
                 for directory, _directories, filenames in os.walk(
-                    target, topdown=True, followlinks=False
+                    _native_path(target), topdown=True, followlinks=False
                 ):
-                    base = Path(directory)
+                    base = resolve_identity_path(directory, strict=True)
                     for filename in filenames:
                         materialized = require_regular_file(
                             base / filename, root=target
@@ -1797,22 +1864,30 @@ def verify_provider_receipt_inventory(
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
     for directory, directories, filenames in os.walk(
-        receipt_root, topdown=True, followlinks=False
+        _native_path(receipt_root), topdown=True, followlinks=False
     ):
-        base = Path(directory)
+        base = resolve_identity_path(directory, strict=True)
         for name in tuple(directories):
             path = base / name
             is_junction = bool(
-                getattr(os.path, "isjunction", lambda _value: False)(path)
+                getattr(os.path, "isjunction", lambda _value: False)(
+                    filesystem_path(path)
+                )
             )
-            if path.is_symlink() or is_junction:
+            if os.path.islink(filesystem_path(path)) or is_junction:
                 raise InitError(f"provider receipt directory is a link: {path}")
             actual_directories.add(path.relative_to(receipt_root).as_posix())
         for name in filenames:
             path = require_regular_file(base / name, root=receipt_root)
             actual_files.add(path.relative_to(receipt_root).as_posix())
     if actual_files != expected_files or actual_directories != expected_directories:
-        raise InitError("provider receipt inventory is not exact")
+        raise InitError(
+            "provider receipt inventory is not exact: "
+            f"missing_files={sorted(expected_files - actual_files)[:3]} "
+            f"unexpected_files={sorted(actual_files - expected_files)[:3]} "
+            f"missing_directories={sorted(expected_directories - actual_directories)[:3]} "
+            f"unexpected_directories={sorted(actual_directories - expected_directories)[:3]}"
+        )
 
 
 def _runtime_provider_binding(
@@ -2290,6 +2365,31 @@ def _extended_path(path: Path) -> Path:
     return Path(_native_path(path))
 
 
+def _make_directory(
+    path: Path,
+    *,
+    mode: int = 0o777,
+    parents: bool = False,
+    exist_ok: bool = False,
+) -> None:
+    """Create an owner-managed directory at the final filesystem boundary.
+
+    Init records retain ordinary canonical paths.  Windows extended-length
+    spelling is used only for the OS call because a project root can validly
+    place its private staging tree beyond the historical Win32 path limit.
+    """
+
+    native = _native_path(path)
+    if parents:
+        os.makedirs(native, mode=mode, exist_ok=exist_ok)
+        return
+    try:
+        os.mkdir(native, mode=mode)
+    except FileExistsError:
+        if not exist_ok:
+            raise
+
+
 @dataclass(frozen=True)
 class InitRequest:
     project_root: Path
@@ -2658,8 +2758,8 @@ def _init_input_identity(
     core_files = {
         filename: {
             "digest": digest_file(bundle.core_dir / filename, root=bundle.core_dir),
-            "size_bytes": (bundle.core_dir / filename).stat(
-                follow_symlinks=False
+            "size_bytes": os.stat(
+                filesystem_path(bundle.core_dir / filename), follow_symlinks=False
             ).st_size,
         }
         for filename in CORE_FILES
@@ -2710,8 +2810,8 @@ def _preflight_init_inputs(
 ) -> tuple[dict[str, Any], dict[str, Any], InitPreflightReceipt]:
     """Verify all input bytes and provider execution outside the product project."""
 
-    with tempfile.TemporaryDirectory(prefix="promin-v1-init-preflight-") as temporary:
-        receipt_root = Path(temporary) / "providers"
+    with resolved_temporary_directory(prefix="promin-v1-init-preflight-") as temporary:
+        receipt_root = temporary / "providers"
         materialize_provider_receipts(
             plans["technologies.json"], project_root, receipt_root
         )
@@ -2906,8 +3006,7 @@ def initialize_explicit_init_plan(
         plans["technologies.json"]
     ):
         raise InitError("implementation closure changed after plan construction")
-    with tempfile.TemporaryDirectory(prefix="promin-v1-explicit-init-") as temporary:
-        plan_root = Path(temporary)
+    with resolved_temporary_directory(prefix="promin-v1-explicit-init-") as plan_root:
         paths: dict[str, Path] = {}
         for filename in PLAN_FILES:
             path = plan_root / filename
@@ -3036,14 +3135,14 @@ def review_init_request(request: InitRequest, *, run_preflight: bool) -> dict[st
     plans, licenses = _load_plan_files(request, bundle)
     validate_plan_objects(plans, bundle, licenses)
     _validate_project_bound_authority(plans)
-    temporary_receipts: tempfile.TemporaryDirectory[str] | None = None
-    try:
-        receipt_root = None
+    temporary_context = (
+        resolved_temporary_directory(prefix="promin-v1-provider-review-")
+        if run_preflight
+        else nullcontext(None)
+    )
+    with temporary_context as temporary_root:
+        receipt_root = temporary_root / "providers" if temporary_root is not None else None
         if run_preflight:
-            temporary_receipts = tempfile.TemporaryDirectory(
-                prefix="promin-v1-provider-review-"
-            )
-            receipt_root = Path(temporary_receipts.name) / "providers"
             materialize_provider_receipts(
                 plans["technologies.json"], project_root, receipt_root
             )
@@ -3077,9 +3176,6 @@ def review_init_request(request: InitRequest, *, run_preflight: bool) -> dict[st
             request.activation_proofs,
             selected_verifier,
         )
-    finally:
-        if temporary_receipts is not None:
-            temporary_receipts.cleanup()
     technologies = plans["technologies.json"]
     return {
         "record_type": "InitPlanReview",
@@ -3373,8 +3469,8 @@ def _executable_signature_verifier(
             "key": dict(key),
         }
         try:
-            completed = subprocess.run(
-                [subprocess_path(executable), "--promin-signature-verify-v1"],
+            completed = _run_identity_process(
+                [str(executable), "--promin-signature-verify-v1"],
                 cwd=project_root,
                 input=canonical_bytes(request),
                 stdout=subprocess.PIPE,
@@ -3784,7 +3880,7 @@ def verify_provider_preflight(
                 "--version",
             ]
         try:
-            completed = subprocess.run(
+            completed = _run_identity_process(
                 spawn_argv,
                 cwd=project_root,
                 stdin=subprocess.DEVNULL,
@@ -3822,8 +3918,9 @@ def verify_provider_preflight(
                 )
                 source_runtime = source_dispatch.binding(capability_id)
                 source_argv = list(source_runtime["healthcheck"]["argv"])
-                source_completed = subprocess.run(
-                    _spawn_provider_argv(source_runtime, source_argv, project_root),
+                _source_spawn = _spawn_provider_argv(source_runtime, source_argv, project_root)
+                source_completed = _run_identity_process(
+                    _source_spawn,
                     cwd=project_root,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
@@ -3888,7 +3985,7 @@ def verify_provider_preflight(
 
 def _copy_regular(source: Path, destination: Path, *, root: Path) -> None:
     resolved = require_regular_file(source, root=root)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    _make_directory(destination.parent, parents=True, exist_ok=True)
     try:
         with resolved.open("rb") as reader, open(_native_path(destination), "xb") as writer:
             for chunk in iter(lambda: reader.read(1024 * 1024), b""):
@@ -3903,14 +4000,14 @@ def _install_bundle(staging_control: Path, bundle: ContractBundle) -> Path:
     installed = staging_control / "standard" / bundle.bundle_digest
     target_core = installed / "core"
     target_preset = installed / "presets" / f"{bundle.preset_digest}.json"
-    target_core.mkdir(parents=True)
+    _make_directory(target_core, parents=True)
     for filename in CORE_FILES:
         _copy_regular(
             bundle.core_dir / filename,
             target_core / filename,
             root=bundle.core_dir,
         )
-    target_preset.parent.mkdir(parents=True)
+    _make_directory(target_preset.parent, parents=True)
     _copy_regular(bundle.preset_path, target_preset, root=bundle.preset_path.parent)
     installed_bundle = load_contract_bundle(installed, _extended_path(target_preset))
     if (
@@ -3923,15 +4020,15 @@ def _install_bundle(staging_control: Path, bundle: ContractBundle) -> Path:
 
 def _write_init(staging_control: Path, plans: Mapping[str, Any], activation: Mapping[str, Any]) -> None:
     init_dir = staging_control / "init"
-    init_dir.mkdir(parents=True)
+    _make_directory(init_dir, parents=True)
     for filename in PLAN_FILES:
         target = init_dir / filename
-        with target.open("xb") as handle:
+        with open(_native_path(target), "xb") as handle:
             handle.write(canonical_bytes(plans[filename]))
             handle.flush()
             os.fsync(handle.fileno())
     activation_path = init_dir / "activation.json"
-    with activation_path.open("xb") as handle:
+    with open(_native_path(activation_path), "xb") as handle:
         handle.write(canonical_bytes(activation))
         handle.flush()
         os.fsync(handle.fileno())
@@ -3941,7 +4038,7 @@ def _write_init(staging_control: Path, plans: Mapping[str, Any], activation: Map
 
 def _write_continuation_secret(staging_control: Path, activation_digest: str) -> None:
     secrets = staging_control / "state" / "secrets"
-    secrets.mkdir(mode=0o700, parents=True, exist_ok=False)
+    _make_directory(secrets, mode=0o700, parents=True, exist_ok=False)
     if os.name != "nt":
         os.chmod(secrets, 0o700)
     target = secrets / f"{activation_digest}.continuation.key"
@@ -3966,16 +4063,18 @@ def _write_continuation_secret(staging_control: Path, activation_digest: str) ->
 def _load_continuation_secret(control: Path, activation_digest: str) -> bytes:
     secrets = control / "state" / "secrets"
     try:
-        directory_mode = secrets.stat(follow_symlinks=False).st_mode
+        directory_mode = os.stat(
+            filesystem_path(secrets), follow_symlinks=False
+        ).st_mode
     except OSError as exc:
         raise InitError(f"continuation secret directory is unavailable: {exc}") from exc
-    if secrets.is_symlink() or not stat.S_ISDIR(directory_mode):
+    if os.path.islink(filesystem_path(secrets)) or not stat.S_ISDIR(directory_mode):
         raise InitError("continuation secret directory must be a real directory")
     filename = f"{activation_digest}.continuation.key"
     (target,) = ensure_exact_regular_files(secrets, (filename,))
     try:
-        mode = target.stat(follow_symlinks=False).st_mode
-        with target.open("rb") as handle:
+        mode = os.stat(filesystem_path(target), follow_symlinks=False).st_mode
+        with open(_native_path(target), "rb") as handle:
             secret = handle.read(_CONTINUATION_SECRET_BYTES + 1)
     except OSError as exc:
         raise InitError(f"continuation secret is unavailable: {exc}") from exc
@@ -3997,7 +4096,7 @@ def _make_runtime_directories(staging_control: Path, activation_digest: str) -> 
         "generated",
         "cache",
     ):
-        (staging_control / relative).mkdir(parents=True, exist_ok=False)
+        _make_directory(staging_control / relative, parents=True, exist_ok=False)
     _write_continuation_secret(staging_control, activation_digest)
 
 
@@ -4019,7 +4118,7 @@ def _set_installed_read_only(installed: Path, *, preserve_execute: bool = False)
 
 
 def _remove_staging(path: Path) -> None:
-    if not path.exists():
+    if not os.path.lexists(_native_path(path)):
         return
     native_root = _extended_path(path)
     for directory, directories, filenames in os.walk(native_root, topdown=False):
@@ -4041,7 +4140,7 @@ def _publish_control_directory(staging: Path, control: Path) -> None:
 
     for attempt in range(8):
         try:
-            os.rename(staging, control)
+            os.rename(_native_path(staging), _native_path(control))
             return
         except PermissionError:
             if attempt == 7:
@@ -4067,10 +4166,10 @@ class ActivationGuard:
     def verify(self, *, verify_schema_meta: bool = True) -> ActivationContext:
         control = self.project_root / ".promin"
         try:
-            mode = control.stat(follow_symlinks=False).st_mode
+            mode = os.stat(filesystem_path(control), follow_symlinks=False).st_mode
         except OSError as exc:
             raise InitError(f"Promin control state is unavailable: {exc}") from exc
-        if control.is_symlink() or not stat.S_ISDIR(mode):
+        if os.path.islink(filesystem_path(control)) or not stat.S_ISDIR(mode):
             raise InitError(".promin must be a real directory")
         init_dir = control / "init"
         ensure_exact_regular_files(init_dir, INIT_FILES)
@@ -4293,7 +4392,7 @@ def _initialize_project_locked(request: InitRequest, project_root: Path) -> Init
     # while retaining an unpredictable collision boundary.
     staging = project_root / f".p-{uuid.uuid4().hex[:12]}"
     try:
-        staging.mkdir()
+        _make_directory(staging)
         installed = _install_bundle(staging, bundle)
         receipt_root = staging / "providers"
         materialize_provider_receipts(

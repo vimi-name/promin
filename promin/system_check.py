@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,6 +19,7 @@ from .documentation import documentation_status
 from .experience import DEFAULT_PRESET, PACKAGE_ROOT, compile_core_plans, experience_status, load_bootstrap_state, load_resolved_plan, resolve_plan
 from .gitpolicy import commit_footprint, git_tracking_status
 from .host_integration import host_surface_status
+from .platform_paths import resolved_temporary_directory
 from .portability import doctor_with_portability
 from .init import InitRequest
 from .service import ProminService
@@ -86,8 +86,7 @@ def _sandbox_init_check() -> dict[str, Any]:
     previous = os.environ.get("PROMIN_NO_TELEMETRY")
     os.environ["PROMIN_NO_TELEMETRY"] = "1"
     try:
-        with tempfile.TemporaryDirectory(prefix="promin-check-init-") as temporary:
-            root = Path(temporary)
+        with resolved_temporary_directory(prefix="promin-check-init-") as root:
             (root / "src").mkdir()
             for index in range(10):
                 (root / "src" / f"f{index}.py").write_text("value = 1\n", encoding="utf-8")

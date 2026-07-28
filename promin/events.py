@@ -11,6 +11,7 @@ import base64
 import copy
 import datetime as _datetime
 import errno
+import fnmatch
 import hashlib
 import inspect
 import itertools
@@ -1358,7 +1359,9 @@ def _fsync_directory(path: Path) -> None:
         except (AttributeError, OSError, ValueError):
             pass
         return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    descriptor = os.open(
+        _native_os_path(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
     try:
         os.fsync(descriptor)
     finally:
@@ -1380,6 +1383,45 @@ def _native_os_path(path: Path) -> str | Path:
 
 def _path_exists(path: Path) -> bool:
     return os.path.exists(_native_os_path(path))
+
+
+def _has_entries(path: Path) -> bool:
+    with os.scandir(_native_os_path(path)) as entries:
+        return next(entries, None) is not None
+
+
+def _matching_paths(directory: Path, pattern: str) -> list[Path]:
+    """Return logical child paths after native-boundary enumeration.
+
+    Event state keeps ordinary canonical ``Path`` values for identities and
+    diagnostics. On Windows, only directory enumeration needs the
+    extended-length spelling; rebuilding children from names keeps that
+    transport detail out of state and records.
+    """
+
+    with os.scandir(_native_os_path(directory)) as entries:
+        return [
+            directory / entry.name
+            for entry in entries
+            if fnmatch.fnmatchcase(entry.name, pattern)
+        ]
+
+
+def _child_paths(directory: Path) -> list[Path]:
+    with os.scandir(_native_os_path(directory)) as entries:
+        return [directory / entry.name for entry in entries]
+
+
+def _is_directory(path: Path) -> bool:
+    return os.path.isdir(_native_os_path(path))
+
+
+def _is_symlink(path: Path) -> bool:
+    return os.path.islink(_native_os_path(path))
+
+
+def _modified_time_ns(path: Path) -> int:
+    return os.stat(_native_os_path(path), follow_symlinks=False).st_mtime_ns
 
 
 def _read_bytes(path: Path) -> bytes:
@@ -1413,7 +1455,7 @@ def _replace_durable(source: Path, destination: Path) -> None:
             error = ctypes.get_last_error()
             raise OSError(error, "MoveFileExW failed", str(destination))
     else:
-        os.replace(source, destination)
+        os.replace(_native_os_path(source), _native_os_path(destination))
     _fsync_directory(destination.parent)
 
 
@@ -1434,7 +1476,7 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 
 
 def _local_lock(path: Path) -> threading.Lock:
-    key = os.path.normcase(str(path.resolve()))
+    key = os.path.normcase(str(path.absolute()))
     with _local_writer_guard:
         return _local_writer_locks.setdefault(key, threading.Lock())
 
@@ -1452,7 +1494,9 @@ class _WriterLock:
         if not self.local.acquire(timeout=max(0.0, self.timeout)):
             raise EventStoreError("single-writer lock timeout")
         try:
-            self.descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            self.descriptor = os.open(
+                _native_os_path(self.path), os.O_CREAT | os.O_RDWR, 0o600
+            )
             if os.fstat(self.descriptor).st_size == 0:
                 os.write(self.descriptor, b"\0")
                 os.fsync(self.descriptor)
@@ -1653,12 +1697,12 @@ class EventStore:
         self._fallback_reason: str | None = None
         self._derived_state_issues: dict[str, str | None] = {}
         self._last_commit_write_metrics = self._empty_commit_write_metrics()
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.journal.mkdir(exist_ok=True)
-        self.pending.mkdir(exist_ok=True)
-        self.authority_root.mkdir(exist_ok=True)
-        self.index_root.mkdir(exist_ok=True)
-        self.derived_state_root.mkdir(exist_ok=True)
+        os.makedirs(_native_os_path(self.root), exist_ok=True)
+        os.makedirs(_native_os_path(self.journal), exist_ok=True)
+        os.makedirs(_native_os_path(self.pending), exist_ok=True)
+        os.makedirs(_native_os_path(self.authority_root), exist_ok=True)
+        os.makedirs(_native_os_path(self.index_root), exist_ok=True)
+        os.makedirs(_native_os_path(self.derived_state_root), exist_ok=True)
         self._verify_or_create_implementation_binding()
         self._open_or_recover()
 
@@ -1725,11 +1769,11 @@ class EventStore:
                 _path_exists(self.head_path),
                 _path_exists(self.checkpoint_path),
                 _path_exists(self.authority_head_path),
-                next(self.journal.iterdir(), None) is not None,
-                next(self.authority_root.iterdir(), None) is not None,
-                next(self.pending.iterdir(), None) is not None,
-                next(self.index_root.iterdir(), None) is not None,
-                next(self.derived_state_root.iterdir(), None) is not None,
+                _has_entries(self.journal),
+                _has_entries(self.authority_root),
+                _has_entries(self.pending),
+                _has_entries(self.index_root),
+                _has_entries(self.derived_state_root),
             )
         )
 
@@ -1851,8 +1895,9 @@ class EventStore:
         index_generation = uuid.uuid4().hex
         authority_generation = uuid.uuid4().hex
         generation_root = self.index_root / index_generation
-        self._authority_generation_root(authority_generation).mkdir(
-            parents=True, exist_ok=True
+        os.makedirs(
+            _native_os_path(self._authority_generation_root(authority_generation)),
+            exist_ok=True,
         )
         for kind in (
             "command",
@@ -1861,7 +1906,7 @@ class EventStore:
             "batch-digest",
             "packages",
         ):
-            (generation_root / kind).mkdir(parents=True, exist_ok=True)
+            os.makedirs(_native_os_path(generation_root / kind), exist_ok=True)
         self._initialize_event_identity_index(index_generation)
         self._initialize_state_binding_index(index_generation)
         expected_sequence = 1
@@ -1869,7 +1914,7 @@ class EventStore:
         previous_authority_commitment = (
             self.policy.genesis_previous_authority_commitment
         )
-        journal_paths = sorted(self.journal.glob("*.json"))
+        journal_paths = sorted(_matching_paths(self.journal, "*.json"))
         for path in journal_paths:
             envelope = self._read_envelope(path)
             batch_digest = self._validate_envelope(
@@ -1971,7 +2016,7 @@ class EventStore:
         if disk_head != head:
             _write_atomic(self.head_path, canonical_bytes(head))
         committed_batch_ids = batch_ids
-        for path in self.pending.glob("*.json"):
+        for path in _matching_paths(self.pending, "*.json"):
             try:
                 pending = self._read_envelope(path)
                 if pending.get("batch", {}).get("batch_id") in committed_batch_ids:
@@ -2050,14 +2095,18 @@ class EventStore:
             retain = 1
         candidates: list[tuple[int, str, Path]] = []
         try:
-            entries = list(root.iterdir())
+            entries = _child_paths(root)
         except OSError:
             return
         for path in entries:
-            if path.is_symlink() or not path.is_dir() or not _INDEX_GENERATION.fullmatch(path.name):
+            if (
+                _is_symlink(path)
+                or not _is_directory(path)
+                or not _INDEX_GENERATION.fullmatch(path.name)
+            ):
                 continue
             try:
-                modified = path.stat(follow_symlinks=False).st_mtime_ns
+                modified = _modified_time_ns(path)
             except OSError:
                 modified = 0
             candidates.append((modified, path.name, path))
@@ -2072,7 +2121,7 @@ class EventStore:
             if name in keep:
                 continue
             try:
-                shutil.rmtree(path)
+                shutil.rmtree(_native_os_path(path))
                 changed = True
             except OSError:
                 # Cleanup is best effort.  A leftover disposable generation is
@@ -2270,10 +2319,10 @@ class EventStore:
         ):
             raise DerivedCheckpointError("journal prefix root binding mismatch")
         generation_root = self._authority_generation_root(generation)
-        if not generation_root.is_dir():
+        if not _is_directory(generation_root):
             raise DerivedCheckpointError("journal prefix generation is missing")
-        journal_paths = sorted(self.journal.glob("*.json"))
-        segment_paths = sorted(generation_root.glob("*.json"))
+        journal_paths = sorted(_matching_paths(self.journal, "*.json"))
+        segment_paths = sorted(_matching_paths(generation_root, "*.json"))
         if len(journal_paths) != checked_head["sequence"] or len(segment_paths) != checked_head["sequence"]:
             raise DerivedCheckpointError("journal prefix does not cover the exact authoritative history")
 
@@ -2494,7 +2543,7 @@ class EventStore:
         if not isinstance(generation, str) or not _INDEX_GENERATION.fullmatch(generation):
             raise DerivedCheckpointError("journal checkpoint index generation is invalid")
         generation_root = self.index_root / generation
-        if not generation_root.is_dir():
+        if not _is_directory(generation_root):
             raise DerivedCheckpointError("journal checkpoint index generation is missing")
         self._validate_event_identity_index(
             generation,
@@ -2507,12 +2556,12 @@ class EventStore:
             update_count=value["state_binding_update_count"],
             root_digest=value["state_binding_digest"],
         )
-        if next(self.pending.glob("*.json"), None) is not None:
+        if _matching_paths(self.pending, "*.json"):
             raise DerivedCheckpointError("pending transaction requires recovery")
         if head["sequence"] == 0:
             if value["last_journal_file"] is not None or value["last_journal_file_digest"] is not None:
                 raise DerivedCheckpointError("empty journal checkpoint has a last file")
-            if next(self.journal.glob("*.json"), None) is not None:
+            if _matching_paths(self.journal, "*.json"):
                 raise DerivedCheckpointError("empty journal checkpoint has committed data")
         else:
             file_name = value["last_journal_file"]
@@ -2542,7 +2591,9 @@ class EventStore:
             )
             if batch["batch_id"] != head["batch_id"] or batch_digest != head["batch_digest"]:
                 raise DerivedCheckpointError("journal checkpoint does not bind authoritative HEAD")
-            if next(self.journal.glob(f"{head['sequence'] + 1:020d}-*.json"), None) is not None:
+            if _matching_paths(
+                self.journal, f"{head['sequence'] + 1:020d}-*.json"
+            ):
                 raise DerivedCheckpointError("journal checkpoint omits a durable journal tail")
         self._head = head
         self._command_ids = {}
@@ -4049,7 +4100,7 @@ class EventStore:
     ) -> Iterator[dict[str, Any]]:
         previous: str | None = None
         sequence = 1
-        for path in sorted(self.journal.glob("*.json")):
+        for path in sorted(_matching_paths(self.journal, "*.json")):
             envelope = self._read_envelope(path)
             if validate:
                 previous = self._validate_envelope(
@@ -4074,7 +4125,7 @@ class EventStore:
             yield from self._iter_envelopes_locked(validate=True)
 
     def _journal_path_for_sequence(self, sequence: int) -> Path:
-        matches = list(self.journal.glob(f"{sequence:020d}-*.json"))
+        matches = _matching_paths(self.journal, f"{sequence:020d}-*.json")
         if len(matches) != 1:
             raise JournalCorruption(f"journal sequence {sequence} is missing or ambiguous")
         return matches[0]

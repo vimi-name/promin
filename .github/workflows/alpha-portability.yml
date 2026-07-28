@@ -21,6 +21,10 @@ jobs:
           cache: pip
       - name: Install
         run: python -m pip install -e ".[test]"
+      - name: Reconciliation architecture guards
+        env:
+          PROMIN_NO_TELEMETRY: '1'
+        run: python -m pytest -q tests/test_alpha3_reconciliation.py
       - name: Opus 5 closure regression suite
         env:
           PROMIN_NO_TELEMETRY: '1'
@@ -37,8 +41,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install
-        run: python -m pip install -e ".[test]"
+      - name: Install exactly through a README-style venv
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "promin-readme-venv"
+          python -m venv $venv
+          $python = Join-Path $venv "Scripts/python.exe"
+          $promin = Join-Path $venv "Scripts/promin.exe"
+          & $python -m pip install ".[test]"
+          "PROMIN_TEST_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PROMIN_TEST_EXE=$promin" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Create aliased TEMP and cache roots
         shell: pwsh
         run: |
@@ -49,9 +61,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $physicalTemp,$physicalCache | Out-Null
           cmd /c "mklink /J `"$aliasTemp`" `"$physicalTemp`"" | Out-Null
           cmd /c "mklink /J `"$aliasCache`" `"$physicalCache`"" | Out-Null
-          "PROMIN_ALIAS_TEMP=$aliasTemp" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # Prefer a real 8.3 spelling when the runner exposes one; otherwise the
+          # junction alias still exercises lexical-path != physical-identity.
+          $shortTemp = (cmd /c "for %I in (`"$physicalTemp`") do @echo %~sI").Trim()
+          $selectedTemp = if ($shortTemp -and ($shortTemp -ne $physicalTemp)) { $shortTemp } else { $aliasTemp }
+
+          "PROMIN_ALIAS_TEMP=$selectedTemp" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PROMIN_ALIAS_CACHE=$aliasCache" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Run aliased-path regression and real init
+      - name: Run alias, deep-root, init and post-init acceptance
         shell: pwsh
         env:
           PROMIN_NO_TELEMETRY: '1'
@@ -60,11 +78,20 @@ jobs:
           $env:TMP = $env:PROMIN_ALIAS_TEMP
           $env:LOCALAPPDATA = $env:PROMIN_ALIAS_CACHE
           Remove-Item Env:PROMIN_PROVIDER_STORE -ErrorAction SilentlyContinue
-          python -m pytest -q tests/test_alpha3_opus_closure.py
-          $project = Join-Path $env:RUNNER_TEMP ("promin-" + ("x" * 140))
+
+          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_reconciliation.py tests/test_alpha3_opus_closure.py
+
+          $project = Join-Path $env:RUNNER_TEMP "promin-deep-root"
+          foreach ($index in 1..4) {
+            $project = Join-Path $project ("segment-$index-" + ("x" * 48))
+          }
           New-Item -ItemType Directory -Force -Path $project | Out-Null
-          promin --root $project init --goal "Windows aliased path regression" --yes
-          promin --root $project doctor --checklist
+
+          & $env:PROMIN_TEST_EXE --root $project init --goal "Windows aliased path regression" --yes
+          & $env:PROMIN_TEST_EXE --root $project doctor --checklist
+          & $env:PROMIN_TEST_EXE --root $project status
+          & $env:PROMIN_TEST_EXE --root $project next
+          & $env:PROMIN_TEST_EXE --root $project validate
 
   macos-aliased-paths:
     runs-on: macos-latest
@@ -87,9 +114,12 @@ jobs:
           ln -s "$physical_temp" "$alias_temp"
           ln -s "$physical_cache" "$alias_cache"
           export TMPDIR="$alias_temp"
-          export PROMIN_PROVIDER_STORE="$alias_cache/provider-store-v1"
-          python -m pytest -q tests/test_alpha3_opus_closure.py
+          export XDG_CACHE_HOME="$alias_cache"
+          unset PROMIN_PROVIDER_STORE
+          python -m pytest -q tests/test_alpha3_reconciliation.py tests/test_alpha3_opus_closure.py
           project="$RUNNER_TEMP/promin-macos-alias-project"
           mkdir -p "$project"
           promin --root "$project" init --goal "macOS aliased path regression" --yes
           promin --root "$project" doctor --checklist
+          promin --root "$project" status
+          promin --root "$project" next

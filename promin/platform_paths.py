@@ -11,7 +11,10 @@ import ntpath
 import os
 import re
 import stat
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 class PlatformPathError(ValueError):
@@ -139,6 +142,75 @@ def resolve_identity_path(
         raise PlatformPathError("path identity is unavailable") from exc
 
 
+def _temporary_filesystem_path(value: str | os.PathLike[str]) -> str | Path:
+    """Address an owner-created temporary tree at the final filesystem boundary."""
+
+    path = Path(value).absolute()
+    if os.name == "nt":
+        return windows_extended_path(path)
+    return path
+
+
+def _remove_temporary_tree(root: Path) -> None:
+    """Remove an owner-created temporary tree after read-only installation work.
+
+    Promin deliberately makes copied standards and provider receipts read-only.
+    When they live inside a ``TemporaryDirectory`` (for example, doctor’s real
+    sandbox init), Windows cleanup must restore the directory attributes before
+    ``tempfile`` removes the lexical alias it originally created.  This helper
+    only operates on the temporary tree owned by this module and never follows
+    links while traversing it.
+    """
+
+    native_root = _temporary_filesystem_path(root)
+    if not os.path.lexists(native_root):
+        return
+    for directory, directories, filenames in os.walk(
+        native_root, topdown=False, followlinks=False
+    ):
+        for name in filenames:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+            os.unlink(path)
+        for name in directories:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                os.unlink(path)
+                continue
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+            os.rmdir(path)
+    os.chmod(native_root, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+    os.rmdir(native_root)
+
+
+@contextmanager
+def resolved_temporary_directory(
+    *,
+    prefix: str = "tmp",
+    suffix: str | None = None,
+    dir: str | os.PathLike[str] | None = None,
+) -> Iterator[Path]:
+    """Create a temporary directory and expose one canonical filesystem identity.
+
+    ``tempfile`` may return a lexical alias (Windows 8.3, a junction-backed
+    cache root, or macOS ``/var``). Any path later used as a containment
+    boundary must be resolved before children are created or compared. This
+    helper is the sole runtime owner for temporary directory identities.
+    """
+
+    directory = None if dir is None else filesystem_path(dir)
+    temporary_directory = tempfile.TemporaryDirectory(
+        prefix=prefix, suffix=suffix, dir=directory
+    )
+    temporary = resolve_identity_path(temporary_directory.name, strict=True)
+    try:
+        yield temporary
+    finally:
+        _remove_temporary_tree(temporary)
+        temporary_directory.cleanup()
+
+
 def windows_extended_path(value: str | os.PathLike[str]) -> str:
     """Return a normalized Windows extended-length spelling.
 
@@ -173,6 +245,34 @@ def filesystem_path(value: str | os.PathLike[str]) -> str | Path:
     if len(absolute) < 248 and not absolute.startswith("\\\\"):
         return absolute
     return windows_extended_path(absolute)
+
+
+def sqlite_path(value: str | os.PathLike[str]) -> str:
+    """Format an existing-parent SQLite file path for the Windows SQLite host.
+
+    The bundled SQLite build cannot open ``\\\\?\\`` database names on this
+    host.  Its parent has already been created through :func:`filesystem_path`;
+    use the Win32 short spelling only for the final SQLite connection argument.
+    Canonical identities and persisted records retain their ordinary spelling.
+    """
+
+    path = Path(strip_windows_extended_prefix(value)).absolute()
+    if os.name != "nt":
+        return str(path)
+    if len(str(path)) < 248:
+        return str(path)
+    try:
+        import ctypes
+
+        parent = str(path.parent)
+        required = ctypes.windll.kernel32.GetShortPathNameW(parent, None, 0)
+        if required:
+            buffer = ctypes.create_unicode_buffer(required)
+            if ctypes.windll.kernel32.GetShortPathNameW(parent, buffer, required):
+                return str(Path(buffer.value) / path.name)
+    except (AttributeError, OSError):
+        pass
+    return windows_extended_path(path)
 
 
 def subprocess_path(path: str | os.PathLike[str]) -> str:

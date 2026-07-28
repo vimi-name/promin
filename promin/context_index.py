@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .canonical import digest_value
 from .gitpolicy import estimate_tokens
+from .platform_paths import filesystem_path, sqlite_path
 
 _DB_PATH = Path(".promin/state/projection/context.sqlite3")
 _JSONL_PATH = Path(".promin/state/projection/context.jsonl")
@@ -38,17 +39,21 @@ def _json_bytes(value: Any) -> bytes:
 
 
 def _atomic_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(filesystem_path(path.parent), exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(payload)
-    os.replace(temporary, path)
+    with open(filesystem_path(temporary), "xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(filesystem_path(temporary), filesystem_path(path))
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
-    if not path.is_file() or path.is_symlink():
+    if not os.path.isfile(filesystem_path(path)) or os.path.islink(filesystem_path(path)):
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with open(filesystem_path(path), encoding="utf-8") as stream:
+            value = json.load(stream)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
@@ -163,10 +168,13 @@ def compile_context_records(plan: Mapping[str, Any], reference_records: Sequence
 
 
 def _build_sqlite(path: Path, records: Sequence[Mapping[str, Any]]) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(filesystem_path(path.parent), exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.unlink(missing_ok=True)
-    connection = sqlite3.connect(temporary)
+    try:
+        os.unlink(filesystem_path(temporary))
+    except FileNotFoundError:
+        pass
+    connection = sqlite3.connect(sqlite_path(temporary))
     try:
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=FULL")
@@ -192,11 +200,14 @@ def _build_sqlite(path: Path, records: Sequence[Mapping[str, Any]]) -> int:
         connection.commit()
     finally:
         connection.close()
-    if temporary.stat().st_size > _MAX_INDEX_BYTES:
-        temporary.unlink(missing_ok=True)
+    if os.stat(filesystem_path(temporary)).st_size > _MAX_INDEX_BYTES:
+        try:
+            os.unlink(filesystem_path(temporary))
+        except FileNotFoundError:
+            pass
         raise ContextIndexError("context projection exceeds alpha size budget")
-    os.replace(temporary, path)
-    return path.stat().st_size
+    os.replace(filesystem_path(temporary), filesystem_path(path))
+    return os.stat(filesystem_path(path)).st_size
 
 
 def _build_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> int:
