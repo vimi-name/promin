@@ -3042,55 +3042,135 @@
             "zero-unowned-normative-facts": "package-static"
           }
         },
-        "command_latency_budgets_ms": {
-          "const": {
-            "audit_small": 5000,
-            "context_warm": 2000,
-            "init_apply_small": 30000,
-            "init_review": 5000,
-            "next_warm": 2000,
-            "status_warm": 2000
-          }
-        },
-        "command_latency_workloads": {
-          "const": {
-            "audit_small": {
-              "description": "Repository audit over at most 2000 files and 256 MiB of regular-file content with no network or provider installation.",
-              "max_files": 2000,
-              "max_total_bytes": 268435456,
-              "measurement_mode": "cold"
+        "command_latency_contracts": {
+          "const": [
+            {
+              "budget_ms": 5000,
+              "command": "audit",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "cli_cold",
+              "percentile": "p95",
+              "projection_state": "not-required",
+              "provider_state": "no-install",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "bounded-audit-32-v1"
             },
-            "context_warm": {
-              "description": "Context query against an already current local projection containing at most 100000 indexed artifacts.",
-              "max_files": 100000,
-              "max_total_bytes": 0,
-              "measurement_mode": "warm"
+            {
+              "budget_ms": 2000,
+              "command": "context",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "runtime_warm",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-projection-32-v1"
             },
-            "init_apply_small": {
-              "description": "First guided apply for a project whose bounded preflight inspects at most 2000 files and 256 MiB; excludes remote downloads.",
-              "max_files": 2000,
-              "max_total_bytes": 268435456,
-              "measurement_mode": "cold"
+            {
+              "budget_ms": 30000,
+              "command": "init apply small",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "cli_cold",
+              "percentile": "p95",
+              "projection_state": "empty",
+              "provider_state": "no-install",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "bounded-first-apply-32-v1"
             },
-            "init_review": {
-              "description": "No-question-first review plan over a bounded preflight of at most 2000 files and 256 MiB.",
-              "max_files": 2000,
-              "max_total_bytes": 268435456,
-              "measurement_mode": "cold"
+            {
+              "budget_ms": 5000,
+              "command": "init review",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "cli_cold",
+              "percentile": "p95",
+              "projection_state": "not-required",
+              "provider_state": "no-install",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "bounded-review-32-v1"
             },
-            "next_warm": {
-              "description": "Next WorkCard from an already verified Activation and current local projection; no full repository scan.",
-              "max_files": 100000,
-              "max_total_bytes": 0,
-              "measurement_mode": "warm"
+            {
+              "budget_ms": 2000,
+              "command": "next",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "runtime_warm",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-projection-32-v1"
             },
-            "status_warm": {
-              "description": "Status read from an already verified Activation and current local projection; no provider reinstallation or full scan.",
-              "max_files": 100000,
-              "max_total_bytes": 0,
-              "measurement_mode": "warm"
+            {
+              "budget_ms": 2000,
+              "command": "status",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "operation_incremental",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-projection-32-v1"
+            },
+            {
+              "budget_ms": 2000,
+              "command": "status",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "runtime_warm",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-projection-32-v1"
+            },
+            {
+              "budget_ms": 10000,
+              "command": "validate",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "cli_cold",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-project-no-replay-v1"
+            },
+            {
+              "budget_ms": 3000,
+              "command": "validate",
+              "max_files": 32,
+              "max_total_bytes": 65536,
+              "measured_runs": 3,
+              "measurement_mode": "runtime_warm",
+              "percentile": "p95",
+              "projection_state": "current",
+              "provider_state": "installed-current",
+              "status": "provisional",
+              "warmup_runs": 1,
+              "workload_id": "current-project-no-replay-v1"
             }
-          }
+          ]
         },
         "dependency_depth_hard_max": {
           "const": 12,
@@ -3630,8 +3710,8 @@
             "persistent_entity_kinds_max": 9,
             "relation_kinds_max": 6,
             "resolved_plan_bytes_max": 8192,
-            "selected_presets": 1,
-            "technology_source_items_max": 64
+            "resolved_plan_source_samples_max": 64,
+            "selected_presets": 1
           }
         },
         "version": {
@@ -3663,8 +3743,7 @@
         "dependency_depth_hard_max",
         "acceptance_proof_class_counts",
         "acceptance_proof_classes",
-        "command_latency_budgets_ms",
-        "command_latency_workloads"
+        "command_latency_contracts"
       ],
       "type": "object"
     },
@@ -12681,7 +12760,7 @@
                       "type": "string"
                     },
                     "maxItems": 64,
-                    "minItems": 1,
+                    "minItems": 0,
                     "type": "array",
                     "uniqueItems": true
                   },

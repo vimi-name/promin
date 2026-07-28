@@ -70,11 +70,12 @@ HUMAN_PDFS = frozenset(
 )
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 122
+CANONICAL_PACKAGE_FILE_COUNT = 129
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
         '.github/workflows/alpha-portability.yml',
+        '.gitattributes',
         '.gitignore',
         'CONTRIBUTING.md',
         'LICENSE',
@@ -163,7 +164,12 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'skills/example/promin.skill.json',
         'skills/skill.schema.json',
         'tests/test_alpha3_opus_closure.py',
-        'tests/test_alpha3_reconciliation.py',
+        'tests/ALPHA3_R2_TEST_SHARDS.json',
+        'tests/test_alpha3_reconciliation_package.py',
+        'tests/test_alpha3_reconciliation_paths.py',
+        'tests/test_alpha3_reconciliation_performance.py',
+        'tests/test_alpha3_reconciliation_static.py',
+        'tests/test_alpha3_reconciliation_windows.py',
         'tests/test_alpha_audit.py',
         'tests/test_alpha_context_index.py',
         'tests/test_alpha_deployable.py',
@@ -188,6 +194,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tools/generate_human.py',
         'tools/promin.py',
         'tools/promin_alpha_check.py',
+        'tools/promin_command_bench.py',
         'tools/promin_init.py',
         'tools/promin_no_degradation.py',
         'tools/promin_package.py',

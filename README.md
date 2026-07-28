@@ -103,7 +103,7 @@ with the manifest.
 
 | Location | Regular files |
 |---|---:|
-| package root | 13 |
+| package root | 15 |
 | `.github/` | 1 |
 | `core/` | 6 |
 | `docs/` | 12 |
@@ -114,8 +114,8 @@ with the manifest.
 | `promin/` | 31 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 21 |
-| `tools/` | 12 |
+| `tests/` | 27 |
+| `tools/` | 13 |
 
 The 13 root files are exactly `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `MACHINE_README.md`, `MANIFEST.json`, `NOTICE`, `pyproject.toml`, `README.md`,

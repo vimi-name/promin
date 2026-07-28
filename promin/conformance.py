@@ -39,6 +39,90 @@ _SEMVER = re.compile(
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
+def validate_resolved_plan_budget(
+    plan: Mapping[str, Any], budgets: Mapping[str, Any]
+) -> None:
+    """Fail closed when a user-facing resolved plan exceeds Core's bounds.
+
+    The full inventory belongs to derived context/index state.  A resolved plan
+    carries exact technology counts plus a bounded, deterministic diagnostic
+    sample only.  This check is deliberately independent of schema ingress so
+    guided and direct expert paths enforce the same Core-owned limits before
+    compiling any ProjectInit record.
+    """
+
+    max_bytes = budgets.get("resolved_plan_bytes_max")
+    max_samples = budgets.get("resolved_plan_source_samples_max")
+    if (
+        not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1024
+        or not isinstance(max_samples, int)
+        or isinstance(max_samples, bool)
+        or max_samples < 1
+    ):
+        raise ConformanceError("resolved plan budget owner is invalid")
+
+    technologies = plan.get("detected_technologies")
+    if not isinstance(technologies, list):
+        raise ConformanceError("resolved plan lacks detected technologies")
+
+    previous_id: str | None = None
+    sample_count = 0
+    for item in technologies:
+        if not isinstance(item, Mapping):
+            raise ConformanceError("resolved plan technology fact is invalid")
+        technology_id = item.get("technology")
+        sources = item.get("sources")
+        total_count = item.get("total_source_count")
+        truncated = item.get("sources_truncated")
+        count_complete = item.get("source_count_complete")
+        if (
+            not isinstance(technology_id, str)
+            or not technology_id
+            or (previous_id is not None and technology_id <= previous_id)
+            or not isinstance(sources, list)
+            or not isinstance(total_count, int)
+            or isinstance(total_count, bool)
+            or total_count < len(sources)
+            or not isinstance(truncated, bool)
+            or not isinstance(count_complete, bool)
+        ):
+            raise ConformanceError("resolved plan technology fact is inconsistent")
+        previous_id = technology_id
+        normalized_sources: list[str] = []
+        for source in sources:
+            if (
+                not isinstance(source, str)
+                or not source
+                or "\\" in source
+                or source.startswith("/")
+                or any(part in {"", ".", ".."} for part in source.split("/"))
+            ):
+                raise ConformanceError("resolved plan contains a non-normalized source sample")
+            normalized_sources.append(source)
+        if normalized_sources != sorted(set(normalized_sources)):
+            raise ConformanceError("resolved plan source samples are not deterministic")
+        if not truncated and (not count_complete or len(sources) != total_count):
+            raise ConformanceError("resolved plan falsely reports complete source samples")
+        if not count_complete and not truncated:
+            raise ConformanceError("resolved plan hides an incomplete source count")
+        sample_count += len(sources)
+
+    if sample_count > max_samples:
+        raise ConformanceError(
+            f"resolved plan source sample budget exceeded: {sample_count}>{max_samples}"
+        )
+    try:
+        encoded = canonical_bytes(dict(plan))
+    except Exception as exc:
+        raise ConformanceError("resolved plan is not canonical JSON") from exc
+    if len(encoded) > max_bytes:
+        raise ConformanceError(
+            f"resolved plan byte budget exceeded: {len(encoded)}>{max_bytes}"
+        )
+
+
 def _activation_context(context: Mapping[str, Any]):
     supplied = context.get("activation_context")
     if supplied is not None:

@@ -1,32 +1,53 @@
 # promin 1.0.0-alpha.3: виправлення за повторним зовнішнім аудитом Opus 5
 
-Ця ітерація реалізує загальні виправлення для блокерів `alpha.2`, виявлених на незалежному Windows-хості. Остаточне закриття має підтвердити повторний незалежний аудит. Виправлення не містять назв, шляхів або доменної логіки stress-repository.
+Ця ітерація закриває локальні технічні зауваження alpha.3, але не є заявою
+про публічний або стабільний реліз. Незалежний повторний аудит лишається
+окремим доказом.
 
 ## Єдиний власник path identity
 
-- Уся provider-ідентичність проходить через `promin.platform_paths.resolve_identity_path`.
-- Windows extended-length prefixes є лише transport spelling у момент `subprocess` launch.
-- Provider records, receipts, healthchecks та comparisons зберігають звичайну canonical identity.
-- Shared provider-store root фізично резолвиться в усіх Windows/macOS/Linux branches.
-- Конкурентні `_provider_path`, `_configured_provider_path` та `abspath`-normalization видалені.
+- Provider-ідентичність проходить через `promin.platform_paths.resolve_identity_path`.
+- Windows extended-length prefixes є transport spelling лише під час запуску
+  `subprocess`.
+- Provider records, receipts, healthchecks та порівняння зберігають звичайну
+  canonical identity.
+- Shared provider-store root фізично резолвиться в Windows, macOS і Linux.
+- Конкурентні `_provider_path`, `_configured_provider_path` та
+  `abspath`-normalization видалені.
 
-## Глобальний бюджет плану
+## Глобальний бюджет resolved plan
 
-`technology_source_items_max = 64` є глобальним budget усього resolved plan, а не окремою квотою кожної технології. Кожна technology зберігає exact `total_source_count`; sampled paths детерміновано розподіляються та скорочуються, доки повний plan не вкладається у `resolved_plan_bytes_max = 8192`.
+`resolved_plan_source_samples_max = 64` — це єдиний глобальний бюджет sampled
+paths усього resolved plan, а не квота кожної технології. Кожна technology
+зберігає точний `total_source_count`; samples розподіляються детерміновано,
+можуть бути скорочені до порожнього списку й не перевищують 8192 canonical
+bytes для всього plan. Усі ingress-маршрути plan перевіряють ці інваріанти
+перед застосуванням, компіляцією, експертним виводом або записом.
 
-## Вимірювані latency contracts
+## Вимірювані command contracts
 
-Кожний command latency budget має точне workload definition: cold/warm mode, maximum files, maximum input bytes та опис дозволеної підготовки. `audit_small` тепер означає bounded audit до 2 000 файлів і 256 MiB без network/install operations.
+Єдиний власник — `command_latency_contracts` у `core/conformance.json`.
+Кожен запис містить точні command, `cli_cold` / `runtime_warm` /
+`operation_incremental` mode, bounded workload, p95 budget, кількість
+warm-up і measured runs, provider/projection state та `enforced` або
+`provisional` status. `validate` має окремі cold і warm записи.
+
+`tools/promin_command_bench.py` вимірює лише bounded local fixture: cold
+samples створюють нові процеси, а warm samples повторно використовують один
+`ProminService`. Це діагностичне локальне evidence; кожен результат має
+`pass_credit=false`, `product_acceptance_pass=false` та
+`public_release_approved=false`.
 
 ## Portability evidence
 
-CI містить окремі host-alias lanes:
-
-- Windows junction-aliased `TEMP` і `LOCALAPPDATA` плюс deep project root;
-- macOS symlinked temp/cache roots;
-- Python 3.12 і 3.13;
-- повний non-scale corpus та Alpha.3 Opus closure suite.
+CI має окремі static, path, Windows integration, performance та package lanes.
+Windows lane використовує одну session-scoped install fixture, 8.3/alias
+TEMP і cache roots та deep project root. Несподіваний skip є помилкою, а не
+кредитом.
 
 ## Межа доказу
 
-Локальний пакет може довести Linux/focused behavior. Реальне Windows/macOS виконання, branch integration і cross-host re-audit мають бути повторно виконані на незалежних хостах. Невиконані physical 100k, A/B і repeated saturation залишаються `alpha_deferred` та не отримують pass credit.
+Локальний пакет доводить лише зафіксовані локальні маршрути. Фізичні 100k,
+A/B і repeated saturation залишаються `alpha_deferred` без pass credit.
+Незалежне Windows/macOS виконання, branch integration та cross-host re-audit
+мають бути виконані окремо.

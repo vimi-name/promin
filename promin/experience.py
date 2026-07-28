@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .canonical import atomic_write_json, digest_file, digest_value, load_json_strict
+from .conformance import ConformanceError, validate_resolved_plan_budget
 from .audit import duplicate_name_markers
 from .contracts import load_contract_bundle, validate_definition
 from .version import standard_version
@@ -138,6 +139,10 @@ class ExperienceError(RuntimeError):
     pass
 
 
+class PlanBudgetError(ExperienceError):
+    """Raised when essential resolved-plan data cannot fit its Core budget."""
+
+
 @lru_cache(maxsize=1)
 def _alpha_budgets() -> dict[str, Any]:
     value = json.loads((PACKAGE_ROOT / "core" / "conformance.json").read_text(encoding="utf-8"))
@@ -147,15 +152,29 @@ def _alpha_budgets() -> dict[str, Any]:
     return dict(budgets)
 
 
-def _technology_source_limit() -> int:
-    value = _alpha_budgets().get("technology_source_items_max")
+def _resolved_plan_source_samples_max() -> int:
+    value = _alpha_budgets().get("resolved_plan_source_samples_max")
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ExperienceError("technology source budget is invalid")
+        raise ExperienceError("resolved plan source sample budget is invalid")
     return value
 
 
 def _json_bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _normalized_relative_source(value: str) -> str:
+    """Keep samples portable and comparable without turning them into host paths."""
+
+    normalized = unicodedata.normalize("NFC", value).replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise ExperienceError("preflight contains a non-relative source path")
+    return normalized
 
 
 def _safe_id(value: str, fallback: str = "project") -> str:
@@ -313,13 +332,17 @@ def _package_dependencies(sample: str) -> set[str]:
 
 
 def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    paths = {str(item.get("path", "")) for item in preflight.get("entries", [])}
+    paths = {
+        _normalized_relative_source(str(item.get("path", "")))
+        for item in preflight.get("entries", [])
+        if isinstance(item, Mapping) and item.get("path")
+    }
     samples = preflight.get("manifest_samples", {})
     lower_paths = {value.casefold() for value in paths}
     facts: dict[str, dict[str, Any]] = {}
     source_seen: dict[str, set[str]] = {}
     signals: list[dict[str, Any]] = []
-    source_limit = _technology_source_limit()
+    source_limit = _resolved_plan_source_samples_max()
 
     def add(technology: str, source: str, confidence: float = 1.0) -> None:
         current = facts.setdefault(
@@ -334,9 +357,10 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
         )
         current["confidence"] = max(float(current["confidence"]), confidence)
         seen = source_seen.setdefault(technology, set())
-        if source in seen:
+        normalized_source = _normalized_relative_source(source)
+        if normalized_source in seen:
             return
-        seen.add(source)
+        seen.add(normalized_source)
         current["total_source_count"] = int(current["total_source_count"]) + 1
 
     for path in sorted(paths):
@@ -430,7 +454,7 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
                 "examples": large_samples[:16],
             }
         )
-    # ``technology_source_items_max`` is a global plan budget, not a per-item
+    # ``resolved_plan_source_samples_max`` is a global plan budget, not a per-item
     # allowance.  Allocate it deterministically and fairly across all detected
     # technologies while retaining exact counts outside the sample list.
     ordered_technologies = sorted(facts)
@@ -762,6 +786,23 @@ def _plan_with_digest(plan_identity: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(plan_identity), "plan_digest": digest_value(plan_identity)}
 
 
+def _validate_resolved_plan(plan: Mapping[str, Any]) -> None:
+    """Route guided and direct expert plan ingress through one Core budget check."""
+
+    expected_digest = digest_value(
+        {key: value for key, value in plan.items() if key != "plan_digest"}
+    )
+    if plan.get("plan_digest") != expected_digest:
+        raise ExperienceError("resolved plan digest mismatch")
+    try:
+        validate_resolved_plan_budget(plan, _alpha_budgets())
+    except ConformanceError as exc:
+        message = str(exc)
+        if "budget" in message:
+            raise PlanBudgetError(message) from exc
+        raise ExperienceError(message) from exc
+
+
 def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
     """Reduce only sampled evidence until the user-facing plan fits Core budget.
 
@@ -785,7 +826,7 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
         candidates = [
             item
             for item in result["detected_technologies"]
-            if isinstance(item.get("sources"), list) and len(item["sources"]) > 1
+            if isinstance(item.get("sources"), list) and item["sources"]
         ]
         if not candidates:
             break
@@ -810,10 +851,12 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
         selected.setdefault("examples_truncated", True)
 
     if size() > max_bytes:
-        raise ExperienceError(
-            "resolved plan exceeds its structural byte budget after bounded evidence compaction"
+        raise PlanBudgetError(
+            "resolved plan essential content exceeds its structural byte budget"
         )
-    return _plan_with_digest(result)
+    fitted = _plan_with_digest(result)
+    _validate_resolved_plan(fitted)
+    return fitted
 
 def _license(expression: str, uri: str) -> dict[str, Any]:
     return {
@@ -917,6 +960,7 @@ def _resolved_profile_record(plan: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compile_core_plans(plan: Mapping[str, Any], project_root: Path) -> dict[str, dict[str, Any]]:
+    _validate_resolved_plan(plan)
     bindings = _provider_bindings(project_root)
     project_plan = {
         "record_type": "ProjectInit",
@@ -1238,8 +1282,7 @@ def apply_plan(
     preset_path: Path | None = None,
 ) -> dict[str, Any]:
     root = Path(project_root).resolve()
-    if plan.get("plan_digest") != digest_value({key: value for key, value in plan.items() if key != "plan_digest"}):
-        raise ExperienceError("resolved plan digest mismatch")
+    _validate_resolved_plan(plan)
     existing_plan = load_resolved_plan(root)
     activation_exists = (root / ".promin" / "init" / "activation.json").is_file()
     if activation_exists:
@@ -1459,12 +1502,14 @@ def experience_status(project_root: Path | str) -> dict[str, Any]:
 
 
 def write_plan(path: Path, plan: Mapping[str, Any]) -> None:
+    _validate_resolved_plan(plan)
     _write_json(path, dict(plan))
 
 
 def emit_expert_config(destination: Path, plan: Mapping[str, Any], project_root: Path) -> dict[str, Any]:
     if destination.exists():
         raise ExperienceError("expert config destination already exists")
+    _validate_resolved_plan(plan)
     destination.mkdir(parents=True)
     core_plans = compile_core_plans(plan, project_root)
     for name, value in core_plans.items():

@@ -41,5 +41,7 @@ include = ["promin*"]
 
 [tool.pytest.ini_options]
 markers = [
+  "performance: bounded local command-cost contract measurements",
   "scale: physical 100k runtime saturation",
+  "windows_integration: real Windows CLI init and portability route",
 ]

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import inspect
-import json
 import os
 import stat
 import subprocess
@@ -34,17 +32,6 @@ def _create_directory_alias(physical: Path, alias: Path) -> None:
         assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
         return
     alias.symlink_to(physical, target_is_directory=True)
-
-
-def test_runtime_temporary_directories_have_one_identity_owner() -> None:
-    offenders: list[str] = []
-    for path in sorted((ROOT / "promin").glob("*.py")):
-        if path.name == "platform_paths.py":
-            continue
-        source = path.read_text(encoding="utf-8")
-        if "TemporaryDirectory(" in source:
-            offenders.append(path.relative_to(ROOT).as_posix())
-    assert offenders == []
 
 
 def test_resolved_temporary_directory_collapses_alias(tmp_path: Path) -> None:
@@ -134,32 +121,3 @@ def test_provider_process_transport_is_separate_from_identity(
 
     assert argv == [str(executable.resolve())]
     assert init_module._spawn_provider_executable(argv) == "TRANSPORT-ONLY"
-
-
-def test_provider_process_creation_has_one_owner() -> None:
-    source = (ROOT / "promin" / "init.py").read_text(encoding="utf-8")
-    assert source.count("subprocess.run(") == 1
-    assert "def _run_identity_process" in source
-    assert "def _run_provider_process" in source
-    assert "executable=_spawn_provider_executable" in source
-    assert "subprocess_path(_init_identity_path" not in source
-
-
-def test_provider_argv_builder_never_adds_transport_prefix() -> None:
-    source = inspect.getsource(init_module._spawn_provider_argv)
-    assert "subprocess_path" not in source
-    assert "_init_identity_path" in source
-
-
-def test_alias_ci_uses_readme_venv_default_store_and_deep_root() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "alpha-portability.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "python -m venv" in workflow
-    assert "PROMIN_PROVIDER_STORE" in workflow
-    assert "Remove-Item Env:PROMIN_PROVIDER_STORE" in workflow
-    assert "TEMP" in workflow and "LOCALAPPDATA" in workflow
-    assert "doctor --checklist" in workflow
-    assert "status" in workflow
-    assert "next" in workflow
-    assert "test_alpha3_reconciliation.py" in workflow

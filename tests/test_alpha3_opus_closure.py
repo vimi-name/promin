@@ -222,11 +222,11 @@ def test_shared_provider_store_reuses_blob(tmp_path: Path, monkeypatch: pytest.M
     assert third.read_bytes() == b"provider"
 
 
-def test_latency_budgets_are_canonical() -> None:
+def test_latency_contracts_are_canonical() -> None:
     conformance = json.loads((Path(__file__).parents[1] / "core" / "conformance.json").read_text(encoding="utf-8"))
-    budgets = conformance["command_latency_budgets_ms"]
-    assert budgets["next_warm"] <= 2000
-    assert budgets["init_review"] <= 5000
+    records = conformance["command_latency_contracts"]
+    assert any(record["command"] == "next" and record["budget_ms"] <= 2000 for record in records)
+    assert any(record["command"] == "init review" and record["budget_ms"] <= 5000 for record in records)
 
 
 def test_host_python_materialization_uses_base_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,20 +369,20 @@ def test_global_technology_source_budget_is_shared_across_all_technologies(
     assert len(encoded) <= 8192
 
 
-def test_every_latency_budget_has_an_explicit_workload_definition() -> None:
+def test_every_latency_contract_has_an_explicit_measured_workload() -> None:
     conformance = json.loads(
         (Path(__file__).parents[1] / "core" / "conformance.json").read_text(
             encoding="utf-8"
         )
     )
-    budgets = conformance["command_latency_budgets_ms"]
-    workloads = conformance["command_latency_workloads"]
-    assert set(workloads) == set(budgets)
-    for command_class, workload in workloads.items():
-        assert workload["measurement_mode"] in {"cold", "warm"}
-        assert isinstance(workload["max_files"], int) and workload["max_files"] >= 0
-        assert isinstance(workload["description"], str) and workload["description"]
-        assert command_class in budgets
+    records = conformance["command_latency_contracts"]
+    assert records
+    for record in records:
+        assert record["measurement_mode"] in {"cli_cold", "runtime_warm", "operation_incremental"}
+        assert isinstance(record["max_files"], int) and record["max_files"] >= 0
+        assert isinstance(record["workload_id"], str) and record["workload_id"]
+        assert record["percentile"] == "p95"
+        assert record["measured_runs"] > 0
 
 
 def test_alpha3_version_is_canonical() -> None:

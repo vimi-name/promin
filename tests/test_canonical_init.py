@@ -60,6 +60,13 @@ from promin.events import (
     state_binding_leaf_id,
     state_binding_value_digest,
 )
+from promin.experience import (
+    PlanBudgetError,
+    apply_plan,
+    compile_core_plans,
+    emit_expert_config,
+    resolve_plan,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +82,111 @@ def _write(path: Path, value: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _experience_preflight(paths: list[str]) -> dict[str, object]:
+    return {
+        "entries": [
+            {
+                "path": path,
+                "kind": "file",
+                "size_bytes": 1,
+                "suffix": Path(path).suffix.casefold(),
+            }
+            for path in paths
+        ],
+        "manifest_samples": {},
+        "truncated": False,
+        "entry_count": len(paths),
+        "bytes_read": 0,
+        "max_files": 10_000,
+        "max_bytes": 2 * 1024 * 1024,
+        "max_depth": 8,
+        "full_repository_scan": False,
+        "git": {},
+    }
+
+
+def _with_plan_digest(plan: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {key: value for key, value in plan.items() if key != "plan_digest"}
+    return {**identity, "plan_digest": digest_value(identity)}
+
+
+def test_resolved_plan_uses_one_global_source_sample_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import promin.experience as experience_runtime
+
+    suffixes = ["js", "ts", "py", "kt", "java", "cpp", "cs", "rs", "go", "swift"]
+    paths = [
+        f"apps/{suffix}/nested-segment/nested-segment/nested-segment/file-{index:04d}.{suffix}"
+        for suffix in suffixes
+        for index in range(500)
+    ]
+    preflight = _experience_preflight(paths)
+    monkeypatch.setattr(experience_runtime, "bounded_preflight", lambda *_args, **_kwargs: preflight)
+
+    first = resolve_plan(tmp_path, goal="Audit a mixed technology repository")
+    reverse = dict(preflight)
+    reverse["entries"] = list(reversed(preflight["entries"]))
+    monkeypatch.setattr(experience_runtime, "bounded_preflight", lambda *_args, **_kwargs: reverse)
+    second = resolve_plan(tmp_path, goal="Audit a mixed technology repository")
+
+    technologies = first["detected_technologies"]
+    assert len(paths) == 5000
+    assert [item["technology"] for item in technologies] == sorted(
+        item["technology"] for item in technologies
+    )
+    assert sum(len(item["sources"]) for item in technologies) <= 64
+    assert {item["technology"]: item["total_source_count"] for item in technologies} == {
+        "cpp": 500,
+        "dotnet": 500,
+        "go": 500,
+        "java": 500,
+        "javascript": 500,
+        "kotlin": 500,
+        "python": 500,
+        "rust": 500,
+        "swift": 500,
+        "typescript": 500,
+    }
+    assert all(item["sources_truncated"] is True for item in technologies)
+    assert all(item["source_count_complete"] is True for item in technologies)
+    assert len(canonical_bytes(first)) <= 8192
+    assert canonical_bytes(first) == canonical_bytes(second)
+    assert first["plan_digest"] == second["plan_digest"]
+
+
+def test_direct_expert_plan_ingress_cannot_bypass_global_source_budget(
+    tmp_path: Path,
+) -> None:
+    plan = resolve_plan(tmp_path, goal="Create a bounded project")
+    technologies = []
+    for technology in ("alpha", "beta"):
+        sources = [f"src/{technology}/file-{index:02d}.py" for index in range(33)]
+        technologies.append(
+            {
+                "technology": technology,
+                "sources": sources,
+                "total_source_count": len(sources),
+                "sources_truncated": False,
+                "source_count_complete": True,
+                "confidence": 1.0,
+            }
+        )
+    direct_plan = _with_plan_digest({**plan, "detected_technologies": technologies})
+
+    with pytest.raises(PlanBudgetError, match="source sample budget exceeded"):
+        apply_plan(tmp_path, direct_plan)
+    assert not (tmp_path / ".promin").exists()
+
+    with pytest.raises(PlanBudgetError, match="source sample budget exceeded"):
+        compile_core_plans(direct_plan, tmp_path)
+
+    destination = tmp_path / "expert-config"
+    with pytest.raises(PlanBudgetError, match="source sample budget exceeded"):
+        emit_expert_config(destination, direct_plan, tmp_path)
+    assert not destination.exists()
 
 
 def _plans(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
