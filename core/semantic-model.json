@@ -930,5 +930,5 @@
     "StateCheckpoint": "A disposable self-digested state or journal index bound to an exact authoritative HEAD; it cannot grant authority or acceptance.",
     "WorkCard": "A bounded generated context package for one Task that separately binds the projection.read query Grant claim and the task.execute holder Grant; neither binding implies acceptance."
   },
-  "version": "1.0.0-alpha.1"
+  "version": "1.0.0-alpha.3"
 }

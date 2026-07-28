@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -53,6 +53,7 @@ from .init import (
     ActivationContext,
     ActivationGuard,
     InitRequest,
+    activation_byte_digest,
     activation_read_bindings,
     activation_read_fingerprint,
     initialize_project,
@@ -1336,7 +1337,7 @@ class ProminService:
                     self._read_context = None
                     self._read_context_bindings = None
                     self._read_context_fingerprint = None
-            context = ActivationGuard(self.root).verify()
+            context = ActivationGuard(self.root).verify(verify_schema_meta=False)
             bindings = activation_read_bindings(context)
             self._read_context_fingerprint = activation_read_fingerprint(
                 context,
@@ -2841,7 +2842,18 @@ class ProminService:
         context: ActivationContext,
         store: EventStore,
     ) -> _RuntimeSnapshot:
-        verified = self._verified_mutation_context(context)
+        # Read-only replay binds the exact Activation bytes but does not repeat
+        # Draft meta-schema compilation or provider healthchecks. Authoritative
+        # mutations still use _verified_mutation_context(), which performs the
+        # full two-pass verification boundary.
+        verified = (
+            context
+            if context.authoritative_byte_digest is not None
+            else replace(
+                context,
+                authoritative_byte_digest=activation_byte_digest(context),
+            )
+        )
         head = store.head()
         checkpoint = store.read_derived_state("runtime")
         if checkpoint is not None:

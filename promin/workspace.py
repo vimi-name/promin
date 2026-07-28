@@ -214,7 +214,8 @@ def _facts_for_root(
             if isinstance(sample, str):
                 deps = _package_dependencies(sample)
                 for dependency, fact in (
-                    ("react", "react"), ("next", "nextjs"), ("vite", "vite"),
+                    ("react", "react"), ("react-native", "react-native"),
+                    ("expo", "expo"), ("next", "nextjs"), ("vite", "vite"),
                     ("@supabase/supabase-js", "supabase"), ("vue", "vue"),
                     ("svelte", "svelte"), ("express", "express"),
                 ):
@@ -272,10 +273,12 @@ def _facts_for_root(
 def _classify(root: str, technologies: set[str]) -> tuple[str, list[str], float]:
     tokens = set(root.casefold().split("/"))
     profiles: list[str] = []
+    if technologies & {"react-native", "expo"}:
+        return "mobile-application", ["mobile-application"], 0.99
     if technologies & {"android", "gradle", "kotlin"}:
         return "android-application", ["android-application"], 0.98
     if technologies & {"flutter", "dart"}:
-        return "mobile-application", ["general-development"], 0.90
+        return "mobile-application", ["mobile-application"], 0.90
     if technologies & {"react", "nextjs", "vite", "vue", "svelte", "supabase"}:
         return "web-application", ["web-application"], 0.97
     if technologies & {"windows-native", "visual-studio"}:
@@ -323,7 +326,7 @@ def discover_workspace_map(
         root_samples = preflight.get("manifest_samples", {})
         root_package = root_samples.get("package.json") if isinstance(root_samples, Mapping) else None
         root_deps = _package_dependencies(root_package) if isinstance(root_package, str) else set()
-        root_is_application = bool(root_sources or root_deps & {"react", "next", "vite", "vue", "svelte", "express"})
+        root_is_application = bool(root_sources or root_deps & {"react", "next", "vite", "vue", "svelte", "express", "react-native", "expo"})
         if not root_is_application:
             roots.pop(".", None)
 

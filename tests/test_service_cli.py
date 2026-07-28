@@ -4,9 +4,11 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
+import os
 from pathlib import Path
 import shlex
 import sqlite3
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -137,7 +139,7 @@ def _documented_package_counts(text: str) -> dict[str, int]:
         if len(cells) != 2 or not cells[1].isdigit():
             continue
         location = cells[0].strip("`")
-        if location in {"package root", "core/", "docs/", "examples/", "human/", "presets/", "profiles/", "promin/", "prompts/", "skills/", "tests/", "tools/"}:
+        if location in {"package root", ".github/", "core/", "docs/", "examples/", "human/", "presets/", "profiles/", "promin/", "prompts/", "skills/", "tests/", "tools/"}:
             counts[location] = int(cells[1])
     return counts
 
@@ -148,9 +150,9 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     version = load_json_strict(PACKAGE_ROOT / "VERSION.json")
     preset = load_json_strict(PRESET)
     assert version["canonical_name"] == "promin"
-    assert version["version"] == "1.0.0-alpha.1"
-    assert "Version 1.0.0-alpha.1" in readme
-    assert "Standard version: `1.0.0-alpha.1`" in machine
+    assert version["version"] == "1.0.0-alpha.3"
+    assert "Version 1.0.0-alpha.3" in readme
+    assert "Standard version: `1.0.0-alpha.3`" in machine
 
     for command in BASE_COMMANDS:
         assert f"promin {command}" in readme
@@ -159,22 +161,23 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
 
     expected_counts = {
         "package root": 13,
+        ".github/": 1,
         "core/": 6,
-        "docs/": 11,
+        "docs/": 12,
         "examples/": 1,
         "human/": 4,
         "presets/": 1,
-        "profiles/": 12,
-        "promin/": 28,
+        "profiles/": 13,
+        "promin/": 31,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 20,
+        "tests/": 21,
         "tools/": 12,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 112
+    assert len(manifest["files"]) == 119
     actual_counts = {key: 0 for key in expected_counts}
     actual_counts["package root"] = 2  # MANIFEST.json and SHA256SUMS.txt
     for item in manifest["files"]:
@@ -182,7 +185,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         location = path.split("/", 1)[0] + "/" if "/" in path else "package root"
         actual_counts[location] += 1
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 114
+    assert sum(expected_counts.values()) == 121
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:
@@ -562,10 +565,10 @@ def test_read_context_is_reused_only_while_activation_files_are_unchanged(
     original_verify = ActivationGuard.verify
     verification_count = 0
 
-    def counted_verify(guard: ActivationGuard):
+    def counted_verify(guard: ActivationGuard, **kwargs: object):
         nonlocal verification_count
         verification_count += 1
-        return original_verify(guard)
+        return original_verify(guard, **kwargs)
 
     monkeypatch.setattr(ActivationGuard, "verify", counted_verify)
     first = service._context()
@@ -1243,6 +1246,10 @@ def test_team_signed_cli_init_doctor_status_validate_and_internal_commit(
     signature_source = Path(
         context.provider_dispatch.binding("signature")["identity"]["source"]
     )
+    # Receipts are deliberately read-only after installation.  Clear that
+    # platform attribute here so this adversarial test can mutate the exact
+    # file and prove the next verification rejects it on Windows as well.
+    os.chmod(signature_source, stat.S_IWRITE | stat.S_IREAD)
     signature_source.write_text(
         signature_source.read_text(encoding="utf-8") + "\n# identity drift\n",
         encoding="utf-8",
@@ -1661,11 +1668,12 @@ def test_projection_rebuild_keeps_latest_lease_lifecycle_state(tmp_path: Path) -
 
 def test_next_uses_separate_query_and_holder_grants(tmp_path: Path) -> None:
     service, grants, task, _lease, head = _leased_service(tmp_path)
+    recorded_at = _at()
     ready_task = {
         **task,
         "task_id": "task:next-ready",
         "state": "PLANNED",
-        "created_at": _at(),
+        "created_at": recorded_at,
     }
     ready_task = _task_with_gate_definition(
         service,
@@ -1679,7 +1687,7 @@ def test_next_uses_separate_query_and_holder_grants(tmp_path: Path) -> None:
         command_kind="task.record",
         payload=ready_task,
         expected_head=head,
-        issued_at=_at(),
+        issued_at=recorded_at,
         authorization=_grant_authorization(grants["planner"]),
     )
     head = service.commit(recorded)["batch_digest"]

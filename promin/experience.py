@@ -18,12 +18,14 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .canonical import atomic_write_json, digest_file, digest_value, load_json_strict
+from .audit import duplicate_name_markers
 from .contracts import load_contract_bundle, validate_definition
 from .version import standard_version
 from .init import (
@@ -33,6 +35,8 @@ from .init import (
 )
 from .service import ProminService, ServiceError
 from .resources import bundle_root
+from .provider_store import ensure_blob
+from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .skills import discover_skills
 from .telemetry import heartbeat, record_observation, utc_now
 from .workspace import discover_workspace_map
@@ -41,7 +45,7 @@ PACKAGE_ROOT = bundle_root()
 PROFILE_ROOT = PACKAGE_ROOT / "profiles"
 DEFAULT_PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
 
-_PREFLIGHT_MAX_FILES = 768
+_PREFLIGHT_MAX_FILES = PREFLIGHT_FILE_ITEMS_MAX
 _PREFLIGHT_MAX_BYTES = 2 * 1024 * 1024
 _PREFLIGHT_MAX_DEPTH = 2
 _TEXT_SAMPLE_MAX = 64 * 1024
@@ -128,6 +132,22 @@ _SOURCE_SUFFIXES = {
 
 class ExperienceError(RuntimeError):
     pass
+
+
+@lru_cache(maxsize=1)
+def _alpha_budgets() -> dict[str, Any]:
+    value = json.loads((PACKAGE_ROOT / "core" / "conformance.json").read_text(encoding="utf-8"))
+    budgets = value.get("structural_budgets")
+    if not isinstance(budgets, dict):
+        raise ExperienceError("Core conformance structural budgets are unavailable")
+    return dict(budgets)
+
+
+def _technology_source_limit() -> int:
+    value = _alpha_budgets().get("technology_source_items_max")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ExperienceError("technology source budget is invalid")
+    return value
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -293,16 +313,27 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
     samples = preflight.get("manifest_samples", {})
     lower_paths = {value.casefold() for value in paths}
     facts: dict[str, dict[str, Any]] = {}
+    source_seen: dict[str, set[str]] = {}
     signals: list[dict[str, Any]] = []
+    source_limit = _technology_source_limit()
 
     def add(technology: str, source: str, confidence: float = 1.0) -> None:
         current = facts.setdefault(
             technology,
-            {"technology": technology, "sources": [], "confidence": confidence},
+            {
+                "technology": technology,
+                "sources": [],
+                "total_source_count": 0,
+                "sources_truncated": False,
+                "confidence": confidence,
+            },
         )
         current["confidence"] = max(float(current["confidence"]), confidence)
-        if source not in current["sources"]:
-            current["sources"].append(source)
+        seen = source_seen.setdefault(technology, set())
+        if source in seen:
+            return
+        seen.add(source)
+        current["total_source_count"] = int(current["total_source_count"]) + 1
 
     for path in sorted(paths):
         lower = path.casefold()
@@ -350,6 +381,8 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
             dependencies = _package_dependencies(sample)
             for dependency, technology in (
                 ("react", "react"),
+                ("react-native", "react-native"),
+                ("expo", "expo"),
                 ("next", "nextjs"),
                 ("vite", "vite"),
                 ("@supabase/supabase-js", "supabase"),
@@ -366,17 +399,15 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
         if Path(path).name.casefold() == "go.mod":
             add("go", path)
 
-    duplicate_like = [
-        path
-        for path in paths
-        if re.search(r"(?:copy|backup|old|legacy|final[-_ ]?[0-9]+|new[-_ ]?[0-9]+)", Path(path).stem, re.I)
-    ]
-    if duplicate_like:
+    duplicate_like = duplicate_name_markers(tuple(paths), limit=16)
+    if duplicate_like["total_count"]:
         signals.append(
             {
                 "signal": "duplicate-like-paths",
-                "confidence": 0.6,
-                "examples": duplicate_like[:16],
+                "confidence": 0.45,
+                "examples": duplicate_like["examples"],
+                "total_count": duplicate_like["total_count"],
+                "interpretation": "filename-marker signal only; exact duplication is owned by runtime audit content hashes",
             }
         )
     large_samples = [
@@ -395,7 +426,51 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
                 "examples": large_samples[:16],
             }
         )
-    return sorted(facts.values(), key=lambda item: item["technology"]), signals
+    # ``technology_source_items_max`` is a global plan budget, not a per-item
+    # allowance.  Allocate it deterministically and fairly across all detected
+    # technologies while retaining exact counts outside the sample list.
+    ordered_technologies = sorted(facts)
+    samples: dict[str, list[str]] = {
+        technology: sorted(source_seen.get(technology, set()))
+        for technology in ordered_technologies
+    }
+    selected: dict[str, list[str]] = {technology: [] for technology in ordered_technologies}
+    remaining = source_limit
+    # Give every detected technology one representative source first.  The
+    # built-in technology vocabulary is deliberately smaller than this budget.
+    for technology in ordered_technologies:
+        if remaining <= 0:
+            break
+        if samples[technology]:
+            selected[technology].append(samples[technology][0])
+            remaining -= 1
+    sample_index = 1
+    while remaining > 0:
+        progressed = False
+        for technology in ordered_technologies:
+            if remaining <= 0:
+                break
+            values = samples[technology]
+            if sample_index < len(values):
+                selected[technology].append(values[sample_index])
+                remaining -= 1
+                progressed = True
+        if not progressed:
+            break
+        sample_index += 1
+
+    normalized_facts: list[dict[str, Any]] = []
+    for technology in ordered_technologies:
+        item = facts[technology]
+        clean = dict(item)
+        clean["sources"] = selected[technology]
+        clean["sources_truncated"] = bool(
+            len(clean["sources"]) < int(clean["total_source_count"])
+            or preflight.get("truncated")
+        )
+        clean["source_count_complete"] = not bool(preflight.get("truncated"))
+        normalized_facts.append(clean)
+    return normalized_facts, signals
 
 
 def _detect_language(goal: str | None, requested: str) -> str:
@@ -429,7 +504,6 @@ def _resolve_profiles(
     autonomy: str,
     language: str,
     explicit: Iterable[str],
-    host_system: str,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     tech = {str(item["technology"]) for item in technologies}
     layers = ["general-development"]
@@ -442,12 +516,14 @@ def _resolve_profiles(
             layers.append(profile_id)
             reasons.append({"profile_id": profile_id, "reason": reason, "confidence": confidence})
 
+    if tech & {"react-native", "expo"}:
+        add("mobile-application", "React Native or Expo facts detected", 0.98)
     if tech & {"react", "nextjs", "vite", "vue", "svelte", "supabase", "node", "javascript", "typescript"}:
         add("web-application", "web technology facts detected", 0.95)
     if tech & {"android", "gradle", "kotlin"}:
         add("android-application", "Android/Gradle/Kotlin facts detected", 0.95)
-    if tech & {"windows-native", "visual-studio", "dotnet"} or host_system == "windows":
-        add("windows-development", "Windows platform or toolchain facts detected", 0.85)
+    if tech & {"windows-native", "visual-studio", "dotnet"}:
+        add("windows-development", "Windows project toolchain facts detected", 0.9)
     if tech & {"cpp", "cmake"} and not ({"web-application", "android-application"} & set(layers)):
         add("morok-tower-studio", "C++/CMake project matches studio baseline", 0.8)
     if len(layers) == 1:
@@ -568,7 +644,6 @@ def resolve_plan(
         autonomy=selected_autonomy,
         language=selected_language,
         explicit=tuple(normalized_brief.get("profile_overrides", [])) + tuple(explicit_profiles),
-        host_system=preflight["host"]["system"],
     )
     catalog = _profile_catalog()
     missing = [profile for profile in layers if profile not in catalog]
@@ -667,7 +742,6 @@ def resolve_plan(
                 "truncated",
                 "full_repository_scan",
                 "git",
-                "host",
             )
         },
         "question_count_before_plan": 0,
@@ -676,8 +750,66 @@ def resolve_plan(
         "authority": False,
         "pass_credit": False,
     }
-    return {**plan_identity, "plan_digest": digest_value(plan_identity)}
+    return _fit_resolved_plan_budget(plan_identity)
 
+
+
+def _plan_with_digest(plan_identity: Mapping[str, Any]) -> dict[str, Any]:
+    return {**dict(plan_identity), "plan_digest": digest_value(plan_identity)}
+
+
+def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
+    """Reduce only sampled evidence until the user-facing plan fits Core budget.
+
+    Exact counts and semantic facts remain intact.  The routine never drops a
+    detected technology; it removes representative source paths in a
+    deterministic order and marks the affected facts as truncated.
+    """
+
+    max_bytes = _alpha_budgets().get("resolved_plan_bytes_max")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1024:
+        raise ExperienceError("resolved plan byte budget is invalid")
+
+    result = dict(plan_identity)
+    result["detected_technologies"] = [dict(item) for item in plan_identity["detected_technologies"]]
+    result["repository_signals"] = [dict(item) for item in plan_identity["repository_signals"]]
+
+    def size() -> int:
+        return len(_json_bytes(_plan_with_digest(result)))
+
+    while size() > max_bytes:
+        candidates = [
+            item
+            for item in result["detected_technologies"]
+            if isinstance(item.get("sources"), list) and len(item["sources"]) > 1
+        ]
+        if not candidates:
+            break
+        # Remove from the noisiest technology first; tie-break by ID for a
+        # stable result independent of dict insertion order.
+        selected = max(candidates, key=lambda item: (len(item["sources"]), str(item["technology"])))
+        selected["sources"] = list(selected["sources"][:-1])
+        selected["sources_truncated"] = True
+
+    # Repository-signal examples are diagnostic samples, not canonical facts.
+    # Compact them only if source samples alone cannot meet the budget.
+    while size() > max_bytes:
+        candidates = [
+            item
+            for item in result["repository_signals"]
+            if isinstance(item.get("examples"), list) and item["examples"]
+        ]
+        if not candidates:
+            break
+        selected = max(candidates, key=lambda item: (len(item["examples"]), str(item.get("signal", ""))))
+        selected["examples"] = list(selected["examples"][:-1])
+        selected.setdefault("examples_truncated", True)
+
+    if size() > max_bytes:
+        raise ExperienceError(
+            "resolved plan exceeds its structural byte budget after bounded evidence compaction"
+        )
+    return _plan_with_digest(result)
 
 def _license(expression: str, uri: str) -> dict[str, Any]:
     return {
@@ -688,29 +820,18 @@ def _license(expression: str, uri: str) -> dict[str, Any]:
 
 
 def _materialize_host_python(project_root: Path) -> tuple[str, Path]:
-    """Create a relative, ignored host-local provider identity.
+    """Bind the real base interpreter through the shared verified store.
 
-    The canonical init record contains a portable relative path.  The bytes are
-    derived host state and are excluded from Candidate identity.  Cross-host
-    rebinding is performed by ``doctor --repair``; it is never silent.
+    A venv launcher is not relocatable on Windows, so ``sys._base_executable``
+    is preferred. The shared blob is host-local derived state; the project keeps
+    only one isolated content-addressed receipt created by Core initialization.
     """
 
-    source = Path(sys.executable).resolve(strict=True)
+    del project_root  # the shared source is intentionally not project-relative
+    source = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve(strict=True)
     source_digest = digest_file(source)
-    provider_dir = project_root / ".promin-host" / "providers" / source_digest
-    provider_dir.mkdir(parents=True, exist_ok=True)
-    suffix = source.suffix or (".exe" if os.name == "nt" else "")
-    target = provider_dir / ("python-runtime" + suffix)
-    if target.exists():
-        if target.is_symlink() or not target.is_file() or digest_file(target) != source_digest:
-            raise ExperienceError("host-local Python provider identity drift")
-    else:
-        temporary = target.with_name(target.name + ".tmp")
-        shutil.copy2(source, temporary)
-        if os.name != "nt":
-            os.chmod(temporary, temporary.stat().st_mode | stat.S_IXUSR)
-        os.replace(temporary, target)
-    return target.relative_to(project_root).as_posix(), target
+    blob = ensure_blob(source, source_digest)
+    return str(blob), blob
 
 
 def _provider_bindings(project_root: Path) -> list[dict[str, Any]]:
@@ -1039,6 +1160,28 @@ def _write_alpha_state(project_root: Path, plan: Mapping[str, Any]) -> None:
     _write_json(project_root / ".promin" / "host" / "host.json", host_identity)
 
 
+
+def _cleanup_partial_control_state(project_root: Path) -> None:
+    """Remove non-authoritative residue from an incomplete first init.
+
+    Portable team files are preserved so a cloned repository can still be
+    rehydrated. No failed initialization may poison the next attempt.
+    """
+
+    control = project_root / ".promin"
+    if not control.is_dir() or control.is_symlink():
+        return
+    for child in tuple(control.iterdir()):
+        if child.name in {"portable", ".gitignore"}:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    remaining = tuple(control.iterdir())
+    if not remaining:
+        control.rmdir()
+
 def apply_plan(
     project_root: Path | str,
     plan: Mapping[str, Any],
@@ -1065,9 +1208,6 @@ def apply_plan(
             bootstrap = bootstrap_operational_state(root, existing_plan)
         else:
             bootstrap = {**bootstrap, "status": "idempotent"}
-        # The portable handoff, short agent surfaces and local context index are
-        # part of the deployable-alpha experience.  Refresh is content-addressed
-        # and idempotent, and it runs only after the resolved plan already exists.
         from .refresh import refresh_project
         refresh = refresh_project(root, apply=True)
         record_observation(
@@ -1095,30 +1235,57 @@ def apply_plan(
             "pass_credit": False,
             "product_acceptance_pass": False,
         }
+
+    control = root / ".promin"
+    host_state = root / ".promin-host"
+    control_existed = control.exists()
+    host_existed = host_state.exists()
+    partial_archive: Path | None = None
+    if control_existed:
+        # No Activation means the directory is not canonical initialized state.
+        # Preserve it outside the control root so a corrected init can proceed
+        # without manual deletion while retaining forensic evidence.
+        recovery = host_state / "recovery"
+        recovery.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        partial_archive = recovery / f"partial-control-{stamp}"
+        shutil.move(str(control), str(partial_archive))
+        control_existed = False
+
     bundle = (standard_bundle or PACKAGE_ROOT).resolve()
     preset = (preset_path or DEFAULT_PRESET).resolve()
-    plans = compile_core_plans(plan, root)
-    bundle_contracts = load_contract_bundle(bundle, preset)
-    validate_definition(bundle_contracts.schema, "ProjectInit", plans["project.json"])
-    with tempfile.TemporaryDirectory(prefix="promin-alpha-init-") as temporary:
-        staging = Path(temporary)
-        for name, value in plans.items():
-            _write_json(staging / name, value)
-        request = InitRequest(
-            project_root=root,
-            standard_bundle=bundle,
-            preset_path=preset,
-            project_plan=staging / "project.json",
-            standards_plan=staging / "standards.json",
-            technologies_plan=staging / "technologies.json",
-            licenses_plan=staging / "licenses.json",
-            authority_plan=staging / "authority.json",
-        )
-        result = ProminService(root).initialize(request)
-    _write_alpha_state(root, plan)
-    bootstrap = bootstrap_operational_state(root, plan)
-    from .refresh import refresh_project
-    refresh = refresh_project(root, apply=True)
+    try:
+        plans = compile_core_plans(plan, root)
+        bundle_contracts = load_contract_bundle(bundle, preset)
+        validate_definition(bundle_contracts.schema, "ProjectInit", plans["project.json"])
+        with tempfile.TemporaryDirectory(prefix="promin-alpha-init-") as temporary:
+            staging = Path(temporary)
+            for name, value in plans.items():
+                _write_json(staging / name, value)
+            request = InitRequest(
+                project_root=root,
+                standard_bundle=bundle,
+                preset_path=preset,
+                project_plan=staging / "project.json",
+                standards_plan=staging / "standards.json",
+                technologies_plan=staging / "technologies.json",
+                licenses_plan=staging / "licenses.json",
+                authority_plan=staging / "authority.json",
+            )
+            result = ProminService(root).initialize(request)
+        _write_alpha_state(root, plan)
+        bootstrap = bootstrap_operational_state(root, plan)
+        from .refresh import refresh_project
+        refresh = refresh_project(root, apply=True)
+    except Exception:
+        if not control_existed and control.exists():
+            shutil.rmtree(control, ignore_errors=True)
+        if partial_archive is not None and partial_archive.exists():
+            shutil.move(str(partial_archive), str(control))
+        elif not host_existed and host_state.exists():
+            shutil.rmtree(host_state, ignore_errors=True)
+        raise
+
     record_observation(
         root,
         kind="guided-init",
@@ -1139,6 +1306,7 @@ def apply_plan(
         "autonomy": plan["autonomy"],
         "reporting_language": plan["reporting_language"],
         "product_tree_scans_before_plan": 0,
+        "partial_control_archived": None if partial_archive is None else partial_archive.relative_to(root).as_posix(),
         "next_command": "promin next",
         "audit_command": "promin audit",
         "bootstrap": bootstrap,

@@ -1,4 +1,4 @@
-# Обсяг promin 1.0.0-alpha.1
+# Обсяг promin 1.0.0-alpha.3
 
 В alpha входять:
 

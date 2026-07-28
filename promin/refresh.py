@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 
 from .context_index import context_cost_model, sync_context_index
@@ -21,6 +22,7 @@ def refresh_project(
     *,
     deep_context: bool = False,
     apply: bool = True,
+    reset_derived: bool = False,
 ) -> dict[str, Any]:
     """Refresh all derived/portable surfaces from one hash inventory.
 
@@ -29,6 +31,16 @@ def refresh_project(
     """
 
     root = Path(project_root).resolve()
+    reset_paths: list[str] = []
+    if reset_derived and apply:
+        for relative in (Path(".promin/state/projection"), Path(".promin/cache"), Path(".promin/generated/context")):
+            target = root / relative
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+                reset_paths.append(relative.as_posix())
+            elif target.is_file() and not target.is_symlink():
+                target.unlink()
+                reset_paths.append(relative.as_posix())
     from .experience import load_resolved_plan
 
     plan = load_resolved_plan(root)
@@ -67,6 +79,8 @@ def refresh_project(
 
     result = {
         "record_type": "ProminRefreshResult",
+        "reset_derived": reset_derived,
+        "reset_paths": reset_paths,
         "status": "blocked" if blocked else "updated" if changed else "current" if apply else "planned",
         "deep_context_requested": bool(deep_context),
         "deep_context_status": "alpha-deferred" if deep_context else "not-requested",

@@ -261,8 +261,8 @@ class PackageValidationTests(unittest.TestCase):
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
         self.assertTrue(result["closure"])
-        self.assertEqual(result["inventory"]["files"], 114)
-        self.assertEqual(result["inventory"]["directories"], 12)
+        self.assertEqual(result["inventory"]["files"], 121)
+        self.assertEqual(result["inventory"]["directories"], 14)
         manifest = json.loads((self.root / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["builder"], "tools/promin_package.py")
         (self.root / "unowned.txt").write_text("unowned\n", encoding="utf-8")
@@ -270,8 +270,8 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_integrity(self.root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 114)
-        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 12)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 121)
+        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 14)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
             len(CANONICAL_PACKAGE_DIRECTORIES),
@@ -279,7 +279,7 @@ class PackageValidationTests(unittest.TestCase):
         )
         self.assertEqual(
             CANONICAL_PACKAGE_DIRECTORIES,
-            {"core", "docs", "examples", "human", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
+            {".github", ".github/workflows", "core", "docs", "examples", "human", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
         )
         self.assertEqual(CANONICAL_PACKAGE_FILES - CANONICAL_PAYLOAD_FILES, GENERATED_SURFACES)
         for required in (
@@ -897,10 +897,11 @@ class PackageValidationTests(unittest.TestCase):
     def test_clean_install_deadline_bounds_creation_and_descendant_processes(self) -> None:
         deadline = time.monotonic() + 30
         completed = subprocess.CompletedProcess(["python", "-m", "venv"], 0, "", "")
-        with mock.patch(
-            "promin_validate._run_capture_with_deadline",
-            return_value=completed,
-        ) as bounded:
+        bounded = mock.Mock(return_value=completed)
+        with mock.patch.dict(
+            _create_clean_venv.__globals__,
+            {"_run_capture_with_deadline": bounded},
+        ):
             _create_clean_venv(
                 self.base / "deadline-venv",
                 os.environ.copy(),

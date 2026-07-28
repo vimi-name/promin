@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import __version__
 from .audit import audit_project
@@ -20,6 +21,7 @@ from .experience import (
     write_plan,
 )
 from .init import InitRequest, emit_canonical_init_plans, review_init_request
+from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .portability import doctor_with_portability, repair_project
 from .refresh import refresh_project
 from .service import ProminService, ServiceError, continue_work, next_work
@@ -31,13 +33,14 @@ from .skills import (
     request_skill,
     skill_catalog,
 )
-from .telemetry import OperationTimer, heartbeat, record_observation
+from .telemetry import OperationTimer, heartbeat, record_observation, telemetry_enabled_for_command
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="promin")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="project root")
     parser.add_argument("--version", action="version", version=f"promin {__version__}")
+    parser.add_argument("--no-telemetry", action="store_true", help="do not persist local operational observations")
     sub = parser.add_subparsers(dest="workflow", required=True)
 
     init = sub.add_parser("init", help="resolve and optionally apply a guided initialization plan")
@@ -46,7 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--autonomy", choices=("ask", "safe-auto", "unsafe-auto"))
     init.add_argument("--language", choices=("auto", "uk", "en"))
     init.add_argument("--profile", action="append", default=[], help="additional installed profile layer")
-    init.add_argument("--max-preflight-files", type=int, default=768)
+    init.add_argument("--max-preflight-files", type=int, default=PREFLIGHT_FILE_ITEMS_MAX)
     init.add_argument("--apply", "--yes", dest="apply", action="store_true", help="apply the resolved plan")
     init.add_argument("--plan-only", action="store_true", help="never auto-apply, including unsafe-auto")
     init.add_argument("--plan-out", type=Path)
@@ -84,10 +87,10 @@ def _parser() -> argparse.ArgumentParser:
     next_cmd.add_argument("--query-grant")
     next_cmd.add_argument("--depth", type=int, choices=range(1, 13))
 
-    validate = sub.add_parser("validate")
+    validate = sub.add_parser("validate", help="validate Core and current operational state")
     validate.add_argument("--no-replay", action="store_true")
 
-    continuation = sub.add_parser("continue")
+    continuation = sub.add_parser("continue", help="continue a bounded WorkCard context")
     continuation.add_argument("token")
     continuation.add_argument("--subject")
     continuation.add_argument("--grant")
@@ -96,12 +99,14 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--since", default=None, help="period such as 24h, 30m, 7d")
     audit.add_argument("--plan", action="store_true", help="include a non-authoritative repair PlanProposal")
     audit.add_argument("--live", action="store_true", help="emit one bounded live audit and heartbeat")
+    audit.add_argument("--record", action="store_true", help="persist the bounded audit result and telemetry")
     audit.add_argument("--max-files", type=int, default=10_000)
     audit.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024)
 
     refresh = sub.add_parser("refresh", help="refresh portable documentation, context, and host surfaces")
     refresh.add_argument("--deep-context", action="store_true")
     refresh.add_argument("--plan-only", action="store_true", help="show the refresh plan without writing")
+    refresh.add_argument("--reset-derived", action="store_true", help="rebuild ignored projections and caches before refresh")
 
     context = sub.add_parser("context", help="query the bounded local project context index")
     context.add_argument("query", nargs="?", default="")
@@ -251,6 +256,15 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     }
 
 
+def _is_initialized(root: Path) -> bool:
+    return (root / ".promin" / "init" / "activation.json").is_file()
+
+
+def _require_initialized(root: Path) -> None:
+    if not _is_initialized(root):
+        raise ServiceError("project is not initialized; run promin init")
+
+
 def _status(root: Path) -> dict[str, Any]:
     experience = experience_status(root)
     try:
@@ -282,6 +296,35 @@ def _status(root: Path) -> dict[str, Any]:
     }
 
 
+def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None = None) -> bool:
+    """Return whether this invocation may intentionally persist project-local state."""
+
+    workflow = args.workflow
+    if workflow in {"status", "context", "validate", "audit"}:
+        return False
+    if workflow == "doctor":
+        return bool(getattr(args, "apply_repair", False))
+    if workflow == "init":
+        return isinstance(result, Mapping) and result.get("record_type") in {"InitializationResult", "InitResult"}
+    if workflow == "refresh":
+        return not bool(getattr(args, "plan_only", False))
+    if workflow == "skills":
+        return getattr(args, "skills_action", None) in {"create", "install", "remove", "sync"}
+    return True
+
+
+def _safe_public_reason(exc: Exception, root: Path | None = None) -> str:
+    text = str(exc) or type(exc).__name__
+    candidates = [Path.cwd(), Path.home()]
+    if root is not None:
+        candidates.insert(0, root)
+    for candidate in candidates:
+        for spelling in {str(candidate), str(candidate).replace("\\", "/")}:
+            if spelling:
+                text = text.replace(spelling, "<project>")
+    return text[:2048]
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     timer = OperationTimer()
@@ -298,13 +341,24 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 result = doctor_with_portability(root, replay=not args.no_replay)
         elif args.workflow == "status":
-            snapshots = []
-            count = max(1, min(args.count, 100)) if args.watch else 1
-            for index in range(count):
-                snapshots.append(_status(root))
-                if index + 1 < count:
-                    time.sleep(max(0.1, min(args.interval, 60.0)))
-            result = snapshots[0] if len(snapshots) == 1 else {"record_type": "StatusWatch", "snapshots": snapshots}
+            if not _is_initialized(root):
+                result = {
+                    "record_type": "ProminStatus",
+                    "status": "not-initialized",
+                    "remedy": "run promin init",
+                    "authority": False,
+                    "pass_credit": False,
+                }
+                snapshots = None
+            else:
+                snapshots = []
+            if snapshots is not None:
+                count = max(1, min(args.count, 100)) if args.watch else 1
+                for index in range(count):
+                    snapshots.append(_status(root))
+                    if index + 1 < count:
+                        time.sleep(max(0.1, min(args.interval, 60.0)))
+                result = snapshots[0] if len(snapshots) == 1 else {"record_type": "StatusWatch", "snapshots": snapshots}
         elif args.workflow == "next":
             strict_values = (args.subject, args.grant, args.query_grant)
             if any(strict_values) and not all(strict_values):
@@ -315,6 +369,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 else next_proposal(root)
             )
         elif args.workflow == "validate":
+            _require_initialized(root)
             result = ProminService(root).validate(replay=not args.no_replay)
         elif args.workflow == "continue":
             if (args.subject is None) != (args.grant is None):
@@ -339,6 +394,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 build_plan=args.plan,
                 max_files=max(1, min(args.max_files, 1_000_000)),
                 max_total_bytes=max(1, min(args.max_bytes, 8 * 1024 * 1024 * 1024)),
+                persist=args.record,
             )
             if args.live:
                 result["heartbeat"] = heartbeat(root)
@@ -347,8 +403,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 root,
                 deep_context=args.deep_context,
                 apply=not args.plan_only,
+                reset_derived=args.reset_derived,
             )
         elif args.workflow == "context":
+            _require_initialized(root)
             result = query_context(
                 root,
                 args.query,
@@ -394,21 +452,38 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise ServiceError(f"unsupported skills action: {args.skills_action}")
         else:
             raise ServiceError(f"unsupported base workflow: {args.workflow}")
-        record_observation(root, kind=f"command:{args.workflow}", status="pass", duration_ms=timer.duration_ms, details={"component": "cli"})
+        initialized = _is_initialized(root)
+        if telemetry_enabled_for_command(
+            args.workflow,
+            initialized=initialized,
+            plan_only=not _command_mutates(args, result),
+            explicit_disabled=bool(getattr(args, "no_telemetry", False)),
+        ):
+            record_observation(root, kind=f"command:{args.workflow}", status="pass", duration_ms=timer.duration_ms, details={"component": "cli"})
         return result
     except Exception as exc:
-        record_observation(root, kind=f"command:{args.workflow}", status="failed", duration_ms=timer.duration_ms, details={"component": "cli", "reason": type(exc).__name__})
+        initialized = _is_initialized(root)
+        if telemetry_enabled_for_command(
+            args.workflow,
+            initialized=initialized,
+            plan_only=not _command_mutates(args),
+            explicit_disabled=bool(getattr(args, "no_telemetry", False)),
+        ):
+            record_observation(root, kind=f"command:{args.workflow}", status="failed", duration_ms=timer.duration_ms, details={"component": "cli", "reason": type(exc).__name__})
         raise
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
+    parsed: argparse.Namespace | None = None
     try:
-        result = _run(parser.parse_args(argv))
+        parsed = parser.parse_args(argv)
+        result = _run(parsed)
         sys.stdout.buffer.write(canonical_bytes(result))
         return 0
     except Exception as exc:
-        payload = {"record_type": "CommandFailure", "status": "rejected", "reason": str(exc)}
+        root = None if parsed is None else Path(parsed.root).resolve()
+        payload = {"record_type": "CommandFailure", "status": "rejected", "reason": _safe_public_reason(exc, root)}
         sys.stderr.buffer.write(canonical_bytes(payload))
         return 2
 

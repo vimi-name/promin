@@ -43,12 +43,32 @@ def host_binding() -> dict[str, Any]:
     return {**identity, "host_binding_digest": digest_value(identity)}
 
 
+def _host_binding_integrity(value: Mapping[str, Any] | None) -> str:
+    if value is None:
+        return "missing"
+    stored = value.get("host_binding_digest")
+    if not isinstance(stored, str):
+        return "invalid"
+    identity = {key: item for key, item in value.items() if key != "host_binding_digest"}
+    return "valid" if stored == digest_value(identity) else "invalid"
+
+
 def _load_previous(root: Path) -> dict[str, Any] | None:
     path = root / ".promin" / "host" / "host.json"
     if not path.is_file():
         return None
     value = load_json_strict(path, root=path.parent)
     return dict(value) if isinstance(value, Mapping) else None
+
+
+def _host_record_integrity(value: Mapping[str, Any] | None) -> str:
+    if value is None:
+        return "missing"
+    stored = value.get("host_binding_digest")
+    identity = {key: item for key, item in value.items() if key != "host_binding_digest"}
+    if not isinstance(stored, str) or stored != digest_value(identity):
+        return "invalid"
+    return "valid"
 
 
 def _load_portable_plan(root: Path) -> dict[str, Any] | None:
@@ -118,12 +138,10 @@ def _classify_absolute_paths(root: Path) -> tuple[list[dict[str, str]], list[dic
             files.extend(sorted(directory.glob("*.json"), key=lambda item: item.name.casefold()))
 
     def is_host_binding_location(relative_file: str, location: str) -> bool:
-        if relative_file != "init/technologies.json":
-            return False
-        return (
-            ".dependency_receipt.components[" in location
-            or ".implementation_closure.components[" in location
-        ) and location.endswith(".source")
+        # TechnologiesInit is the explicit host/provider binding. Absolute
+        # executable and dependency paths are local evidence and are re-bound by
+        # doctor after a host move; they are not portable project intent.
+        return relative_file == "init/technologies.json" and location.startswith("$.bindings[")
 
     for path in files:
         try:
@@ -178,7 +196,12 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
     root = Path(project_root).resolve()
     current = host_binding()
     previous = _load_previous(root)
-    changed = previous is not None and previous.get("host_binding_digest") != current["host_binding_digest"]
+    host_integrity = _host_record_integrity(previous)
+    changed = (
+        host_integrity == "valid"
+        and previous is not None
+        and previous.get("host_binding_digest") != current["host_binding_digest"]
+    )
     host_binding_missing = previous is None and (root / ".promin").exists()
     core: dict[str, Any]
     try:
@@ -205,10 +228,17 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
         for item in (docs, context, hosts, commit_surface)
         if isinstance(item, Mapping)
     )
-    status = (
-        "failed" if core_failed and plan is None
-        else "degraded" if changed or host_binding_missing or issues or core_failed or derived_stale
-        else "healthy"
+    integrity_invalid = host_integrity == "invalid"
+    if integrity_invalid:
+        status = "degraded"
+    elif core_failed and plan is None and previous is None:
+        status = "failed"
+    elif changed or host_binding_missing or issues or core_failed or derived_stale:
+        status = "degraded"
+    else:
+        status = "healthy"
+    repair_available = bool(
+        integrity_invalid or changed or host_binding_missing or core_failed or issues or derived_stale
     )
     return {
         "record_type": "PortableDoctorResult",
@@ -216,6 +246,7 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
         "core": core,
         "host_changed": changed,
         "host_binding_missing": host_binding_missing,
+        "host_binding_integrity": host_integrity,
         "previous_host": previous,
         "current_host": current,
         "canonical_absolute_path_issues": issues,
@@ -228,7 +259,7 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
         "commit_surface": commit_surface,
         "portable_plan_available": portable_brief is not None,
         "portable_team_state_available": portable_team_state is not None,
-        "repair_available": changed or host_binding_missing or core_failed or bool(issues) or derived_stale,
+        "repair_available": repair_available,
         "repair_command": "promin doctor --repair",
         "authority": False,
         "pass_credit": False,
@@ -254,11 +285,7 @@ def _brief_from_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def repair_project(project_root: Path | str, *, apply: bool = False) -> dict[str, Any]:
-    """Plan or apply reversible alpha repair and host rehydration.
-
-    Portable team/docs files survive source-control transfer. Host-specific init,
-    provider receipts, events, caches and projections are rebuilt locally.
-    """
+    """Plan or apply the same bounded, reversible repair action set."""
 
     root = Path(project_root).resolve()
     diagnosis = doctor_with_portability(root, replay=False)
@@ -272,159 +299,158 @@ def repair_project(project_root: Path | str, *, apply: bool = False) -> dict[str
             plan = resolve_plan(root, brief=portable_plan)
         except Exception:
             plan = None
+
     actions: list[dict[str, Any]] = []
     batches = int(diagnosis.get("event_batch_count", 0))
-
-    if plan is None:
-        actions.append({"action": "guided-reinit", "status": "blocked", "reason": "resolved or portable plan is missing"})
-    if diagnosis["canonical_absolute_path_issues"]:
-        actions.append({
-            "action": "remove-absolute-paths-from-canonical-init",
-            "status": "blocked",
-            "count": len(diagnosis["canonical_absolute_path_issues"]),
-            "reason": "canonical paths require an explicit user correction",
-        })
-    needs_rehydrate = (
+    canonical_issues = list(diagnosis.get("canonical_absolute_path_issues", []))
+    activation_exists = (root / ".promin" / "init" / "activation.json").is_file()
+    needs_rehydrate = bool(
         plan is not None
         and (
             diagnosis.get("host_changed")
             or diagnosis.get("host_binding_missing")
-            or not (root / ".promin" / "init" / "activation.json").is_file()
+            or not activation_exists
         )
     )
-    if needs_rehydrate:
+
+    if plan is None:
+        actions.append({"action": "guided-reinit", "status": "blocked", "reason": "resolved or portable plan is missing"})
+    if canonical_issues:
         actions.append({
-            "action": "rehydrate-local-control-layer",
-            "status": "ready" if apply and not diagnosis["canonical_absolute_path_issues"] else "planned",
+            "action": "remove-absolute-paths-from-canonical-init",
+            "status": "blocked",
+            "count": len(canonical_issues),
+            "reason": "canonical paths require an explicit user correction",
+        })
+    if needs_rehydrate and not canonical_issues:
+        actions.append({
+            "action": "rehydrated-local-control-layer",
+            "status": "planned",
             "event_batch_count": batches,
             "history_policy": "archive-old-state-no-silent-operational-migration",
         })
-    projection = root / ".promin" / "state" / "projection"
-    if not projection.exists() or diagnosis.get("core", {}).get("status") in {"failed", "rejected", "error"}:
-        actions.append({"action": "rebuild-projection", "status": "ready" if apply else "planned"})
-    for key, action in (
-        ("documentation", "repair-documentation"),
-        ("context_index", "rebuild-context-index"),
-        ("host_surfaces", "repair-host-surfaces"),
-        ("commit_surface", "repair-commit-surface"),
-    ):
-        state = diagnosis.get(key, {})
-        if isinstance(state, Mapping) and state.get("status") in {"stale", "missing", "blocked"}:
-            actions.append({"action": action, "status": "ready" if apply else "planned"})
+    elif plan is not None and not canonical_issues:
+        if diagnosis.get("host_binding_integrity") == "invalid" or diagnosis.get("host_binding_missing"):
+            actions.append({"action": "refreshed-host-binding", "status": "planned"})
+        projection = root / ".promin" / "state" / "projection"
+        core_status = str((diagnosis.get("core") or {}).get("status", "unknown"))
+        if not projection.exists() or core_status in {"failed", "rejected", "error", "incomplete"}:
+            actions.append({"action": "rebuilt-projection", "status": "planned"})
+        if any(
+            isinstance(diagnosis.get(key), Mapping)
+            and diagnosis[key].get("status") in {"stale", "missing", "blocked"}
+            for key in ("documentation", "context_index", "host_surfaces", "commit_surface")
+        ):
+            actions.append({"action": "refreshed-derived-surfaces", "status": "planned"})
+
+    # De-duplicate actions while preserving diagnostic order.
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in actions:
+        name = str(item["action"])
+        if name not in seen:
+            unique.append(item)
+            seen.add(name)
+    actions = unique
 
     performed: list[str] = []
     backup_path: str | None = None
-    if apply:
-        blocked = [item for item in actions if item.get("status") == "blocked"]
-        if blocked:
-            result = {
-                "record_type": "HostRepairResult",
-                "status": "blocked",
-                "actions": actions,
-                "performed": performed,
-                "product_files_modified": False,
-                "authority": False,
-                "pass_credit": False,
-            }
-            record_observation(root, kind="doctor-repair", status="blocked", details={"actions": len(actions), "component": "portability"})
-            return result
-
-        if needs_rehydrate and plan is not None:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            archive_root = root / ".promin-host" / "migrations" / timestamp
-            backup = archive_root / "promin-control-backup"
-            archive_root.mkdir(parents=True, exist_ok=False)
-            control = root / ".promin"
-            portable_copy = archive_root / "portable-team-copy"
-            if control.is_dir() and not control.is_symlink():
-                # Preserve a separate copy of the committable surfaces before moving
-                # the local control layer out of the way.
-                portable_copy.mkdir(parents=True, exist_ok=True)
-                for name in ("portable", ".gitignore"):
-                    source = control / name
-                    if source.is_dir() and not source.is_symlink():
-                        shutil.copytree(source, portable_copy / name, dirs_exist_ok=True)
-                    elif source.is_file() and not source.is_symlink():
-                        shutil.copy2(source, portable_copy / name)
-                shutil.move(str(control), str(backup))
-                backup_path = backup.relative_to(root).as_posix()
+    blocked = [item for item in actions if item.get("status") == "blocked"]
+    if apply and not blocked:
+        for item in actions:
+            action = str(item["action"])
             try:
-                refreshed = resolve_plan(root, brief=_brief_from_plan(plan))
-                applied = apply_plan(root, refreshed)
-                migration = {
-                    "record_type": "AlphaHostRehydrate",
-                    "migrated_at": utc_now(),
-                    "old_host_binding_digest": (diagnosis.get("previous_host") or {}).get("host_binding_digest"),
-                    "new_host_binding_digest": current["host_binding_digest"],
-                    "archived_control_path": backup_path,
-                    "archived_event_batch_count": batches,
-                    "operational_history_migrated": False,
-                    "new_activation_digest": applied.get("activation_digest"),
-                    "authority": False,
-                    "pass_credit": False,
-                }
-                _atomic_json(root / ".promin" / "generated" / "host-rehydrate.json", migration)
-                if portable_team_state is not None:
-                    proposal_identity = {
-                        "record_type": "TeamStateImportProposal",
-                        "source_team_state_digest": portable_team_state.get("team_state_digest"),
-                        "source_repository_content_digest": portable_team_state.get("repository_content_digest"),
-                        "receiving_plan_digest": refreshed.get("plan_digest"),
-                        "receiving_activation_digest": applied.get("activation_digest"),
-                        "latest_candidate": portable_team_state.get("latest_candidate"),
-                        "active_tasks": list(portable_team_state.get("active_tasks", [])),
-                        "active_findings": list(portable_team_state.get("active_findings", [])),
-                        "requires_current_candidate_rebinding": True,
-                        "requires_policy_validation": True,
-                        "requires_authority": True,
-                        "automatic_authoritative_import": False,
-                        "authority": False,
-                        "pass_credit": False,
-                    }
-                    _atomic_json(
-                        root / ".promin" / "generated" / "team-import-proposal.json",
-                        {**proposal_identity, "proposal_digest": digest_value(proposal_identity)},
-                    )
-                    performed.append("prepared-team-state-import-proposal")
-                performed.append("rehydrated-local-control-layer")
-                plan = refreshed
-            except Exception:
-                if (root / ".promin").exists():
-                    shutil.rmtree(root / ".promin", ignore_errors=True)
-                if backup.exists():
-                    shutil.move(str(backup), str(root / ".promin"))
-                raise
-        else:
-            host_path = root / ".promin" / "host" / "host.json"
-            _atomic_json(host_path, current)
-            performed.append("refreshed-host-binding")
-
-        if (root / ".promin" / "init" / "activation.json").is_file():
-            try:
-                ProminService(root).rebuild()
-                performed.append("rebuilt-projection")
+                if action == "rehydrated-local-control-layer":
+                    assert plan is not None
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    archive_root = root / ".promin-host" / "migrations" / timestamp
+                    backup = archive_root / "promin-control-backup"
+                    archive_root.mkdir(parents=True, exist_ok=False)
+                    control = root / ".promin"
+                    if control.is_dir() and not control.is_symlink():
+                        archive_root.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(control), str(backup))
+                        backup_path = backup.relative_to(root).as_posix()
+                    try:
+                        refreshed_plan = resolve_plan(root, brief=_brief_from_plan(plan))
+                        applied = apply_plan(root, refreshed_plan)
+                        migration = {
+                            "record_type": "AlphaHostRehydrate",
+                            "migrated_at": utc_now(),
+                            "old_host_binding_digest": (diagnosis.get("previous_host") or {}).get("host_binding_digest"),
+                            "new_host_binding_digest": current["host_binding_digest"],
+                            "archived_control_path": backup_path,
+                            "archived_event_batch_count": batches,
+                            "operational_history_migrated": False,
+                            "new_activation_digest": applied.get("activation_digest"),
+                            "authority": False,
+                            "pass_credit": False,
+                        }
+                        _atomic_json(root / ".promin" / "generated" / "host-rehydrate.json", migration)
+                        if portable_team_state is not None:
+                            proposal_identity = {
+                                "record_type": "TeamStateImportProposal",
+                                "source_team_state_digest": portable_team_state.get("team_state_digest"),
+                                "source_repository_content_digest": portable_team_state.get("repository_content_digest"),
+                                "receiving_plan_digest": refreshed_plan.get("plan_digest"),
+                                "receiving_activation_digest": applied.get("activation_digest"),
+                                "latest_candidate": portable_team_state.get("latest_candidate"),
+                                "active_tasks": list(portable_team_state.get("active_tasks", [])),
+                                "active_findings": list(portable_team_state.get("active_findings", [])),
+                                "requires_current_candidate_rebinding": True,
+                                "requires_policy_validation": True,
+                                "requires_authority": True,
+                                "automatic_authoritative_import": False,
+                                "authority": False,
+                                "pass_credit": False,
+                            }
+                            _atomic_json(
+                                root / ".promin" / "generated" / "team-import-proposal.json",
+                                {**proposal_identity, "proposal_digest": digest_value(proposal_identity)},
+                            )
+                    except Exception:
+                        if (root / ".promin").exists():
+                            shutil.rmtree(root / ".promin", ignore_errors=True)
+                        if backup.exists():
+                            shutil.move(str(backup), str(root / ".promin"))
+                        raise
+                elif action == "refreshed-host-binding":
+                    _atomic_json(root / ".promin" / "host" / "host.json", current)
+                elif action == "rebuilt-projection":
+                    ProminService(root).rebuild()
+                elif action == "refreshed-derived-surfaces":
+                    refresh_project(root, apply=True)
+                else:
+                    continue
+                performed.append(action)
             except Exception as exc:
-                actions.append({"action": "rebuild-projection", "status": "failed", "reason": str(exc)[:512]})
-
-        plan = load_resolved_plan(root) or plan
-        if plan is not None:
-            refreshed = refresh_project(root, apply=True)
-            performed.extend(["repaired-documentation", "rebuilt-context-index", "repaired-host-surfaces", "repaired-commit-surface"])
-            if refreshed.get("status") == "blocked":
-                actions.append({"action": "refresh-derived-surfaces", "status": "failed", "reason": "refresh reported blocked"})
+                item["status"] = "failed"
+                item["reason"] = str(exc)[:512]
+                break
 
     failed = any(item.get("status") == "failed" for item in actions)
-    result_status = "applied" if performed and not failed else "degraded" if failed or any(item.get("status") == "blocked" for item in actions) else "planned" if actions else "healthy"
+    if blocked:
+        result_status = "blocked" if apply else "planned"
+    elif apply:
+        result_status = "applied" if performed and not failed else "degraded" if failed else "healthy"
+    else:
+        result_status = "planned" if actions else "healthy"
     result = {
         "record_type": "HostRepairResult",
         "status": result_status,
         "actions": actions,
-        "performed": sorted(set(performed)),
+        "performed": performed,
         "backup_path": backup_path,
         "product_files_modified": False,
         "authority": False,
         "pass_credit": False,
     }
-    record_observation(root, kind="doctor-repair", status=result["status"], details={"actions": len(actions), "performed": result["performed"], "component": "portability"})
+    if apply and (root / ".promin" / "init" / "activation.json").is_file():
+        record_observation(
+            root,
+            kind="doctor-repair",
+            status=result_status,
+            details={"actions": len(actions), "performed": performed, "component": "portability"},
+        )
     return result
 

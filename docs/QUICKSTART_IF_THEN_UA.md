@@ -16,7 +16,7 @@
 - Якщо потрібний стан → `promin status`.
 - Якщо потрібна наступна робота → `promin next`.
 - Якщо система поводиться неправильно → `promin audit --live`.
-- Якщо promin ще не встановлено → створіть окремий Python 3.13/3.14 venv і виконайте `python -m pip install <шлях-до-розпакованого-promin>`.
+- Якщо promin ще не встановлено → створіть окремий Python 3.12/3.13/3.14 venv і виконайте `python -m pip install <шлях-до-розпакованого-promin>`.
 - Якщо потрібне offline-встановлення → використайте перевірений wheelhouse через `--no-index --find-links`.
 - Якщо потрібно перевірити весь шар → `promin doctor --checklist`.
 

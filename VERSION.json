@@ -1,6 +1,6 @@
 {
   "canonical_name": "promin",
-  "core_bundle_digest": "add3c0dd8891f154ad9f772dcc190d7c596c6b25f13ddc126f38ec3b15137a50",
+  "core_bundle_digest": "353f05fa59c57ab8b8c3af9b689fa1335289efa6bda8758930b2c6cb334fa089",
   "integrity": {
     "archive_sha256": "external",
     "checksums": "SHA256SUMS.txt",
@@ -9,7 +9,7 @@
   "record_type": "StandardVersion",
   "selected_preset": {
     "path": "presets/semantic-morok-tower.json",
-    "sha256": "306746fcef30ca96ad88f11b3e53e855c956fdd55af33e942e65f9edaf6a924a"
+    "sha256": "bc991f9c8bd8b7a3f52ea8305639203914164200ad48f17aac97a30480551184"
   },
-  "version": "1.0.0-alpha.1"
+  "version": "1.0.0-alpha.3"
 }

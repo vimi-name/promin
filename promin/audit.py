@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -29,6 +30,30 @@ _MAX_FINDINGS = 128
 
 class AuditError(RuntimeError):
     pass
+
+
+_DUPLICATE_NAME_MARKER = re.compile(
+    r"(?:\(\d+\)$|~$|(?:^|[._\-\s])(?:copy|backup|old|legacy|bak|v\d+|final(?:[._\-\s]?\d+)?|new(?:[._\-\s]?\d+)?|\d+)$)",
+    re.IGNORECASE,
+)
+
+
+def duplicate_name_markers(paths: list[str] | tuple[str, ...], *, limit: int = 16) -> dict[str, Any]:
+    """Return bounded filename markers without claiming semantic duplication.
+
+    Exact/content duplication remains owned by ``audit_project``.  This helper is
+    shared with guided init only as a low-confidence naming signal.
+    """
+
+    matches = [
+        path
+        for path in sorted(set(paths))
+        if _DUPLICATE_NAME_MARKER.search(Path(path).stem)
+    ]
+    return {
+        "examples": matches[: max(0, limit)],
+        "total_count": len(matches),
+    }
 
 
 def _iter_files(root: Path, *, max_files: int, max_total_bytes: int) -> tuple[list[Path], int, bool]:
@@ -133,6 +158,7 @@ def audit_project(
     build_plan: bool = False,
     max_files: int = 10_000,
     max_total_bytes: int = 256 * 1024 * 1024,
+    persist: bool = False,
 ) -> dict[str, Any]:
     root = Path(project_root).resolve()
     if not root.is_dir():
@@ -159,7 +185,7 @@ def audit_project(
                     f"AUD-LARGE-{len(findings)+1:03d}",
                     "large-file",
                     f"Large source file: {relative}",
-                    severity="medium",
+                    severity="high" if line_count >= 5000 or len(payload) >= 2 * 1024 * 1024 else "medium",
                     evidence=[{"path": relative, "line_count": line_count, "size_bytes": len(payload)}],
                     details={"interpretation": "signal-only; inspect responsibility and change history before refactoring"},
                 )
@@ -194,17 +220,17 @@ def audit_project(
             break
 
     hb = heartbeat(root)
-    for item in hb.get("top_active", []):
-        findings.append(
-            _finding(
-                f"AUD-OPS-{len(findings)+1:03d}",
-                "operational-error",
-                f"Recurring operational observation: {item.get('kind')}",
-                severity="high" if item.get("status") in {"failed", "error"} else "medium",
-                evidence=[{"fingerprint": item.get("fingerprint"), "occurrence_count": item.get("occurrence_count"), "last_seen": item.get("last_seen")}],
-                confidence="high",
-            )
-        )
+    self_observations = [
+        {
+            "kind": item.get("kind"),
+            "status": item.get("status"),
+            "fingerprint": item.get("fingerprint"),
+            "occurrence_count": item.get("occurrence_count"),
+            "last_seen": item.get("last_seen"),
+            "evidence_class": "measured",
+        }
+        for item in hb.get("top_active", [])[:32]
+    ]
 
     findings = findings[:_MAX_FINDINGS]
     identity = {
@@ -220,6 +246,9 @@ def audit_project(
         "findings": findings,
         "finding_count": len(findings),
         "heartbeat": hb,
+        "self_observations": self_observations,
+        "implemented_repository_observation_classes": ["large-file", "exact-duplicate"],
+        "implemented_self_observation_classes": ["operational-error"],
         "claim_classes": ["measured", "inferred"],
         "authority": False,
         "pass_credit": False,
@@ -231,19 +260,20 @@ def audit_project(
     if build_plan:
         result["plan_proposal"] = _plan_from_findings(root, findings, audit_digest)
 
-    try:
-        _atomic_json(root / ".promin" / "generated" / "audits" / "latest.json", result)
-    except OSError:
-        pass
-    record_observation(
-        root,
-        kind="runtime-audit",
-        status="degraded" if findings else "pass",
-        details={
-            "component": "audit",
-            "finding_count": len(findings),
-            "duplicate_cluster_count": len(duplicate_clusters),
-            "scan_truncated": truncated,
-        },
-    )
+    if persist:
+        try:
+            _atomic_json(root / ".promin" / "generated" / "audits" / "latest.json", result)
+        except OSError:
+            pass
+        record_observation(
+            root,
+            kind="runtime-audit",
+            status="degraded" if findings else "pass",
+            details={
+                "component": "audit",
+                "finding_count": len(findings),
+                "duplicate_cluster_count": len(duplicate_clusters),
+                "scan_truncated": truncated,
+            },
+        )
     return result

@@ -2,7 +2,7 @@
 
 MOROK TOWER
 
-Version 1.0.0-alpha.1
+Version 1.0.0-alpha.3
 
 `promin` is a portable operational layer for reliable agent-assisted work. It
 turns a goal, backlog, or repository into one visible resolved plan, bounded
@@ -12,15 +12,19 @@ configurable.
 
 > **Humans define meaning. Agents clarify and implement.**
 
+`1.0.0-alpha.3` implements general fixes for the Windows/init, portability, detection,
+read-only, self-check, and cost defects found by the independent Opus 5 stress review. See
+`docs/ALPHA3_OPUS5_FIXES_UA.md` for the exact boundaries and remaining alpha-deferred evidence.
+
 ## Installation
 
-Requirements: CPython 3.13 or 3.14. Extract the archive to a stable folder; do
+Requirements: CPython 3.12, 3.13, or 3.14. Extract the archive to a stable folder; do
 not place the Promin virtual environment inside the target repository.
 
 Windows PowerShell:
 
 ```powershell
-py -3.13 -m venv "$env:USERPROFILE\.venvs\promin"
+py -3.12 -m venv "$env:USERPROFILE\.venvs\promin"
 & "$env:USERPROFILE\.venvs\promin\Scripts\python.exe" -m pip install "C:\path\to\promin"
 & "$env:USERPROFILE\.venvs\promin\Scripts\promin.exe" --version
 ```
@@ -28,7 +32,7 @@ py -3.13 -m venv "$env:USERPROFILE\.venvs\promin"
 macOS or Linux:
 
 ```bash
-python3.13 -m venv "$HOME/.venvs/promin"
+python3.12 -m venv "$HOME/.venvs/promin"
 "$HOME/.venvs/promin/bin/python" -m pip install /path/to/promin
 "$HOME/.venvs/promin/bin/promin" --version
 ```
@@ -92,7 +96,7 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 114 regular files under 12 declared
+The canonical alpha tree contains exactly 121 regular files under 14 declared
 directories, including the nested `skills/example` package. `MANIFEST.json`
 enumerates all payload files; `SHA256SUMS.txt` closes those payloads together
 with the manifest.
@@ -100,16 +104,17 @@ with the manifest.
 | Location | Regular files |
 |---|---:|
 | package root | 13 |
+| `.github/` | 1 |
 | `core/` | 6 |
-| `docs/` | 11 |
+| `docs/` | 12 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `presets/` | 1 |
-| `profiles/` | 12 |
-| `promin/` | 28 |
+| `profiles/` | 13 |
+| `promin/` | 31 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 20 |
+| `tests/` | 21 |
 | `tools/` | 12 |
 
 The 13 root files are exactly `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
@@ -118,7 +123,7 @@ The 13 root files are exactly `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `VERSION.json`. License, governance, dependency, and notice closure are part of
 the package identity.
 
-Canonical directories are `core`, `docs`, `examples`, `human`, `presets`,
+Canonical directories are `.github`, `.github/workflows`, `core`, `docs`, `examples`, `human`, `presets`,
 `profiles`, `promin`, `prompts`, `skills`, `skills/example`, `tests`, and
 `tools`. Missing or additional paths reject. Project evidence, decisions,
 operational state, reports, caches, databases, wheelhouses, and secrets stay
@@ -518,7 +523,7 @@ remain outside the standard ZIP. Building the same canonical tree twice must
 produce byte-identical ZIP files.
 
 The evidence manifest resolves exactly seven authority roles, one exact
-non-authoritative eight-lane CPython 3.13/3.14 matrix, and the four CPython 3.14
+non-authoritative eight-lane CPython 3.12/3.13/3.14 matrix, and the four CPython 3.14
 supplemental records. Every referenced evidence file binds its relative path,
 SHA-256, and byte count. Supplemental and nested physical completions are part
 of the derived maximum completion time; the matrix cannot grant pass credit.

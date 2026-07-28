@@ -1469,7 +1469,7 @@
           }
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -3042,6 +3042,56 @@
             "zero-unowned-normative-facts": "package-static"
           }
         },
+        "command_latency_budgets_ms": {
+          "const": {
+            "audit_small": 5000,
+            "context_warm": 2000,
+            "init_apply_small": 30000,
+            "init_review": 5000,
+            "next_warm": 2000,
+            "status_warm": 2000
+          }
+        },
+        "command_latency_workloads": {
+          "const": {
+            "audit_small": {
+              "description": "Repository audit over at most 2000 files and 256 MiB of regular-file content with no network or provider installation.",
+              "max_files": 2000,
+              "max_total_bytes": 268435456,
+              "measurement_mode": "cold"
+            },
+            "context_warm": {
+              "description": "Context query against an already current local projection containing at most 100000 indexed artifacts.",
+              "max_files": 100000,
+              "max_total_bytes": 0,
+              "measurement_mode": "warm"
+            },
+            "init_apply_small": {
+              "description": "First guided apply for a project whose bounded preflight inspects at most 2000 files and 256 MiB; excludes remote downloads.",
+              "max_files": 2000,
+              "max_total_bytes": 268435456,
+              "measurement_mode": "cold"
+            },
+            "init_review": {
+              "description": "No-question-first review plan over a bounded preflight of at most 2000 files and 256 MiB.",
+              "max_files": 2000,
+              "max_total_bytes": 268435456,
+              "measurement_mode": "cold"
+            },
+            "next_warm": {
+              "description": "Next WorkCard from an already verified Activation and current local projection; no full repository scan.",
+              "max_files": 100000,
+              "max_total_bytes": 0,
+              "measurement_mode": "warm"
+            },
+            "status_warm": {
+              "description": "Status read from an already verified Activation and current local projection; no provider reinstallation or full scan.",
+              "max_files": 100000,
+              "max_total_bytes": 0,
+              "measurement_mode": "warm"
+            }
+          }
+        },
         "dependency_depth_hard_max": {
           "const": 12,
           "type": "integer"
@@ -3579,11 +3629,13 @@
             "core_normative_artifacts": 6,
             "persistent_entity_kinds_max": 9,
             "relation_kinds_max": 6,
-            "selected_presets": 1
+            "resolved_plan_bytes_max": 8192,
+            "selected_presets": 1,
+            "technology_source_items_max": 64
           }
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         },
         "workcard_hard_ceiling": {
           "const": {
@@ -3610,7 +3662,9 @@
         "production_claim_rule",
         "dependency_depth_hard_max",
         "acceptance_proof_class_counts",
-        "acceptance_proof_classes"
+        "acceptance_proof_classes",
+        "command_latency_budgets_ms",
+        "command_latency_workloads"
       ],
       "type": "object"
     },
@@ -12281,7 +12335,7 @@
           "const": 1
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -12377,7 +12431,7 @@
           "type": "object"
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -12617,6 +12671,9 @@
                     "minimum": 0,
                     "type": "number"
                   },
+                  "source_count_complete": {
+                    "type": "boolean"
+                  },
                   "sources": {
                     "items": {
                       "maxLength": 4096,
@@ -12628,13 +12685,23 @@
                     "type": "array",
                     "uniqueItems": true
                   },
+                  "sources_truncated": {
+                    "type": "boolean"
+                  },
                   "technology": {
                     "$ref": "#/$defs/Id"
+                  },
+                  "total_source_count": {
+                    "minimum": 1,
+                    "type": "integer"
                   }
                 },
                 "required": [
                   "technology",
                   "sources",
+                  "total_source_count",
+                  "sources_truncated",
+                  "source_count_complete",
                   "confidence"
                 ],
                 "type": "object"
@@ -13130,7 +13197,7 @@
           "const": true
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -19629,7 +19696,7 @@
           }
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -19939,7 +20006,7 @@
           "type": "integer"
         },
         "version": {
-          "const": "1.0.0-alpha.1"
+          "const": "1.0.0-alpha.3"
         }
       },
       "required": [
@@ -21811,5 +21878,5 @@
     }
   ],
   "title": "promin composed contracts",
-  "version": "1.0.0-alpha.1"
+  "version": "1.0.0-alpha.3"
 }

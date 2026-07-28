@@ -207,7 +207,7 @@ def test_emit_review_and_dry_run_are_non_mutating(tmp_path: Path) -> None:
         preset_path=PRESET,
         **_explicit_plan_objects(paths),
     )
-    assert emitted["standard_version"] == "1.0.0-alpha.1"
+    assert emitted["standard_version"] == "1.0.0-alpha.3"
     assert emitted["product_tree_scans"] == 0
     assert emitted["project_mutations"] == 0
     assert not (project / ".promin").exists()
@@ -1582,6 +1582,33 @@ def test_signature_provider_short_timeout_uses_bounded_startup_allowance(
     assert observed == [expected, expected]
 
 
+def test_executable_signature_provider_uses_platform_subprocess_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, _ = _plans(tmp_path)
+    binding = _standalone_provider_binding(
+        project, capability_id="signature", timeout_ms=100
+    )
+    observed: list[list[str]] = []
+
+    monkeypatch.setattr(
+        init_runtime,
+        "subprocess_path",
+        lambda value: "EXTENDED::" + str(value),
+    )
+
+    def complete(argv: list[str], **kwargs: object):
+        observed.append(list(argv))
+        return init_runtime.subprocess.CompletedProcess(
+            argv, 0, canonical_bytes({"verified": True}), b""
+        )
+
+    monkeypatch.setattr(init_runtime.subprocess, "run", complete)
+    verifier = init_runtime._executable_signature_verifier(binding, project)
+    assert verifier({"claim_digest": "a" * 64}, {"key_id": "key-1"}) is True
+    assert observed[0][0].startswith("EXTENDED::")
+
+
 def test_signature_provider_timeout_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1962,6 +1989,29 @@ def test_verified_mutation_context_invalidates_directory_provider_receipt_drift(
     with pytest.raises(InitError, match="provider dependency receipt drift|provider receipt inventory"):
         service._verified_mutation_context(expected)
     assert calls == 2
+
+
+def test_read_context_skips_repeated_schema_meta_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, paths = _plans(tmp_path)
+    initialize_project(_request(project, paths))
+
+    import promin.contracts as contract_runtime
+    from promin.service import ProminService
+
+    contract_runtime._bundle_cache.clear()
+
+    def forbidden(_schema: object) -> None:
+        raise AssertionError("read context repeated Draft meta-validation")
+
+    monkeypatch.setattr(
+        contract_runtime.Draft202012Validator,
+        "check_schema",
+        forbidden,
+    )
+    result = ProminService(project).status()
+    assert result["record_type"] == "StatusResult"
 
 
 def test_canonical_runtime_bundle_uses_resource_resolver(

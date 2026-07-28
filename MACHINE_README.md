@@ -2,11 +2,11 @@
 
 Canonical name: `promin`
 
-Standard version: `1.0.0-alpha.1`
+Standard version: `1.0.0-alpha.3`
 
 ## Installed runtime bootstrap
 
-The supported alpha installation path is a dedicated CPython 3.13/3.14 virtual
+The supported alpha installation path is a dedicated CPython 3.12/3.13/3.14 virtual
 environment. Build/install from the extracted canonical folder with
 `python -m pip install PATH_TO_PROMIN`, then verify `promin --version`. The wheel
 installs the runtime package plus the canonical runtime bundle below
@@ -44,22 +44,23 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 114 regular files under 12 declared
+The canonical alpha tree contains exactly 121 regular files under 14 declared
 directories, including the nested `skills/example` directory:
 
 | Location | Regular files |
 |---|---:|
 | package root | 13 |
+| `.github/` | 1 |
 | `core/` | 6 |
-| `docs/` | 11 |
+| `docs/` | 12 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `presets/` | 1 |
-| `profiles/` | 12 |
-| `promin/` | 28 |
+| `profiles/` | 13 |
+| `promin/` | 31 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 20 |
+| `tests/` | 21 |
 | `tools/` | 12 |
 
 Root files are exactly `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
@@ -623,7 +624,7 @@ Platform/Python matrix rows are audit-level compatibility observations. They
 are non-authoritative, provide no standalone pass credit, and cannot authorize
 distribution or product acceptance. Supplemental interpreter rows do not add
 roles to the exact seven-role EvidenceManifest. The manifest additionally
-resolves the exact eight-lane CPython 3.13/3.14 matrix and all four CPython 3.14
+resolves the exact eight-lane CPython 3.12/3.13/3.14 matrix and all four CPython 3.14
 supplemental records by relative path, SHA-256, and byte count. Their signed
 completion times, plus every nested physical completion, participate in the
 derived maximum evidence completion time.

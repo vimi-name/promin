@@ -11,7 +11,10 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
 from typing import Any, Iterable
+
+from .platform_paths import PlatformPathError, filesystem_path, resolve_contained_path
 
 
 class CanonicalError(ValueError):
@@ -106,58 +109,31 @@ def _is_link_or_reparse(
 
 
 def _reject_link_components(path: Path, root: Path | None) -> None:
-    boundary = (root if root is not None else path.parent).resolve(strict=True)
-    if root is not None and (_is_link_or_reparse(root) or not root.is_dir()):
-        raise CanonicalError(f"path root must be a real directory: {root}")
+    """Compatibility wrapper around the single platform path boundary."""
+
+    boundary = path.parent if root is None else root
     try:
-        relative = path.absolute().relative_to(boundary.absolute())
-    except ValueError as exc:
-        raise CanonicalError(f"path escapes configured root: {path}") from exc
-    cursor = boundary
-    for part in relative.parts:
-        cursor = cursor / part
-        try:
-            mode = cursor.lstat().st_mode
-        except OSError as exc:
-            raise CanonicalError(f"path cannot be inspected: {cursor}: {exc}") from exc
-        if _is_link_or_reparse(cursor):
-            raise CanonicalError(f"symbolic link or reparse point rejected: {cursor}")
+        resolve_contained_path(path, root=boundary, reject_internal_links=True)
+    except PlatformPathError as exc:
+        raise CanonicalError(str(exc)) from exc
 
 
-def require_regular_file(path: str | os.PathLike[str], *, root: str | os.PathLike[str] | None = None) -> Path:
+def require_regular_file(
+    path: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] | None = None,
+) -> Path:
     candidate = Path(path)
-    if root is not None and not candidate.is_absolute():
-        root_absolute = Path(root).absolute()
-        candidate_absolute = candidate.absolute()
-        candidate = (
-            candidate_absolute
-            if _is_relative_to(candidate_absolute, root_absolute)
-            else Path(root) / candidate
+    boundary = candidate.parent if root is None else Path(root)
+    try:
+        return resolve_contained_path(
+            candidate,
+            root=boundary,
+            require_regular=True,
+            reject_internal_links=True,
         )
-    configured_root = None
-    if root is not None:
-        root_path = Path(root)
-        try:
-            root_stat = root_path.lstat()
-        except OSError as exc:
-            raise CanonicalError(f"path root cannot be inspected: {root_path}: {exc}") from exc
-        if _is_link_or_reparse(root_path, root_stat) or not stat.S_ISDIR(root_stat.st_mode):
-            raise CanonicalError(f"path root must be a real directory: {root_path}")
-        configured_root = root_path.resolve(strict=True)
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as exc:
-        raise CanonicalError(f"required file is unavailable: {candidate}: {exc}") from exc
-    if configured_root is not None and not _is_relative_to(resolved, configured_root):
-        raise CanonicalError(f"path escapes configured root: {candidate}")
-    _reject_link_components(candidate, configured_root)
-    try:
-        mode = candidate.stat(follow_symlinks=False).st_mode
-    except OSError as exc:
-        raise CanonicalError(f"file cannot be inspected: {candidate}: {exc}") from exc
-    if not stat.S_ISREG(mode):
-        raise CanonicalError(f"expected regular file: {candidate}")
-    return resolved
+    except PlatformPathError as exc:
+        raise CanonicalError(str(exc)) from exc
 
 
 def ensure_exact_regular_files(
@@ -291,7 +267,7 @@ def load_json_strict(
 ) -> Any:
     resolved = require_regular_file(path, root=root)
     try:
-        with resolved.open("rb") as handle:
+        with open(filesystem_path(resolved), "rb") as handle:
             data = handle.read(limits.max_bytes + 1)
     except OSError as exc:
         raise CanonicalError(f"cannot read JSON file {resolved}: {exc}") from exc
@@ -329,7 +305,7 @@ def digest_file(
     resolved = require_regular_file(path, root=root)
     result = hashlib.sha256()
     try:
-        with resolved.open("rb") as handle:
+        with open(filesystem_path(resolved), "rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 result.update(chunk)
     except OSError as exc:

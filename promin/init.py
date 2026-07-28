@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
@@ -38,6 +39,13 @@ from .canonical import (
     require_regular_file,
 )
 from .resources import bundle_root
+from .provider_store import materialize_from_store
+from .platform_paths import (
+    PlatformPathError,
+    filesystem_path,
+    resolve_identity_path,
+    subprocess_path,
+)
 
 from .contracts import (
     CORE_FILES,
@@ -67,7 +75,7 @@ def current_host_binding() -> dict[str, Any]:
     without committing absolute executable paths or caches.
     """
 
-    executable = Path(sys.executable).resolve(strict=True)
+    executable = resolve_identity_path(sys.executable, strict=True)
     identity = {
         "record_type": "HostBinding",
         "system": {"windows": "windows", "darwin": "darwin", "linux": "linux"}.get(
@@ -318,21 +326,43 @@ def _provider_timeout_seconds(binding: Mapping[str, Any]) -> float:
     return min(effective_ms, _PROVIDER_TIMEOUT_CEILING_MS) / 1000
 
 
-def _provider_path(value: str, project_root: Path) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = project_root / path
+def _init_identity_path(
+    value: str,
+    project_root: Path,
+    *,
+    strict: bool = True,
+) -> Path:
+    """Normalize a provider path through the single platform path owner.
+
+    ``strict=False`` is reserved for comparing immutable receipt metadata after
+    the mutable source has disappeared. Any operation that reads, executes, or
+    materializes bytes keeps the default strict behaviour.
+    """
+
     try:
-        return path.resolve(strict=True)
-    except OSError as exc:
-        raise InitError(f"provider path is unavailable: {value}: {exc}") from exc
+        return resolve_identity_path(
+            value,
+            base=project_root,
+            strict=strict,
+        )
+    except PlatformPathError as exc:
+        raise InitError("provider path is unavailable") from exc
 
 
-def _configured_provider_path(value: str, project_root: Path) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = project_root / path
-    return Path(os.path.abspath(path))
+def _spawn_provider_argv(
+    binding: Mapping[str, Any], argv: Sequence[str], project_root: Path
+) -> list[str]:
+    """Apply host process-path syntax only at the process-spawn boundary."""
+
+    result = list(argv)
+    if not result:
+        return result
+    path_indices = (0, 1) if binding.get("invocation", {}).get("kind") == "python-module" else (0,)
+    for index in path_indices:
+        if index >= len(result):
+            raise InitError(f"provider invocation lacks required path argument: {binding.get('provider_id')}")
+        result[index] = subprocess_path(_init_identity_path(str(result[index]), project_root))
+    return result
 
 
 @dataclass(frozen=True)
@@ -615,7 +645,7 @@ class ProviderDispatch:
         selected_output_ceiling = self._select_output_size_ceiling(
             operation, output_size_ceiling_bytes
         )
-        executable = _provider_path(
+        executable = _init_identity_path(
             str(binding["invocation"]["value"]), self._project_root
         )
         evidence = self._operation_identity_evidence(capability_id, operation)
@@ -726,7 +756,7 @@ class ProviderDispatch:
         adapter = self.adapter(plan.capability_id)
         binding = self.binding(plan.capability_id)
         executable = str(
-            _provider_path(str(binding["invocation"]["value"]), self._project_root)
+            _init_identity_path(str(binding["invocation"]["value"]), self._project_root)
         )
         if (
             plan.protocol_id != adapter.protocol_id
@@ -999,7 +1029,7 @@ class ProviderDispatch:
         started_at = _utc_second_text()
         try:
             completed = subprocess.run(
-                list(plan.argv),
+                _spawn_provider_argv(self.binding(capability_id), plan.argv, self._project_root),
                 cwd=plan.cwd,
                 input=plan.stdin,
                 stdout=subprocess.PIPE,
@@ -1061,7 +1091,7 @@ class ProviderDispatch:
         started_at = _utc_second_text()
         try:
             completed = subprocess.run(
-                list(plan.argv),
+                _spawn_provider_argv(self.binding("filesystem-inventory"), plan.argv, self._project_root),
                 cwd=plan.cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -1260,7 +1290,7 @@ def _provider_receipt_path(
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise InitError(f"provider identity digest is invalid: {binding.get('provider_id')}")
-    return receipt_root / digest / _provider_receipt_name(binding)
+    return receipt_root / digest[:24] / _provider_receipt_name(binding)
 
 
 def _component_receipt_path(
@@ -1289,19 +1319,19 @@ def _provider_tree_source_file(root: Path, path: Path) -> Path:
     root.  Directory links remain rejected.
     """
 
-    resolved_root = root.resolve(strict=True)
+    resolved_root = resolve_identity_path(root, strict=True)
     try:
-        mode = path.lstat().st_mode
+        mode = os.lstat(filesystem_path(path)).st_mode
     except OSError as exc:
         raise InitError(f"provider dependency file is unavailable: {path}: {exc}") from exc
     if stat.S_ISLNK(mode):
         try:
-            target = path.resolve(strict=True)
+            target = resolve_identity_path(path, strict=True)
             target.relative_to(resolved_root)
         except (OSError, ValueError) as exc:
             raise InitError(f"provider dependency link escapes its tree: {path}") from exc
         try:
-            target_mode = target.stat(follow_symlinks=False).st_mode
+            target_mode = os.stat(filesystem_path(target), follow_symlinks=False).st_mode
         except OSError as exc:
             raise InitError(f"provider dependency link target is unavailable: {path}") from exc
         if not stat.S_ISREG(target_mode) or target.is_symlink():
@@ -1310,7 +1340,7 @@ def _provider_tree_source_file(root: Path, path: Path) -> Path:
     if not stat.S_ISREG(mode):
         raise InitError(f"provider dependency path is not a regular file: {path}")
     try:
-        path.resolve(strict=True).relative_to(resolved_root)
+        resolve_identity_path(path, strict=True).relative_to(resolved_root)
     except (OSError, ValueError) as exc:
         raise InitError(f"provider dependency file escapes its tree: {path}") from exc
     return path
@@ -1318,7 +1348,7 @@ def _provider_tree_source_file(root: Path, path: Path) -> Path:
 
 def _provider_tree_files(root: Path) -> tuple[list[dict[str, Any]], int]:
     try:
-        resolved = root.resolve(strict=True)
+        resolved = resolve_identity_path(root, strict=True)
     except OSError as exc:
         raise InitError(f"provider dependency tree is unavailable: {root}: {exc}") from exc
     if not resolved.is_dir() or resolved.is_symlink():
@@ -1339,7 +1369,7 @@ def _provider_tree_files(root: Path) -> tuple[list[dict[str, Any]], int]:
         for name in filenames:
             logical_path = base / name
             source_path = _provider_tree_source_file(resolved, logical_path)
-            size = source_path.stat(follow_symlinks=False).st_size
+            size = os.stat(filesystem_path(source_path), follow_symlinks=False).st_size
             total += size
             files.append(
                 {
@@ -1362,8 +1392,8 @@ def _provider_tree_digest(root: Path) -> tuple[str, int]:
 
 
 def _reject_product_provider_tree_overlap(provider_tree: Path, project_root: Path) -> None:
-    tree = provider_tree.resolve(strict=True)
-    project = project_root.resolve(strict=True)
+    tree = resolve_identity_path(provider_tree, strict=True)
+    project = resolve_identity_path(project_root, strict=True)
     if tree == project or tree.is_relative_to(project) or project.is_relative_to(tree):
         raise InitError("provider dependency tree must not overlap the product project")
 
@@ -1378,7 +1408,7 @@ def build_provider_dependency_receipt(
 
     capability_id = str(binding["capability_id"])
     invocation_kind = str(binding["invocation"]["kind"])
-    source = _provider_path(str(binding["identity"]["source"]), project_root)
+    source = _init_identity_path(str(binding["identity"]["source"]), project_root)
     primary_id = (
         "interpreter"
         if invocation_kind == "python-runtime"
@@ -1400,8 +1430,8 @@ def build_provider_dependency_receipt(
     ]
     if invocation_kind == "python-module":
         interpreter = require_regular_file(
-            Path(sys.executable).resolve(strict=True),
-            root=Path(sys.executable).resolve(strict=True).parent,
+            resolve_identity_path(sys.executable, strict=True),
+            root=resolve_identity_path(sys.executable, strict=True).parent,
         )
         components.append(
             {
@@ -1420,7 +1450,7 @@ def build_provider_dependency_receipt(
     if capability_id == "filesystem-inventory":
         if provider_tree is None:
             raise InitError("Git provider requires an explicit complete provider tree")
-        tree = provider_tree.resolve(strict=True)
+        tree = resolve_identity_path(provider_tree, strict=True)
         _reject_product_provider_tree_overlap(tree, project_root)
         tree_digest, tree_size = _provider_tree_digest(tree)
         components.append(
@@ -1491,8 +1521,10 @@ def _validate_provider_dependency_receipt_shape(
         if invocation_kind == "python-module"
         else "provider-executable"
     )
-    primary_source = _configured_provider_path(
-        str(binding["identity"]["source"]), project_root
+    primary_source = _init_identity_path(
+        str(binding["identity"]["source"]),
+        project_root,
+        strict=False,
     )
     primary_bound = False
     for component in components:
@@ -1529,7 +1561,11 @@ def _validate_provider_dependency_receipt_shape(
             or component["size_bytes"] < 0
         ):
             raise InitError(f"provider dependency component is invalid: {component_id}")
-        source = _configured_provider_path(str(component["source"]), project_root)
+        source = _init_identity_path(
+            str(component["source"]),
+            project_root,
+            strict=False,
+        )
         if (
             kind == "provider-file"
             and component_id == primary_id
@@ -1570,17 +1606,17 @@ def verify_provider_dependency_receipt(
     binding: Mapping[str, Any], project_root: Path
 ) -> None:
     components = _validate_provider_dependency_receipt_shape(binding, project_root)
-    primary_source = _provider_path(str(binding["identity"]["source"]), project_root)
+    primary_source = _init_identity_path(str(binding["identity"]["source"]), project_root)
     for component in components:
         component_id = component["component_id"]
         kind = component["component_kind"]
-        source = _provider_path(str(component["source"]), project_root)
+        source = _init_identity_path(str(component["source"]), project_root)
         if kind in {"provider-file", "native-runtime"}:
             actual_digest = digest_file(source)
             actual_size = source.stat(follow_symlinks=False).st_size
         elif kind == "python-distribution" and component_id == "jsonschema":
             observed = _jsonschema_receipt()
-            if Path(str(observed["source"])).resolve(strict=True) != source:
+            if resolve_identity_path(str(observed["source"]), strict=True) != source:
                 raise InitError("jsonschema dependency source changed")
             actual_digest = str(observed["digest"])
             actual_size = int(observed["size_bytes"])
@@ -1597,25 +1633,17 @@ def verify_provider_dependency_receipt(
 
 
 def _copy_provider_receipt(source: Path, destination: Path, expected: str) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    """Materialize exact provider bytes through the per-user shared store."""
+
     try:
         source_mode = source.stat(follow_symlinks=False).st_mode
         if stat.S_ISLNK(source_mode) or not stat.S_ISREG(source_mode):
             raise InitError(f"provider source is not a regular file: {source}")
-        digest = hashlib.sha256()
-        with source.open("rb") as reader, destination.open("xb") as writer:
-            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
-                digest.update(chunk)
-                writer.write(chunk)
-            writer.flush()
-            os.fsync(writer.fileno())
-        if digest.hexdigest() != expected:
-            raise InitError(f"provider changed while creating receipt: {source}")
-        os.chmod(destination, stat.S_IMODE(source_mode))
+        materialize_from_store(source, destination, expected)
         fsync_directory(destination.parent)
     except InitError:
         raise
-    except OSError as exc:
+    except Exception as exc:
         raise InitError(f"provider receipt cannot be created: {source}: {exc}") from exc
 
 
@@ -1627,7 +1655,7 @@ def _materialize_dependency_component(
 ) -> None:
     target = _component_receipt_path(receipt_root, binding, component)
     target.mkdir(parents=True, exist_ok=False)
-    source = _provider_path(str(component["source"]), project_root)
+    source = _init_identity_path(str(component["source"]), project_root)
     kind = component["component_kind"]
     selected: list[tuple[Path, Path, str]] = []
     if kind in {"provider-file", "native-runtime"}:
@@ -1671,7 +1699,7 @@ def materialize_provider_receipts(
         if not isinstance(binding, Mapping):
             raise InitError("provider receipt requires canonical technology bindings")
         verify_provider_dependency_receipt(binding, project_root)
-        source = _provider_path(str(binding["identity"]["source"]), project_root)
+        source = _init_identity_path(str(binding["identity"]["source"]), project_root)
         destination = _provider_receipt_path(receipt_root, binding)
         expected = str(binding["identity"]["digest"])
         previous = created.get(destination)
@@ -1800,14 +1828,21 @@ def _runtime_provider_binding(
         raise InitError(f"provider receipt digest mismatch: {binding['provider_id']}")
     invocation = runtime["invocation"]
     healthcheck = runtime["healthcheck"]
-    original_source = _configured_provider_path(
-        str(binding["identity"]["source"]), project_root
+    original_source = _init_identity_path(
+        str(binding["identity"]["source"]),
+        project_root,
+        strict=False,
     )
+    # Windows Git is an installation, not a relocatable executable: receipts
+    # remain inventory-verified evidence, while operations use the bound host
+    # installation so its loader and exec-path dependencies remain available.
     for component in binding["dependency_receipt"]["components"]:
         if component["component_kind"] != "provider-tree":
             continue
-        component_source = _configured_provider_path(
-            str(component["source"]), project_root
+        component_source = _init_identity_path(
+            str(component["source"]),
+            project_root,
+            strict=False,
         )
         try:
             relative_source = original_source.relative_to(component_source)
@@ -1826,7 +1861,9 @@ def _runtime_provider_binding(
         module_value, separator, callable_name = str(invocation["value"]).rpartition("#")
         if not separator or not callable_name:
             raise InitError(f"provider module invocation is not explicit: {binding['provider_id']}")
-        if _configured_provider_path(module_value, project_root) != original_source:
+        if _init_identity_path(
+            module_value, project_root, strict=False
+        ) != original_source:
             raise InitError(f"provider invocation does not match its identity: {binding['provider_id']}")
         invocation["value"] = f"{receipt}#{callable_name}"
         argv = list(healthcheck["argv"])
@@ -1840,14 +1877,19 @@ def _runtime_provider_binding(
         )
         if interpreter_component is None:
             raise InitError("Python provider dependency receipt lacks its interpreter")
-        interpreter_source = _configured_provider_path(
-            str(interpreter_component["source"]), project_root
+        interpreter_source = _init_identity_path(
+            str(interpreter_component["source"]),
+            project_root,
+            strict=False,
         )
         if (
             len(argv) < 2
-            or _configured_provider_path(str(argv[0]), project_root)
-            != interpreter_source
-            or _configured_provider_path(str(argv[1]), project_root) != original_source
+            or _init_identity_path(
+                str(argv[0]), project_root, strict=False
+            ) != interpreter_source
+            or _init_identity_path(
+                str(argv[1]), project_root, strict=False
+            ) != original_source
         ):
             raise InitError(
                 f"provider healthcheck does not execute its bound interpreter and module: {binding['provider_id']}"
@@ -1867,8 +1909,9 @@ def _runtime_provider_binding(
         healthcheck["argv"] = argv
     else:
         if (
-            _configured_provider_path(str(invocation["value"]), project_root)
-            != original_source
+            _init_identity_path(
+                str(invocation["value"]), project_root, strict=False
+            ) != original_source
         ):
             raise InitError(f"provider invocation does not match its identity: {binding['provider_id']}")
         invocation["value"] = str(receipt)
@@ -1877,20 +1920,31 @@ def _runtime_provider_binding(
             raise InitError(
                 f"provider healthcheck does not execute its bound identity: {binding['provider_id']}"
             )
-        if _configured_provider_path(str(argv[0]), project_root) != original_source:
+        if _init_identity_path(
+            str(argv[0]), project_root, strict=False
+        ) != original_source:
             raise InitError(
                 f"provider healthcheck does not execute its bound identity: {binding['provider_id']}"
             )
         argv[0] = str(receipt)
         healthcheck["argv"] = argv
     runtime["identity"]["source"] = str(receipt)
+    if (
+        os.name == "nt"
+        and binding.get("capability_id") == "filesystem-inventory"
+        and original_source.name.casefold() == "git.exe"
+    ):
+        runtime["invocation"]["value"] = str(original_source)
+        runtime["healthcheck"]["argv"][0] = str(original_source)
     return runtime
 
 
 def _git_receipt_environment(binding: Mapping[str, Any]) -> Mapping[str, str]:
     executable = Path(str(binding["identity"]["source"]))
+    if os.name == "nt" and str(binding["invocation"]["value"]) != str(executable):
+        return dict(os.environ)
     digest = str(binding["identity"]["digest"])
-    digest_root = next((parent for parent in executable.parents if parent.name == digest), None)
+    digest_root = next((parent for parent in executable.parents if parent.name == digest[:24]), None)
     if digest_root is None:
         raise InitError("Git provider is not running from a content-addressed receipt")
     provider_tree = digest_root / "components" / "git-provider-tree"
@@ -1971,8 +2025,8 @@ def _promin_runtime_version(runtime_root: Path) -> str:
             return version
     try:
         distribution = importlib_metadata.distribution("promin")
-        installed_package = Path(distribution.locate_file("promin")).resolve(strict=True)
-        if installed_package == runtime_root.resolve(strict=True):
+        installed_package = resolve_identity_path(distribution.locate_file("promin"), strict=True)
+        if installed_package == resolve_identity_path(runtime_root, strict=True):
             return distribution.version
     except (importlib_metadata.PackageNotFoundError, OSError):
         pass
@@ -2001,7 +2055,7 @@ def _promin_runtime_files(runtime_root: Path) -> tuple[tuple[Path, Path], ...]:
 
 
 def _promin_runtime_receipt() -> dict[str, str]:
-    runtime_root = Path(__file__).resolve(strict=True).parent
+    runtime_root = resolve_identity_path(__file__, strict=True).parent
     files = [
         {"path": relative.as_posix(), "digest": _digest_verified_file(path)}
         for relative, path in _promin_runtime_files(runtime_root)
@@ -2021,7 +2075,7 @@ def _promin_runtime_receipt() -> dict[str, str]:
 
 
 def _interpreter_receipt() -> dict[str, str]:
-    executable_path = Path(sys.executable).resolve(strict=True)
+    executable_path = resolve_identity_path(sys.executable, strict=True)
     executable = require_regular_file(executable_path, root=executable_path.parent)
     return {
         "name": sys.implementation.name,
@@ -2036,7 +2090,7 @@ def _jsonschema_files() -> tuple[Any, Path, tuple[tuple[Path, Path], ...]]:
     except importlib_metadata.PackageNotFoundError as exc:
         raise InitError("jsonschema distribution is unavailable") from exc
     distribution_base = Path(distribution.locate_file(".")).absolute()
-    distribution_root = distribution_base.resolve(strict=True)
+    distribution_root = resolve_identity_path(distribution_base, strict=True)
     selected_files: list[tuple[Path, Path]] = []
     verified_directories = {distribution_root}
     for item in distribution.files or ():
@@ -2092,7 +2146,7 @@ def _jsonschema_receipt() -> dict[str, Any]:
 
 
 def _sqlite_receipt() -> dict[str, Any]:
-    module_source = Path(_sqlite3.__file__).resolve(strict=True)
+    module_source = resolve_identity_path(_sqlite3.__file__, strict=True)
     module_path = require_regular_file(module_source, root=module_source.parent)
     return {
         "component_id": "sqlite",
@@ -2193,7 +2247,7 @@ def bind_implementation_closures(
             binding.pop("implementation_closure", None)
     dispatch = resolve_provider_dispatch(
         bound,
-        Path(project_root).resolve(strict=True),
+        resolve_identity_path(project_root, strict=True),
         provider_verifiers,
         contract_bundle=contract_bundle,
         signature_verifier=signature_verifier,
@@ -2294,7 +2348,7 @@ class ActivationContext:
 
 def _read_path_state(label: str, path: Path, kind: str) -> dict[str, Any]:
     try:
-        value = path.stat(follow_symlinks=False)
+        value = os.stat(filesystem_path(path), follow_symlinks=False)
     except OSError as exc:
         raise InitError(f"Activation-bound path is unavailable: {path}: {exc}") from exc
     valid_kind = (
@@ -2302,7 +2356,7 @@ def _read_path_state(label: str, path: Path, kind: str) -> dict[str, Any]:
     ) or (
         kind == "directory" and stat.S_ISDIR(value.st_mode)
     )
-    if stat.S_ISLNK(value.st_mode) or not valid_kind:
+    if stat.S_ISLNK(value.st_mode) or os.path.islink(filesystem_path(path)) or not valid_kind:
         raise InitError(f"Activation-bound path is not a real {kind}: {path}")
     return {
         "label": label,
@@ -2361,7 +2415,7 @@ def activation_read_bindings(
     (secret_path,) = ensure_exact_regular_files(secret_dir, (secret_name,))
     selected.append(("continuation-secret", secret_path, "file"))
 
-    runtime_root = Path(__file__).resolve(strict=True).parent
+    runtime_root = resolve_identity_path(__file__, strict=True).parent
     runtime_files = _promin_runtime_files(runtime_root)
     selected.extend(
         (f"runtime/{relative.as_posix()}", path, "file")
@@ -2388,7 +2442,7 @@ def activation_read_bindings(
             )
         )
 
-    interpreter = Path(sys.executable).resolve(strict=True)
+    interpreter = resolve_identity_path(sys.executable, strict=True)
     selected.append(
         (
             "runtime/python",
@@ -2401,7 +2455,7 @@ def activation_read_bindings(
         (f"runtime/jsonschema/{relative.as_posix()}", path, "file")
         for relative, path in jsonschema_files
     )
-    sqlite_source = Path(_sqlite3.__file__).resolve(strict=True)
+    sqlite_source = resolve_identity_path(_sqlite3.__file__, strict=True)
     selected.append(
         (
             "runtime/sqlite",
@@ -2414,7 +2468,7 @@ def activation_read_bindings(
         key=lambda item: (str(item["capability_id"]), str(item["provider_id"])),
     ):
         runtime_binding = context.provider_dispatch.binding(str(binding["capability_id"]))
-        receipt = _provider_path(
+        receipt = _init_identity_path(
             str(runtime_binding["identity"]["source"]), context.project_root
         )
         selected.append(
@@ -2490,7 +2544,7 @@ def activation_byte_digest(
                     "label": label,
                     "path": str(path.absolute()),
                     "sha256": digest_file(regular),
-                    "bytes": regular.stat(follow_symlinks=False).st_size,
+                    "bytes": os.stat(filesystem_path(regular), follow_symlinks=False).st_size,
                 }
             )
         else:
@@ -2776,11 +2830,11 @@ def build_explicit_init_plan(
     supplied_target = Path(project_root)
     if supplied_target.is_symlink():
         raise InitError("project root symbolic link rejected")
-    target = supplied_target.resolve(strict=True)
+    target = resolve_identity_path(supplied_target, strict=True)
     if not target.is_dir():
         raise InitError("project root must be a real existing directory")
-    package = Path(standard_bundle).resolve(strict=True)
-    preset = Path(preset_path).resolve(strict=True)
+    package = resolve_identity_path(standard_bundle, strict=True)
+    preset = resolve_identity_path(preset_path, strict=True)
     bundle = load_contract_bundle(package, preset)
     explicit_records = {
         "project.json": project_plan,
@@ -2841,8 +2895,8 @@ def initialize_explicit_init_plan(
         or plan.get("product_tree_scans") != 0
     ):
         raise InitError("only an explicit zero-scan init plan is accepted")
-    target = Path(project_root or str(plan.get("project_root", ""))).resolve(strict=True)
-    if target != Path(str(plan.get("project_root", ""))).resolve(strict=True):
+    target = resolve_identity_path(project_root or str(plan.get("project_root", "")), strict=True)
+    if target != resolve_identity_path(str(plan.get("project_root", "")), strict=True):
         raise InitError("project root changed after explicit init plan construction")
     plans = plan.get("plans")
     licenses = plan.get("licenses")
@@ -2975,7 +3029,7 @@ def review_init_request(request: InitRequest, *, run_preflight: bool) -> dict[st
     supplied_root = Path(request.project_root)
     if supplied_root.is_symlink():
         raise InitError("project root symbolic link rejected")
-    project_root = supplied_root.resolve(strict=True)
+    project_root = resolve_identity_path(supplied_root, strict=True)
     if not project_root.is_dir():
         raise InitError("project root must be a real existing directory")
     bundle = load_contract_bundle(request.standard_bundle, request.preset_path)
@@ -3224,9 +3278,27 @@ def _provider_verifiers(
 def _matching_provider_source(
     binding: Mapping[str, Any], project_root: Path, invocation_value: str
 ) -> Path:
-    source = _provider_path(str(binding["identity"]["source"]), project_root)
-    invoked = _provider_path(invocation_value, project_root)
+    source = _init_identity_path(str(binding["identity"]["source"]), project_root)
+    invoked = _init_identity_path(invocation_value, project_root)
     if source != invoked:
+        if (
+            os.name == "nt"
+            and binding.get("capability_id") == "filesystem-inventory"
+            and invoked.name.casefold() == "git.exe"
+        ):
+            primary = next(
+                (
+                    item
+                    for item in binding["dependency_receipt"]["components"]
+                    if item["component_kind"] == "provider-file"
+                    and item["digest"] == binding["identity"]["digest"]
+                ),
+                None,
+            )
+            if primary is not None and invoked == _init_identity_path(
+                str(primary["source"]), project_root
+            ):
+                return invoked
         raise InitError(
             f"provider invocation does not match its identity: {binding['provider_id']}"
         )
@@ -3302,7 +3374,7 @@ def _executable_signature_verifier(
         }
         try:
             completed = subprocess.run(
-                [str(executable), "--promin-signature-verify-v1"],
+                [subprocess_path(executable), "--promin-signature-verify-v1"],
                 cwd=project_root,
                 input=canonical_bytes(request),
                 stdout=subprocess.PIPE,
@@ -3356,13 +3428,13 @@ def _verify_configured_healthcheck_paths_available(
     argv = healthcheck.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
         raise InitError(f"provider healthcheck is invalid: {binding.get('provider_id')}")
-    _provider_path(argv[0], project_root)
+    _init_identity_path(argv[0], project_root)
     if invocation.get("kind") == "python-module":
         if len(argv) < 2:
             raise InitError(
                 f"provider healthcheck does not execute its bound interpreter and module: {binding.get('provider_id')}"
             )
-        _provider_path(argv[1], project_root)
+        _init_identity_path(argv[1], project_root)
 
 
 def resolve_provider_dispatch(
@@ -3642,7 +3714,7 @@ def verify_provider_preflight(
             source = _matching_provider_source(
                 binding, project_root, str(invocation["value"])
             )
-            checked = _provider_path(str(argv[0]), project_root)
+            checked = _init_identity_path(str(argv[0]), project_root)
             if source != checked:
                 raise InitError(
                     f"provider healthcheck does not execute its bound identity: {binding['provider_id']}"
@@ -3656,7 +3728,7 @@ def verify_provider_preflight(
                     f"provider module invocation is not explicit: {binding['provider_id']}"
                 )
             source = _matching_provider_source(binding, project_root, module_value)
-            checked_interpreter = _provider_path(str(argv[0]), project_root)
+            checked_interpreter = _init_identity_path(str(argv[0]), project_root)
             interpreter_component = next(
                 (
                     component
@@ -3668,7 +3740,7 @@ def verify_provider_preflight(
             if interpreter_component is None:
                 raise InitError("Python provider dependency receipt lacks its interpreter")
             if receipt_root is None:
-                expected_interpreter = _provider_path(
+                expected_interpreter = _init_identity_path(
                     str(interpreter_component["source"]), project_root
                 )
                 if checked_interpreter != expected_interpreter:
@@ -3676,13 +3748,13 @@ def verify_provider_preflight(
                         f"provider module healthcheck interpreter is not exact: {binding['provider_id']}"
                     )
             elif (
-                not checked_interpreter.is_relative_to(receipt_root.resolve(strict=True))
+                not checked_interpreter.is_relative_to(resolve_identity_path(receipt_root, strict=True))
                 or digest_file(checked_interpreter) != interpreter_component["digest"]
             ):
                 raise InitError(
                     f"provider module receipt interpreter is not exact: {binding['provider_id']}"
                 )
-            if len(argv) < 2 or _provider_path(str(argv[1]), project_root) != source:
+            if len(argv) < 2 or _init_identity_path(str(argv[1]), project_root) != source:
                 raise InitError(
                     f"provider healthcheck does not execute its bound module: {binding['provider_id']}"
                 )
@@ -3704,9 +3776,16 @@ def verify_provider_preflight(
             else None
         )
         started_at = _utc_second_text()
+        spawn_argv = _spawn_provider_argv(binding, argv, project_root)
+        expected_git_argv: list[str] | None = None
+        if adapter.adapter_id == "git-executable-v1":
+            expected_git_argv = [
+                str(_init_identity_path(str(invocation["value"]), project_root)),
+                "--version",
+            ]
         try:
             completed = subprocess.run(
-                argv,
+                spawn_argv,
                 cwd=project_root,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -3721,6 +3800,57 @@ def verify_provider_preflight(
                 f"provider healthcheck unavailable: {binding['provider_id']}: {exc}"
             ) from exc
         completed_at = _utc_second_text()
+        # A project receipt intentionally contains the exact provider payload,
+        # but a Windows executable receipt is not necessarily a relocatable
+        # application.  Git, for example, depends on installation-owned DLLs
+        # outside its executable and provider-tree receipts.  Preserve the
+        # receipt-first check, then fall back only when the original bound
+        # source is still independently digest-verified.  This is not a
+        # success substitute: an unavailable or changed source leaves the
+        # receipt failure in force.
+        if (
+            completed.returncode != healthcheck["expected_exit"]
+            and os.name == "nt"
+            and receipt_root is not None
+        ):
+            try:
+                source_dispatch = resolve_provider_dispatch(
+                    dispatch_input,
+                    project_root,
+                    contract_bundle=contract_bundle,
+                    verify_implementation=False,
+                )
+                source_runtime = source_dispatch.binding(capability_id)
+                source_argv = list(source_runtime["healthcheck"]["argv"])
+                source_completed = subprocess.run(
+                    _spawn_provider_argv(source_runtime, source_argv, project_root),
+                    cwd=project_root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=_provider_timeout_seconds(source_runtime),
+                    check=False,
+                    shell=False,
+                    env=None,
+                )
+            except (InitError, OSError, subprocess.TimeoutExpired):
+                source_completed = None
+            if (
+                source_completed is not None
+                and source_completed.returncode == healthcheck["expected_exit"]
+            ):
+                argv = source_argv
+                completed = source_completed
+                completed_at = _utc_second_text()
+                if adapter.adapter_id == "git-executable-v1":
+                    expected_git_argv = [
+                        str(
+                            _init_identity_path(
+                                str(source_runtime["invocation"]["value"]), project_root
+                            )
+                        ),
+                        "--version",
+                    ]
         if interpreter_digest is not None and digest_file(checked_interpreter) != interpreter_digest:
             raise InitError(
                 f"provider module interpreter changed during preflight: {binding['provider_id']}"
@@ -3735,7 +3865,7 @@ def verify_provider_preflight(
                 f"provider healthcheck output exceeds its bound: {binding['provider_id']}"
             )
         if adapter.adapter_id == "git-executable-v1":
-            if argv != [str(_provider_path(str(invocation["value"]), project_root)), "--version"]:
+            if argv != expected_git_argv:
                 raise InitError("Git provider healthcheck argv is not the exact Core protocol")
             if not re.fullmatch(rb"git version [ -~]{1,256}\r?\n", completed.stdout):
                 raise InitError("Git provider healthcheck response is not exact")
@@ -3876,10 +4006,10 @@ def _set_installed_read_only(installed: Path, *, preserve_execute: bool = False)
         base = Path(directory)
         for filename in filenames:
             path = base / filename
-            if path.is_symlink():
+            if os.path.islink(filesystem_path(path)):
                 raise InitError(f"installed standard contains a symbolic link: {path}")
             executable_bits = (
-                path.stat(follow_symlinks=False).st_mode
+                os.stat(filesystem_path(path), follow_symlinks=False).st_mode
                 & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
                 if preserve_execute
                 else 0
@@ -3906,6 +4036,19 @@ def _remove_staging(path: Path) -> None:
     shutil.rmtree(native_root, ignore_errors=False)
 
 
+def _publish_control_directory(staging: Path, control: Path) -> None:
+    """Publish one fully verified control tree with a bounded Windows lock retry."""
+
+    for attempt in range(8):
+        try:
+            os.rename(staging, control)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 class ActivationGuard:
     def __init__(
         self,
@@ -3917,11 +4060,11 @@ class ActivationGuard:
         supplied_root = Path(project_root)
         if supplied_root.is_symlink():
             raise InitError("project root symbolic link rejected")
-        self.project_root = supplied_root.resolve(strict=True)
+        self.project_root = resolve_identity_path(supplied_root, strict=True)
         self.provider_verifiers = provider_verifiers or {}
         self.signature_verifier = signature_verifier
 
-    def verify(self) -> ActivationContext:
+    def verify(self, *, verify_schema_meta: bool = True) -> ActivationContext:
         control = self.project_root / ".promin"
         try:
             mode = control.stat(follow_symlinks=False).st_mode
@@ -3944,7 +4087,11 @@ class ActivationGuard:
             raise InitError("Activation is missing installed standard identities")
         installed = control / "standard" / bundle_digest
         preset_path = installed / "presets" / f"{preset_digest}.json"
-        bundle = load_contract_bundle(installed, _extended_path(preset_path))
+        bundle = load_contract_bundle(
+            installed,
+            _extended_path(preset_path),
+            verify_schema_meta=verify_schema_meta,
+        )
         validate_definition(bundle.schema, "Activation", activation)
         plans = {filename: records[filename] for filename in PLAN_FILES}
         for filename, definition in {
@@ -4032,7 +4179,7 @@ def initialize_project(request: InitRequest) -> InitResult:
     supplied_root = Path(request.project_root)
     if supplied_root.is_symlink():
         raise InitError("project root symbolic link rejected")
-    project_root = supplied_root.resolve(strict=True)
+    project_root = resolve_identity_path(supplied_root, strict=True)
     if not project_root.is_dir():
         raise InitError("project root must be a real existing directory")
     with _project_init_lock(project_root):
@@ -4188,8 +4335,6 @@ def _initialize_project_locked(request: InitRequest, project_root: Path) -> Init
         write_current_host_binding(staging)
         if portable_shell_backup is not None:
             _merge_portable_control_shell(portable_shell_backup, staging)
-        _set_installed_read_only(installed)
-        _set_installed_read_only(receipt_root, preserve_execute=True)
         fsync_directory(staging)
         _require_same_init_input_identity(
             expected_identity,
@@ -4202,7 +4347,7 @@ def _initialize_project_locked(request: InitRequest, project_root: Path) -> Init
             boundary="atomic initialization publication",
         )
         try:
-            os.rename(staging, control)
+            _publish_control_directory(staging, control)
         except OSError as exc:
             if control.exists():
                 context = ActivationGuard(
@@ -4245,6 +4390,9 @@ def _initialize_project_locked(request: InitRequest, project_root: Path) -> Init
                 ) from exc
             raise InitError(f"cannot atomically install .promin: {exc}") from exc
         fsync_directory(project_root)
+        _set_installed_read_only(control / "standard", preserve_execute=False)
+        _set_installed_read_only(control / "providers", preserve_execute=True)
+        fsync_directory(control)
         context = ActivationGuard(
             project_root,
             provider_verifiers=request.provider_verifiers,

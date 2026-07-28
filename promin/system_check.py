@@ -8,6 +8,8 @@ turning them into implicit passes.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,10 +17,12 @@ from . import __version__
 from .canonical import canonical_bytes
 from .context_index import context_index_status
 from .documentation import documentation_status
-from .experience import experience_status, load_bootstrap_state, load_resolved_plan
+from .experience import DEFAULT_PRESET, PACKAGE_ROOT, compile_core_plans, experience_status, load_bootstrap_state, load_resolved_plan, resolve_plan
 from .gitpolicy import commit_footprint, git_tracking_status
 from .host_integration import host_surface_status
 from .portability import doctor_with_portability
+from .init import InitRequest
+from .service import ProminService
 from .resources import bundle_root
 from .skills import SkillError, skill_catalog
 from .telemetry import heartbeat
@@ -56,6 +60,70 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+
+
+_REMEDIATION_COMMANDS = (
+    "promin init",
+    "promin doctor --repair",
+    "promin doctor --apply-repair",
+    "promin refresh",
+    "promin refresh --reset-derived",
+    "promin audit",
+    "promin skills list",
+)
+
+def remediation_commands() -> tuple[str, ...]:
+    return _REMEDIATION_COMMANDS
+
+def _sandbox_init_check() -> dict[str, Any]:
+    """Exercise the real canonical init boundary without bootstrapping work state.
+
+    This catches path, schema, provider-health and atomic-install failures while
+    keeping the whole-system checklist bounded.  Operational bootstrap is
+    covered by the deployed-project checks below.
+    """
+
+    previous = os.environ.get("PROMIN_NO_TELEMETRY")
+    os.environ["PROMIN_NO_TELEMETRY"] = "1"
+    try:
+        with tempfile.TemporaryDirectory(prefix="promin-check-init-") as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            for index in range(10):
+                (root / "src" / f"f{index}.py").write_text("value = 1\n", encoding="utf-8")
+            plan = resolve_plan(root, goal="Bounded self-check initialization")
+            plans = compile_core_plans(plan, root)
+            staging = root / ".promin-check-plans"
+            staging.mkdir()
+            for name, value in plans.items():
+                (staging / name).write_text(
+                    json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+            request = InitRequest(
+                project_root=root,
+                standard_bundle=PACKAGE_ROOT,
+                preset_path=DEFAULT_PRESET,
+                project_plan=staging / "project.json",
+                standards_plan=staging / "standards.json",
+                technologies_plan=staging / "technologies.json",
+                licenses_plan=staging / "licenses.json",
+                authority_plan=staging / "authority.json",
+            )
+            result = ProminService(root).initialize(request)
+            return {
+                "record_type": result.get("record_type"),
+                "status": result.get("status"),
+                "question_count_before_plan": plan.get("question_count_before_plan"),
+                "product_tree_scans_before_plan": 0,
+            }
+    finally:
+        if previous is None:
+            os.environ.pop("PROMIN_NO_TELEMETRY", None)
+        else:
+            os.environ["PROMIN_NO_TELEMETRY"] = previous
+
+
 def run_system_check(project_root: Path | str) -> dict[str, Any]:
     root = Path(project_root).resolve()
     if not root.is_dir() or root.is_symlink():
@@ -85,6 +153,19 @@ def run_system_check(project_root: Path | str) -> dict[str, Any]:
         "Exactly six Core artifacts are present." if actual_core == core_files else "Core artifact inventory differs from the minimal contract.",
         {"actual": sorted(actual_core), "expected": sorted(core_files)},
         "Restore the exact six-artifact Core and regenerate derived schema/docs.",
+    ))
+
+    try:
+        sandbox = _sandbox_init_check()
+        sandbox_ok = sandbox.get("record_type") in {"InitializationResult", "InitResult"} and sandbox.get("status") in {"created", "idempotent"}
+    except Exception as exc:
+        sandbox = {"record_type": "SandboxInitCheck", "status": "failed", "reason": f"{type(exc).__name__}: {str(exc)[:256]}"}
+        sandbox_ok = False
+    checks.append(_check(
+        "SYS-INIT-PATH-001", "initialization-path", "pass" if sandbox_ok else "fail",
+        "A bounded clean initialization path succeeds on this host." if sandbox_ok else "The host cannot complete a bounded clean initialization path.",
+        sandbox,
+        "Fix the initialization path before trusting persisted-state checks.",
     ))
 
     plan = load_resolved_plan(root)

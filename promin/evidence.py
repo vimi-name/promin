@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ElementTree
 
 from .authority import AuthorityError, canonical_digest, parse_timestamp
 from .resources import bundle_root
+from .version import standard_version
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, parse_json_strict
 
 
@@ -940,11 +941,12 @@ def release_evidence_producer(
     package_root: Path | str,
     tool_path: str,
     *,
-    version: str = "1.0.0-alpha.1",
+    version: str | None = None,
 ) -> dict[str, Any]:
     """Build an exact producer identity for an external release-evidence record."""
 
     normalized = _external_relative_path(tool_path)
+    version = standard_version() if version is None else version
     if normalized not in _EVIDENCE_TOOL_PATHS or not _valid_semver(version):
         raise EvidenceError("release evidence producer identity is invalid")
     resolved = Path(package_root).joinpath(*normalized.split("/"))
@@ -5457,7 +5459,7 @@ def _validate_matrix_aggregate(
         set(matrix) != {*_MATRIX_IDENTITY_FIELDS, "matrix_digest"}
         or matrix.get("record_type") != "ProminPlatformNoDegradationMatrix"
         or matrix.get("standard_name") != "promin"
-        or matrix.get("version") != "1.0.0-alpha.1"
+        or matrix.get("version") != standard_version()
         or matrix.get("version") != candidate.get("version")
         or matrix.get("candidate_binding_digest")
         != candidate.get("candidate_binding_digest")

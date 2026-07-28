@@ -1,0 +1,32 @@
+{
+  "authority_effect": "none",
+  "category": "domain",
+  "defaults": {
+    "security": [
+      "permission-minimization",
+      "secret-separation",
+      "signing-review",
+      "ota-update-review"
+    ],
+    "testing": [
+      "unit",
+      "component",
+      "emulator-or-device-smoke"
+    ]
+  },
+  "detect": [
+    "package dependency react-native",
+    "package dependency expo"
+  ],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "official_sources": [
+    "https://reactnative.dev/docs/getting-started",
+    "https://docs.expo.dev/"
+  ],
+  "profile_id": "mobile-application",
+  "purpose": "Cross-platform mobile development for React Native and Expo repositories",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

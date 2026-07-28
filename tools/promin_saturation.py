@@ -1059,7 +1059,7 @@ def _initialize_saturation_workspace(workspace: Path) -> dict[str, Any]:
     if any(workspace.iterdir()):
         raise SaturationError("new saturation workspace must be empty before initialization")
     try:
-        from promin_init import apply_plan
+        from promin.init import apply_explicit_init_plan as apply_plan
     except ImportError as exc:  # pragma: no cover - distribution fault path
         raise SaturationError(f"production initialization tool is unavailable: {exc}") from exc
     result = apply_plan(workspace, _make_saturation_init_plan(workspace))

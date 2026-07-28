@@ -2007,20 +2007,27 @@ def _compile_projection(
         ],
         "type": "object",
     }
+    technology_source_limit = conformance["structural_budgets"]["technology_source_items_max"]
     technology_fact = {
         "additionalProperties": False,
         "properties": {
             "technology": {"$ref": "#/$defs/Id"},
             "sources": {
                 "items": {"maxLength": 4096, "minLength": 1, "type": "string"},
-                "maxItems": 64,
+                "maxItems": technology_source_limit,
                 "minItems": 1,
                 "type": "array",
                 "uniqueItems": True,
             },
+            "total_source_count": {
+                "minimum": 1,
+                "type": "integer",
+            },
+            "sources_truncated": {"type": "boolean"},
+            "source_count_complete": {"type": "boolean"},
             "confidence": {"maximum": 1, "minimum": 0, "type": "number"},
         },
-        "required": ["technology", "sources", "confidence"],
+        "required": ["technology", "sources", "total_source_count", "sources_truncated", "source_count_complete", "confidence"],
         "type": "object",
     }
     operation_profile = {
@@ -6378,6 +6385,15 @@ def _compile_projection(
     conformance_definition["properties"]["scale_contracts"] = {
         "const": deepcopy(conformance["scale_contracts"])
     }
+    conformance_definition["properties"]["command_latency_budgets_ms"] = {
+        "const": deepcopy(conformance["command_latency_budgets_ms"])
+    }
+    conformance_definition["properties"]["command_latency_workloads"] = {
+        "const": deepcopy(conformance["command_latency_workloads"])
+    }
+    for field in ("command_latency_budgets_ms", "command_latency_workloads"):
+        if field not in conformance_definition["required"]:
+            conformance_definition["required"].append(field)
     if "scale_contracts" not in conformance_definition["required"]:
         conformance_definition["required"].append("scale_contracts")
 

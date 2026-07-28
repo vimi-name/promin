@@ -19,6 +19,7 @@ Bundled layers:
 - `morok-tower-studio` - Semantic Programming і studio defaults;
 - `web-application` - React/JS/TS/Supabase, web security і RLS review;
 - `android-application` - Kotlin/Java/Gradle/Android SDK, permissions і tests;
+- `mobile-application` - React Native/Expo, mobile permissions, signing і OTA review;
 - `windows-development` - Visual Studio/MSBuild/CMake/PowerShell і path rules;
 - `vibe-recovery` - provenance, semantic dedup, no blind merge;
 - `ask`, `safe-auto`, `unsafe-auto`;

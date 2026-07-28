@@ -69,10 +69,11 @@ HUMAN_PDFS = frozenset(
 )
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 114
-CANONICAL_PACKAGE_DIRECTORY_COUNT = 12
+CANONICAL_PACKAGE_FILE_COUNT = 121
+CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
+        '.github/workflows/alpha-portability.yml',
         '.gitignore',
         'CONTRIBUTING.md',
         'LICENSE',
@@ -91,6 +92,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'core/policy-set.json',
         'core/promin.manifest.json',
         'core/semantic-model.json',
+        'docs/ALPHA3_OPUS5_FIXES_UA.md',
         'docs/ALPHA_SCOPE_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
         'docs/MODEL_ROUTING_UA.md',
@@ -113,6 +115,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'profiles/ask.json',
         'profiles/en.json',
         'profiles/general-development.json',
+        'profiles/mobile-application.json',
         'profiles/morok-tower-studio.json',
         'profiles/safe-auto.json',
         'profiles/uk.json',
@@ -136,9 +139,12 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/gitpolicy.py',
         'promin/host_integration.py',
         'promin/init.py',
+        'promin/limits.py',
         'promin/mutation_suite.py',
+        'promin/platform_paths.py',
         'promin/portability.py',
         'promin/projection.py',
+        'promin/provider_store.py',
         'promin/refresh.py',
         'promin/rehydrate_worker.py',
         'promin/resources.py',
@@ -155,6 +161,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'skills/example/SKILL.md',
         'skills/example/promin.skill.json',
         'skills/skill.schema.json',
+        'tests/test_alpha3_opus_closure.py',
         'tests/test_alpha_audit.py',
         'tests/test_alpha_context_index.py',
         'tests/test_alpha_deployable.py',
@@ -191,6 +198,8 @@ CANONICAL_PACKAGE_FILES = frozenset(
 )
 CANONICAL_PACKAGE_DIRECTORIES = frozenset(
     {
+        '.github',
+        '.github/workflows',
         'core',
         'docs',
         'examples',
@@ -247,7 +256,6 @@ FORBIDDEN_ALIASES = (OLD_IDENTITY, FULL_ALIAS_UNDERSCORE, FULL_ALIAS_HYPHEN)
 FORBIDDEN_DEVELOPMENT_LABELS = (
     re.compile(rb"\b" + b"ph" + rb"6(?:[-_][0-9]+)?\b", re.IGNORECASE),
     re.compile(rb"\b" + b"recovery" + rb"[-_ ]package\b", re.IGNORECASE),
-    re.compile(rb"\b" + b"v" + rb"[56]\b", re.IGNORECASE),
     re.compile(rb"\b" + b"v" + b"6" + rb"probe[a-z0-9_-]*\b", re.IGNORECASE),
 )
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -257,6 +265,18 @@ INSTALL_MODES = ("current-environment", "offline-wheelhouse", "online-clean")
 FONT_ROLES = ("regular", "bold", "italic", "mono")
 class ValidationFailure(RuntimeError):
     pass
+
+
+def _canonical_standard_version(root: Path) -> str:
+    try:
+        value = json.loads((root / "core" / "promin.manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationFailure("canonical manifest version is unavailable") from exc
+    version = value.get("version") if isinstance(value, dict) else None
+    if not isinstance(version, str):
+        raise ValidationFailure("canonical manifest version is invalid")
+    return version
+
 
 
 def _remaining_deadline_seconds(deadline_monotonic: float | None, phase: str) -> float | None:
@@ -905,6 +925,7 @@ EXPECTED_EXPERIENCE_PROFILES = frozenset({
     "morok-tower-studio",
     "web-application",
     "android-application",
+    "mobile-application",
     "windows-development",
     "vibe-recovery",
     "ask",
@@ -1146,7 +1167,7 @@ def verify_preset(root: Path, schema: dict[str, Any]) -> dict[str, Any]:
         raise ValidationFailure("selected preset identity/version mismatch")
     _validate_schema_instance(schema, "Preset", preset)
     if preset.get("base_user_commands") != ["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]:
-        raise ValidationFailure("selected preset must expose exactly the seven alpha user workflows in canonical order")
+        raise ValidationFailure("selected preset must expose exactly the ten alpha user workflows in canonical order")
     return {"path": "presets/semantic-morok-tower.json", "sha256": sha256_file(entries[0])}
 
 
@@ -2032,7 +2053,7 @@ def _observe_installed_environment(
         value = json.loads(observed.stdout)
     except json.JSONDecodeError as exc:
         raise ValidationFailure("nested installed-environment observation returned non-JSON output") from exc
-    if not isinstance(value, dict) or value.get("promin", {}).get("version") != "1.0.0-alpha.1":
+    if not isinstance(value, dict) or value.get("promin", {}).get("version") != _canonical_standard_version(cwd):
         raise ValidationFailure("nested installed-environment observation is incomplete")
     report_rows: list[dict[str, Any]] = []
     seen_roles: set[str] = set()

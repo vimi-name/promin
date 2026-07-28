@@ -366,7 +366,9 @@ def _verify_authority_vocabulary(core: Mapping[str, Any]) -> None:
             raise ContractError(f"role preset {role} references an unknown capability")
 
 
-def verify_core(core_dir: str | Path) -> dict[str, Any]:
+def verify_core(
+    core_dir: str | Path, *, verify_schema_meta: bool = True
+) -> dict[str, Any]:
     directory = Path(core_dir)
     ensure_exact_regular_files(directory, CORE_FILES)
     core = {
@@ -374,10 +376,11 @@ def verify_core(core_dir: str | Path) -> dict[str, Any]:
         for name in CORE_FILES
     }
     schema = core["contracts.schema.json"]
-    try:
-        Draft202012Validator.check_schema(schema)
-    except SchemaError as exc:
-        raise ContractError(f"invalid Draft 2020-12 schema: {exc.message}") from exc
+    if verify_schema_meta:
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise ContractError(f"invalid Draft 2020-12 schema: {exc.message}") from exc
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise ContractError("contracts.schema.json must declare Draft 2020-12")
     definitions = schema.get("$defs")
@@ -477,7 +480,7 @@ def verify_preset(preset_path: str | Path, core: Mapping[str, Any]) -> dict[str,
     if "optional_user_commands" in preset or "admin_commands" in preset:
         raise ContractError("preset contains removed v1 command catalogues")
     if tuple(preset["base_user_commands"]) != BASE_USER_COMMANDS:
-        raise ContractError("preset must expose exactly the seven alpha base commands")
+        raise ContractError("preset must expose exactly the ten alpha base commands")
     _casefold_unique(preset["base_user_commands"], "preset base user command")
     known = {item["id"] for item in core["semantic-model.json"]["technology_capabilities"]}
     selected = preset["required_provider_capabilities"] + preset["optional_provider_capabilities"]
@@ -508,6 +511,7 @@ class ContractBundle:
     preset_path: Path
     core: Mapping[str, Any]
     preset: Mapping[str, Any]
+    schema_meta_verified: bool = True
 
     @property
     def schema(self) -> Mapping[str, Any]:
@@ -554,7 +558,9 @@ _bundle_cache: "OrderedDict[tuple[Any, ...], ContractBundle]" = OrderedDict()
 _bundle_cache_guard = threading.Lock()
 
 
-def _bundle_cache_key(root: Path, core_dir: Path, preset: Path) -> tuple[Any, ...]:
+def _bundle_cache_key(
+    root: Path, core_dir: Path, preset: Path, *, verify_schema_meta: bool
+) -> tuple[Any, ...]:
     """Return a content-derived key for an immutable installed contract bundle.
 
     Hashing the six small Core artifacts is substantially cheaper than repeatedly
@@ -577,12 +583,16 @@ def _bundle_cache_key(root: Path, core_dir: Path, preset: Path) -> tuple[Any, ..
         tuple(core_digests),
         str(preset),
         digest_file(preset, root=preset.parent),
+        verify_schema_meta,
     )
 
 
 
 def load_contract_bundle(
-    bundle_root: str | Path, preset_path: str | Path
+    bundle_root: str | Path,
+    preset_path: str | Path,
+    *,
+    verify_schema_meta: bool = True,
 ) -> ContractBundle:
     root_input = Path(bundle_root)
     if root_input.is_symlink():
@@ -595,15 +605,24 @@ def load_contract_bundle(
     if preset_input.is_symlink():
         raise ContractError(f"preset must not be a symbolic link: {preset_input}")
     selected_preset = preset_input.resolve(strict=True)
-    key = _bundle_cache_key(root, core_dir, selected_preset)
+    key = _bundle_cache_key(
+        root, core_dir, selected_preset, verify_schema_meta=verify_schema_meta
+    )
     with _bundle_cache_guard:
         cached = _bundle_cache.get(key)
         if cached is not None:
             _bundle_cache.move_to_end(key)
             return cached
-    core = verify_core(core_dir)
+    core = verify_core(core_dir, verify_schema_meta=verify_schema_meta)
     preset = verify_preset(selected_preset, core)
-    bundle = ContractBundle(root, core_dir, selected_preset, core, preset)
+    bundle = ContractBundle(
+        root,
+        core_dir,
+        selected_preset,
+        core,
+        preset,
+        schema_meta_verified=verify_schema_meta,
+    )
     with _bundle_cache_guard:
         _bundle_cache[key] = bundle
         _bundle_cache.move_to_end(key)

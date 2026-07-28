@@ -179,6 +179,31 @@ def _fingerprint(kind: str, status: str, details: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+
+
+def telemetry_enabled_for_command(
+    command: str,
+    *,
+    initialized: bool,
+    plan_only: bool = False,
+    explicit_disabled: bool = False,
+) -> bool:
+    """Return whether one CLI operation may persist local observations.
+
+    Diagnostic/read-only commands never dirty a checkout.  Telemetry is also
+    disabled before canonical initialization and by explicit operator policy.
+    """
+
+    if explicit_disabled or os.environ.get("PROMIN_NO_TELEMETRY", "").casefold() in {"1", "true", "yes", "on"}:
+        return False
+    if not initialized:
+        return False
+    if command in {"status", "context", "audit", "validate"}:
+        return False
+    if command == "init" and plan_only:
+        return False
+    return True
+
 def record_observation(
     project_root: Path | str,
     *,
@@ -194,6 +219,13 @@ def record_observation(
     """
 
     root = Path(project_root).resolve()
+    if os.environ.get("PROMIN_NO_TELEMETRY", "").casefold() in {"1", "true", "yes", "on"}:
+        return {
+            "record_type": "ProminObservationReceipt",
+            "status": "disabled",
+            "authority": False,
+            "pass_credit": False,
+        }
     safe_details = _sanitize(dict(details or {}))
     if not isinstance(safe_details, dict):
         safe_details = {}
