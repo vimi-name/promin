@@ -124,6 +124,7 @@ def test_shard_manifest_defines_bounded_reconciliation_lanes() -> None:
     assert [shard["id"] for shard in shards] == [
         "static",
         "paths",
+        "aliased-temp-tree",
         "windows-integration",
         "performance",
         "core-contracts",

@@ -2,19 +2,14 @@
   "builder": "tools/promin_package.py",
   "files": [
     {
-      "path": ".git",
-      "sha256": "63b397a98f75736a3e4d5c8c69175e0308ec6dfaba163ad18ac286c6662e4c4e",
-      "size": 102
-    },
-    {
       "path": ".gitattributes",
       "sha256": "68fbd3bb7b3d900f015a4c7359422f6700156d76766c14a624dc5d06a16e3eb5",
       "size": 19
     },
     {
       "path": ".github/workflows/alpha-portability.yml",
-      "sha256": "566c7b04506f274e8faa15744901f42462456102d75befc5ebd6bb3826b7062a",
-      "size": 5405
+      "sha256": "7ff8121dc3d394b6a85eb796c1f24d69bcaf30b6e36acfa9f3a31d1e42f44922",
+      "size": 5567
     },
     {
       "path": ".gitignore",
@@ -100,6 +95,11 @@
       "path": "docs/ALPHA3_OPUS5_FIXES_UA.md",
       "sha256": "69bcf736c127398ef4c50a1fcfae469705d1deb16eca5fa56f738a96262b1034",
       "size": 3362
+    },
+    {
+      "path": "docs/ALPHA3_R2_B1_B3_WAVE_UA.md",
+      "sha256": "05b83ab207b71fda38eb639424f52f5af123b28981bbcc44b4452219012103e2",
+      "size": 2912
     },
     {
       "path": "docs/ALPHA_SCOPE_UA.md",
@@ -288,8 +288,8 @@
     },
     {
       "path": "promin/contracts.py",
-      "sha256": "737e61b8d1067b79bafd94668b49fef10d9b000dad6bf526ba5828a34483719f",
-      "size": 62049
+      "sha256": "1c8136dc7a61282dbbf87f2ec3ccdd5c54ec5b20d25b1ec76d91a986ce49b9e3",
+      "size": 63524
     },
     {
       "path": "promin/documentation.py",
@@ -403,8 +403,8 @@
     },
     {
       "path": "promin/workspace.py",
-      "sha256": "836df5b0e44bbcea9e4354641992bba9a015a3b293c0f1c1f3f6a2a9045baa96",
-      "size": 17716
+      "sha256": "2e324374cbe3f94da78109f23fd0735dba05bf1bfc5ab5275b51daeb3cb81282",
+      "size": 18742
     },
     {
       "path": "prompts/INIT_PROMPT_EN.txt",
@@ -443,13 +443,23 @@
     },
     {
       "path": "tests/ALPHA3_R2_TEST_SHARDS.json",
-      "sha256": "85f6a24dadaa1889de9f051afe89ad18716173a37acff9f59d3326f0f1a474e4",
-      "size": 4681
+      "sha256": "30925354a75079bc4dafb4a13c2559ac8dba715bc547bc0bffb935a557625341",
+      "size": 5245
+    },
+    {
+      "path": "tests/test_alpha3_ingress_budget.py",
+      "sha256": "bd0833abc30238b87e633fb9f12865fcf9a3aaf70d1295df29b593d91f850353",
+      "size": 3817
     },
     {
       "path": "tests/test_alpha3_opus_closure.py",
       "sha256": "02cf6b9142defe064cd1da887e3307c84075f9cfd64e3f94cdc00b6ec735f29e",
       "size": 16730
+    },
+    {
+      "path": "tests/test_alpha3_reconciliation_aliased_temp_tree.py",
+      "sha256": "f86c25752ef9741657b5600a3bd40f4204b482159d27c120f7b6bb21938e4e70",
+      "size": 1869
     },
     {
       "path": "tests/test_alpha3_reconciliation_package.py",
@@ -458,8 +468,8 @@
     },
     {
       "path": "tests/test_alpha3_reconciliation_paths.py",
-      "sha256": "bac149cebac9352b2b1578aaca3bb164597d572cdd6713b46e7cd9e5b9157816",
-      "size": 4064
+      "sha256": "82176bb58e8d25812f93685eb7fcc485667e80a077137d659968a3c7f9163c2d",
+      "size": 2773
     },
     {
       "path": "tests/test_alpha3_reconciliation_performance.py",
@@ -468,13 +478,18 @@
     },
     {
       "path": "tests/test_alpha3_reconciliation_static.py",
-      "sha256": "5b76ca17c20d2aa82a34a6f6b3821e090a178ad40501f7f032883a661bb16ce1",
-      "size": 5599
+      "sha256": "192ba3f4e0cb4ad1ff7301458adad30d1365b91c4e146154ee697b4b2213272b",
+      "size": 5628
     },
     {
       "path": "tests/test_alpha3_reconciliation_windows.py",
       "sha256": "413e0f1f8f9cfdeeda19fce07a93a43d8f2612545aacef470838658c67d15014",
       "size": 6295
+    },
+    {
+      "path": "tests/test_alpha3_workspace_budget.py",
+      "sha256": "c70837aae3a8be0353aa010c5283a864311902ad16bc5908e94ac9e0c981b5e5",
+      "size": 2893
     },
     {
       "path": "tests/test_alpha_audit.py",
@@ -558,7 +573,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "9fca3b40fff976fd5660bd1728da14bf30bd376c67750c4d0766b4939f5afd50",
+      "sha256": "b9453b50c63afaabe6204569ac1b85bbbc3b66e6399761b5adbc1fc23bb166f7",
       "size": 57971
     },
     {
@@ -638,8 +653,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "9025945af0a4e34b445ad481aa969aed8dd12a66a0a7e2dcc288a7e712c53e50",
-      "size": 133916
+      "sha256": "58670f5cc4ceb005699a156e4f071954a155206ff7bb88804325e86d375bc7f6",
+      "size": 134120
     }
   ],
   "generated_surfaces": [

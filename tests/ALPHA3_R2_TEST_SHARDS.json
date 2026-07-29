@@ -23,6 +23,15 @@
       "evidence_output": "external/validation/reconciliation-r2/paths.json"
     },
     {
+      "id": "aliased-temp-tree",
+      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha3_reconciliation_aliased_temp_tree.py",
+      "test_files": ["tests/test_alpha3_reconciliation_aliased_temp_tree.py"],
+      "expected_markers": [],
+      "timeout_seconds": 600,
+      "allowed_skips": 0,
+      "evidence_output": "external/validation/reconciliation-r2/aliased-temp-tree.json"
+    },
+    {
       "id": "windows-integration",
       "command": "python -m pytest -q -m \"not scale and windows_integration\" tests/test_alpha3_reconciliation_windows.py",
       "test_files": ["tests/test_alpha3_reconciliation_windows.py"],
@@ -42,8 +51,8 @@
     },
     {
       "id": "core-contracts",
-      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_audit.py tests/test_alpha_context_index.py tests/test_alpha_deployable.py tests/test_authority_domain.py tests/test_canonical_init.py tests/test_concurrency_crash.py tests/test_events_projection.py tests/test_scale_orchestration.py tests/test_search_scale.py",
-      "test_files": ["tests/test_alpha_audit.py", "tests/test_alpha_context_index.py", "tests/test_alpha_deployable.py", "tests/test_authority_domain.py", "tests/test_canonical_init.py", "tests/test_concurrency_crash.py", "tests/test_events_projection.py", "tests/test_scale_orchestration.py", "tests/test_search_scale.py"],
+      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_audit.py tests/test_alpha_context_index.py tests/test_alpha_deployable.py tests/test_alpha3_ingress_budget.py tests/test_authority_domain.py tests/test_canonical_init.py tests/test_concurrency_crash.py tests/test_events_projection.py tests/test_scale_orchestration.py tests/test_search_scale.py",
+      "test_files": ["tests/test_alpha_audit.py", "tests/test_alpha_context_index.py", "tests/test_alpha_deployable.py", "tests/test_alpha3_ingress_budget.py", "tests/test_authority_domain.py", "tests/test_canonical_init.py", "tests/test_concurrency_crash.py", "tests/test_events_projection.py", "tests/test_scale_orchestration.py", "tests/test_search_scale.py"],
       "expected_markers": [],
       "timeout_seconds": 300,
       "allowed_skips": 0,
@@ -78,8 +87,8 @@
     },
     {
       "id": "alpha-experience",
-      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_experience.py tests/test_alpha_host_pickup.py tests/test_alpha_incremental_layer.py tests/test_alpha_monorepo_context.py tests/test_alpha_portability.py tests/test_alpha_skills.py tests/test_alpha_skills_checklist.py tests/test_alpha3_opus_closure.py",
-      "test_files": ["tests/test_alpha_experience.py", "tests/test_alpha_host_pickup.py", "tests/test_alpha_incremental_layer.py", "tests/test_alpha_monorepo_context.py", "tests/test_alpha_portability.py", "tests/test_alpha_skills.py", "tests/test_alpha_skills_checklist.py", "tests/test_alpha3_opus_closure.py"],
+      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_experience.py tests/test_alpha_host_pickup.py tests/test_alpha_incremental_layer.py tests/test_alpha_monorepo_context.py tests/test_alpha_portability.py tests/test_alpha_skills.py tests/test_alpha_skills_checklist.py tests/test_alpha3_opus_closure.py tests/test_alpha3_workspace_budget.py",
+      "test_files": ["tests/test_alpha_experience.py", "tests/test_alpha_host_pickup.py", "tests/test_alpha_incremental_layer.py", "tests/test_alpha_monorepo_context.py", "tests/test_alpha_portability.py", "tests/test_alpha_skills.py", "tests/test_alpha_skills_checklist.py", "tests/test_alpha3_opus_closure.py", "tests/test_alpha3_workspace_budget.py"],
       "expected_markers": [],
       "timeout_seconds": 300,
       "allowed_skips": 0,

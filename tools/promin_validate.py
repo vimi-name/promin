@@ -70,7 +70,7 @@ HUMAN_PDFS = frozenset(
 )
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 129
+CANONICAL_PACKAGE_FILE_COUNT = 133
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -95,6 +95,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'core/promin.manifest.json',
         'core/semantic-model.json',
         'docs/ALPHA3_OPUS5_FIXES_UA.md',
+        'docs/ALPHA3_R2_B1_B3_WAVE_UA.md',
         'docs/ALPHA_SCOPE_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
         'docs/MODEL_ROUTING_UA.md',
@@ -164,7 +165,10 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'skills/example/promin.skill.json',
         'skills/skill.schema.json',
         'tests/test_alpha3_opus_closure.py',
+        'tests/test_alpha3_ingress_budget.py',
+        'tests/test_alpha3_workspace_budget.py',
         'tests/ALPHA3_R2_TEST_SHARDS.json',
+        'tests/test_alpha3_reconciliation_aliased_temp_tree.py',
         'tests/test_alpha3_reconciliation_package.py',
         'tests/test_alpha3_reconciliation_paths.py',
         'tests/test_alpha3_reconciliation_performance.py',

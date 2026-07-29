@@ -39,6 +39,8 @@ _SOURCE_SUFFIXES = {
     ".go", ".swift", ".dart", ".vue", ".svelte",
 }
 _ID_RE = re.compile(r"[^a-z0-9._-]+")
+_UNIT_TECHNOLOGY_SAMPLES_MAX = 4
+_UNIT_SOURCE_SUFFIX_SAMPLES_MAX = 4
 
 
 class WorkspaceError(RuntimeError):
@@ -97,6 +99,18 @@ def _workspace_patterns(sample: str) -> list[str]:
 def _parent(path: str) -> str:
     parent = PurePosixPath(path).parent.as_posix()
     return "." if parent == "." else parent
+
+
+def _sample_list(values: Sequence[str], limit: int) -> list[str]:
+    """Return a deterministic diagnostic sample; totals remain separate."""
+
+    return sorted(set(values))[:limit]
+
+
+def _sample_counts(counts: Mapping[str, int], limit: int) -> dict[str, int]:
+    """Keep a deterministic suffix sample; aggregate counts remain separate."""
+
+    return dict(sorted(counts.items())[:limit])
 
 
 def _is_manifest(path: str) -> bool:
@@ -181,7 +195,7 @@ def _facts_for_root(
     manifests: Sequence[str],
     *,
     nested_roots: Sequence[str] = (),
-) -> tuple[list[str], list[str], dict[str, int]]:
+) -> tuple[list[str], list[str], dict[str, int], int]:
     prefix = "" if root == "." else root + "/"
 
     def owned_path(path: str) -> bool:
@@ -200,7 +214,8 @@ def _facts_for_root(
     samples = preflight.get("manifest_samples", {})
     technology: set[str] = set()
     evidence: list[str] = []
-    suffix_counts: dict[str, int] = {}
+    source_suffix_counts: dict[str, int] = {}
+    total_source_count = 0
 
     for path in manifests:
         if "#" not in path:
@@ -243,8 +258,9 @@ def _facts_for_root(
     for item in entries[:8192]:
         path = str(item.get("path", ""))
         suffix = PurePosixPath(path).suffix.casefold()
-        if suffix:
-            suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+        if suffix in _SOURCE_SUFFIXES:
+            source_suffix_counts[suffix] = source_suffix_counts.get(suffix, 0) + 1
+            total_source_count += 1
         if suffix in {".js", ".jsx"}:
             technology.add("javascript")
         elif suffix in {".ts", ".tsx"}:
@@ -267,7 +283,12 @@ def _facts_for_root(
             technology.add("swift")
         elif suffix == ".dart":
             technology.add("dart")
-    return sorted(technology), sorted(set(evidence)), dict(sorted(suffix_counts.items()))
+    return (
+        sorted(technology),
+        sorted(set(evidence)),
+        dict(sorted(source_suffix_counts.items())),
+        total_source_count,
+    )
 
 
 def _classify(root: str, technologies: set[str]) -> tuple[str, list[str], float]:
@@ -341,12 +362,14 @@ def discover_workspace_map(
             and candidate != "."
             and (unit_root == "." or candidate.startswith(unit_root + "/"))
         ]
-        technology_ids, evidence, suffix_counts = _facts_for_root(
+        technology_ids, evidence, suffix_counts, total_source_count = _facts_for_root(
             unit_root,
             preflight,
             sorted(roots[unit_root]),
             nested_roots=nested_roots,
         )
+        technology_sample = _sample_list(technology_ids, _UNIT_TECHNOLOGY_SAMPLES_MAX)
+        suffix_sample = _sample_counts(suffix_counts, _UNIT_SOURCE_SUFFIX_SAMPLES_MAX)
         kind, profile_layers, confidence = _classify(unit_root, set(technology_ids))
         unit_id = _unit_id(unit_root, kind)
         if unit_id in seen:
@@ -356,10 +379,12 @@ def discover_workspace_map(
             "unit_id": unit_id,
             "path": unit_root,
             "kind": kind,
-            "technology_ids": technology_ids,
+            "technology_ids": technology_sample,
+            "total_technology_count": len(technology_ids),
             "profile_layers": profile_layers,
             "manifests": evidence[:64],
-            "source_suffix_counts": suffix_counts,
+            "source_suffix_counts": suffix_sample,
+            "total_source_count": total_source_count,
             "confidence": confidence,
             "authoritative": False,
         }
@@ -371,9 +396,11 @@ def discover_workspace_map(
             "path": ".",
             "kind": "unknown",
             "technology_ids": [],
+            "total_technology_count": 0,
             "profile_layers": [],
             "manifests": [],
             "source_suffix_counts": {},
+            "total_source_count": 0,
             "confidence": 0.4,
             "authoritative": False,
         }

@@ -24,6 +24,7 @@ from .canonical import (
     load_json_strict,
     parse_json_strict,
 )
+from .conformance import ConformanceError, validate_resolved_plan_budget
 from .platform_paths import filesystem_path, resolve_identity_path
 
 
@@ -754,6 +755,7 @@ def compile_project_init(
         },
     )
     validate_definition(bundle.schema, "ProjectInit", result)
+    _validate_project_init_source_sample_budget(result, bundle)
     return result
 
 
@@ -770,6 +772,8 @@ def validate_plan_objects(
     }
     for filename, definition in definitions.items():
         validate_definition(bundle.schema, definition, plans[filename])
+        if definition == "ProjectInit":
+            _validate_project_init_source_sample_budget(plans[filename], bundle)
 
     project = plans["project.json"]
     if project["preset_id"] != bundle.preset["preset_id"]:
@@ -936,6 +940,29 @@ def _activation_binding(
     active = context.get("activation_digest")
     if active is not None and "activation_digest" in value and value["activation_digest"] != active:
         raise ContractError("record Activation binding does not match active state")
+
+
+def _validate_project_init_source_sample_budget(
+    value: Mapping[str, Any], bundle: ContractBundle
+) -> None:
+    """Apply Core's global resolved-plan sample limit to every ProjectInit ingress.
+
+    The schema deliberately bounds individual technology facts, while the Core
+    conformance owner supplies the aggregate source-sample budget.  Reusing
+    the owner here closes direct ProjectInit ingress without changing the
+    deterministic projection produced by the experience layer.
+    """
+
+    profile = value.get("resolved_profile")
+    if not isinstance(profile, Mapping):
+        raise ContractError("ProjectInit resolved profile is invalid")
+    budgets = bundle.core.get("conformance.json", {}).get("structural_budgets")
+    if not isinstance(budgets, Mapping):
+        raise ContractError("ProjectInit source sample budget owner is unavailable")
+    try:
+        validate_resolved_plan_budget(profile, budgets)
+    except ConformanceError as exc:
+        raise ContractError(f"ProjectInit resolved profile violates Core budget: {exc}") from exc
 
 
 def _artifact_activation_binding(
@@ -1351,6 +1378,9 @@ def _projection_limits_binding(
 
 DEFAULT_SEMANTIC_VALIDATORS = SemanticValidatorRegistry()
 DEFAULT_SEMANTIC_VALIDATORS.register("*", "*", _activation_binding)
+DEFAULT_SEMANTIC_VALIDATORS.register(
+    "*", "ProjectInit", lambda value, bundle, _context: _validate_project_init_source_sample_budget(value, bundle)
+)
 DEFAULT_SEMANTIC_VALIDATORS.register("*", "Artifact", _artifact_activation_binding)
 DEFAULT_SEMANTIC_VALIDATORS.register("*", "Candidate", _candidate_consistency_binding)
 DEFAULT_SEMANTIC_VALIDATORS.register("*", "Relation", _relation_domain_range)

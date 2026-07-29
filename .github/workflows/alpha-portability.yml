@@ -24,7 +24,7 @@ jobs:
       - name: Reconciliation architecture guards
         env:
           PROMIN_NO_TELEMETRY: '1'
-        run: python -m pytest -q tests/test_alpha3_reconciliation_static.py tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_performance.py tests/test_alpha3_reconciliation_package.py
+        run: python -m pytest -q tests/test_alpha3_reconciliation_static.py tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_aliased_temp_tree.py tests/test_alpha3_reconciliation_performance.py tests/test_alpha3_reconciliation_package.py
       - name: Opus 5 closure regression suite
         env:
           PROMIN_NO_TELEMETRY: '1'
@@ -79,7 +79,7 @@ jobs:
           $env:LOCALAPPDATA = $env:PROMIN_ALIAS_CACHE
           Remove-Item Env:PROMIN_PROVIDER_STORE -ErrorAction SilentlyContinue
 
-          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_reconciliation_windows.py
+          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_reconciliation_windows.py tests/test_alpha3_reconciliation_aliased_temp_tree.py
           & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_opus_closure.py
 
           $project = Join-Path $env:RUNNER_TEMP "promin-deep-root"
@@ -117,7 +117,7 @@ jobs:
           export TMPDIR="$alias_temp"
           export XDG_CACHE_HOME="$alias_cache"
           unset PROMIN_PROVIDER_STORE
-          python -m pytest -q tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_opus_closure.py
+          python -m pytest -q tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_aliased_temp_tree.py tests/test_alpha3_opus_closure.py
           project="$RUNNER_TEMP/promin-macos-alias-project"
           mkdir -p "$project"
           promin --root "$project" init --goal "macOS aliased path regression" --yes
