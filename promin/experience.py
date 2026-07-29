@@ -429,29 +429,43 @@ def detect_technologies(preflight: Mapping[str, Any]) -> tuple[list[dict[str, An
 
     duplicate_like = duplicate_name_markers(tuple(paths), limit=16)
     if duplicate_like["total_count"]:
+        duplicate_examples = list(duplicate_like["examples"])
         signals.append(
             {
                 "signal": "duplicate-like-paths",
                 "confidence": 0.45,
-                "examples": duplicate_like["examples"],
+                "examples": duplicate_examples,
                 "total_count": duplicate_like["total_count"],
+                "examples_truncated": len(duplicate_examples)
+                < int(duplicate_like["total_count"]),
+                "example_count_complete": not bool(preflight.get("truncated")),
                 "interpretation": "filename-marker signal only; exact duplication is owned by runtime audit content hashes",
             }
         )
-    large_samples = [
-        item["path"]
-        for item in preflight.get("entries", [])
-        if item.get("kind") == "file"
-        and item.get("suffix") in _SOURCE_SUFFIXES
-        and isinstance(item.get("size_bytes"), int)
-        and item["size_bytes"] >= 256 * 1024
-    ]
-    if large_samples:
+    large_sources: list[str] = []
+    for item in preflight.get("entries", []):
+        if not isinstance(item, Mapping):
+            continue
+        if (
+            item.get("kind") != "file"
+            or item.get("suffix") not in _SOURCE_SUFFIXES
+            or not isinstance(item.get("size_bytes"), int)
+            or item["size_bytes"] < 256 * 1024
+        ):
+            continue
+        large_sources.append(str(item["path"]))
+    large_sources.sort()
+    large_source_count = len(large_sources)
+    if large_source_count:
+        large_samples = large_sources[:16]
         signals.append(
             {
                 "signal": "large-source-files",
                 "confidence": 0.7,
-                "examples": large_samples[:16],
+                "examples": large_samples,
+                "total_count": large_source_count,
+                "examples_truncated": len(large_samples) < large_source_count,
+                "example_count_complete": not bool(preflight.get("truncated")),
             }
         )
     # ``resolved_plan_source_samples_max`` is a global plan budget, not a per-item
@@ -591,19 +605,19 @@ def _default_goal(root: Path, mode: str, technologies: Sequence[Mapping[str, Any
 
 def _operation_profiles(mode: str, layers: Sequence[str]) -> list[dict[str, Any]]:
     operations = [
-        ("repository-preflight", "tool-only", "deterministic metadata inspection"),
-        ("exact-search", "tool-only", "deterministic retrieval"),
-        ("file-classification", "micro", "bounded mechanical classification"),
-        ("plan-refinement", "standard", "bounded project planning"),
-        ("implementation", "standard", "bounded coding and tests"),
-        ("semantic-deduplication", "strong", "behavior and source-of-truth analysis"),
-        ("security-review", "strong", "high-consequence reasoning"),
-        ("release-or-destructive-decision", "critical-review", "human authority remains required"),
+        ("repository-preflight", "tool-only", "metadata inspection"),
+        ("exact-search", "tool-only", "exact retrieval"),
+        ("file-classification", "micro", "file classification"),
+        ("plan-refinement", "standard", "project planning"),
+        ("implementation", "standard", "coding and tests"),
+        ("semantic-deduplication", "strong", "source-of-truth analysis"),
+        ("security-review", "strong", "high-consequence review"),
+        ("release-or-destructive-decision", "critical-review", "human authority required"),
     ]
     if mode == "greenfield":
-        operations.insert(3, ("architecture-skeleton", "strong", "initial architecture and invariants"))
+        operations.insert(3, ("architecture-skeleton", "strong", "architecture and invariants"))
     if "vibe-recovery" in layers:
-        operations.append(("concurrent-change-reconciliation", "strong", "stale-base and divergent-fork control"))
+        operations.append(("concurrent-change-reconciliation", "strong", "stale-base reconciliation"))
     return [
         {"operation": operation, "model_tier": tier, "reason": reason}
         for operation, tier, reason in operations
@@ -815,6 +829,12 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1024:
         raise ExperienceError("resolved plan byte budget is invalid")
 
+    # A result that merely fits the hard ceiling is not a stable bounded plan:
+    # a small legitimate change to project evidence would immediately fail.
+    # Prefer ten percent of the canonical budget as headroom.  Some valid plans
+    # contain irreducible structural facts, so the hard Core ceiling remains the
+    # fail-closed boundary when sampled evidence cannot reach that preference.
+    target_bytes = max_bytes * 90 // 100
     result = dict(plan_identity)
     result["detected_technologies"] = [dict(item) for item in plan_identity["detected_technologies"]]
     result["repository_signals"] = [dict(item) for item in plan_identity["repository_signals"]]
@@ -822,7 +842,7 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
     def size() -> int:
         return len(_json_bytes(_plan_with_digest(result)))
 
-    while size() > max_bytes:
+    while size() > target_bytes:
         candidates = [
             item
             for item in result["detected_technologies"]
@@ -838,7 +858,7 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
 
     # Repository-signal examples are diagnostic samples, not canonical facts.
     # Compact them only if source samples alone cannot meet the budget.
-    while size() > max_bytes:
+    while size() > target_bytes:
         candidates = [
             item
             for item in result["repository_signals"]

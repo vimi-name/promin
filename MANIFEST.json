@@ -102,6 +102,11 @@
       "size": 2912
     },
     {
+      "path": "docs/ALPHA3_R2_HEADROOM_WAVE_UA.md",
+      "sha256": "472897b1401fd1519fa1744a5ce4a7eca4daeef93126f93cf842d0d58237c00a",
+      "size": 2026
+    },
+    {
       "path": "docs/ALPHA_SCOPE_UA.md",
       "sha256": "43e71f8a7a81948296d7cc8d6ba7d0b99838f0f6bbe12d27cbde1db3f5f54862",
       "size": 1158
@@ -313,8 +318,8 @@
     },
     {
       "path": "promin/experience.py",
-      "sha256": "a8b0d098c5d8bc12b76f4cddc4d136579e98b9aba4259d179cdadc9e6b2a120a",
-      "size": 74957
+      "sha256": "0810b3c53559f02fec849988d34765ef429838cc7ded401e1198964b5d67c9c6",
+      "size": 76030
     },
     {
       "path": "promin/gitpolicy.py",
@@ -457,6 +462,11 @@
       "size": 16730
     },
     {
+      "path": "tests/test_alpha3_plan_headroom.py",
+      "sha256": "b8590410888b9dc5bfdc8f3a68f97b370ec00d42dc883db3b7757c8357ed1703",
+      "size": 3628
+    },
+    {
       "path": "tests/test_alpha3_reconciliation_aliased_temp_tree.py",
       "sha256": "f86c25752ef9741657b5600a3bd40f4204b482159d27c120f7b6bb21938e4e70",
       "size": 1869
@@ -573,7 +583,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "b9453b50c63afaabe6204569ac1b85bbbc3b66e6399761b5adbc1fc23bb166f7",
+      "sha256": "ff1649303c0e65cb31de6c83f7d9079946e65934932783ee2b351526d45e95cb",
       "size": 57971
     },
     {
@@ -653,8 +663,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "58670f5cc4ceb005699a156e4f071954a155206ff7bb88804325e86d375bc7f6",
-      "size": 134120
+      "sha256": "5c447a039c924874b8af083fc92bc506b175f70bafbdca30a1890d22a6872e21",
+      "size": 134212
     }
   ],
   "generated_surfaces": [
