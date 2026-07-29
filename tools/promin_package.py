@@ -518,11 +518,17 @@ def build_archive(
         if binding_path == destination:
             raise ValidationFailure("candidate binding and archive paths must differ")
     sync_version(root)
-    preflight = validate_tree(root, require_integrity=False, require_docs=True)
+    # The clean-archive verification below is the authoritative document check:
+    # it parses the exact PDF bytes that will become the candidate.  Running the
+    # same expensive text extraction for the source tree at both preflight and
+    # post-integrity stages does not add coverage, because integrity generation
+    # cannot change a human document.  Keep structural/source checks here and
+    # defer the document check to ``verify_archive``.
+    preflight = validate_tree(root, require_integrity=False, require_docs=False)
     if not preflight.valid:
         raise ValidationFailure("preflight failed: " + "; ".join(preflight.errors))
     integrity = write_integrity(root)
-    final_tree = validate_tree(root, require_integrity=True, require_docs=True)
+    final_tree = validate_tree(root, require_integrity=True, require_docs=False)
     if not final_tree.valid:
         raise ValidationFailure("integrity validation failed: " + "; ".join(final_tree.errors))
     temporary = destination.with_name(destination.name + ".tmp")

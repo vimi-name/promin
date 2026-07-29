@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import OrderedDict
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
@@ -68,9 +69,16 @@ HUMAN_PDFS = frozenset(
         "human/promin_appendices_en.pdf",
     }
 )
+# PDF text extraction is intentionally expensive.  Archive construction checks
+# the same immutable PDF bytes through several clean copies, so retain only
+# successful in-process summaries by their freshly recomputed content digest.
+# This never persists a result, never bypasses the byte/header checks below,
+# and never caches a parser failure.
+_HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = OrderedDict()
+_MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 135
+CANONICAL_PACKAGE_FILE_COUNT = 139
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -97,6 +105,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/ALPHA3_OPUS5_FIXES_UA.md',
         'docs/ALPHA3_R2_B1_B3_WAVE_UA.md',
         'docs/ALPHA3_R2_HEADROOM_WAVE_UA.md',
+        'docs/ALPHA3_R2_HEAVY_VALIDATION_WAVE_UA.md',
         'docs/ALPHA_SCOPE_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
         'docs/MODEL_ROUTING_UA.md',
@@ -176,6 +185,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_alpha3_reconciliation_performance.py',
         'tests/test_alpha3_reconciliation_static.py',
         'tests/test_alpha3_reconciliation_windows.py',
+        'tests/test_bootstrap_mutation_verification.py',
         'tests/test_alpha_audit.py',
         'tests/test_alpha_context_index.py',
         'tests/test_alpha_deployable.py',
@@ -193,9 +203,11 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_events_projection.py',
         'tests/test_installed_distribution.py',
         'tests/test_package_validation.py',
+        'tests/test_platform_paths_hotpath.py',
         'tests/test_scale_orchestration.py',
         'tests/test_search_scale.py',
         'tests/test_service_cli.py',
+        'tests/test_service_mutation_cache.py',
         'tools/compile_schema.py',
         'tools/generate_human.py',
         'tools/promin.py',
@@ -1254,40 +1266,50 @@ def verify_human_documents(
         data = path.read_bytes()
         if len(data) < 1024 or not data.startswith(b"%PDF-") or b"%%EOF" not in data[-2048:]:
             raise ValidationFailure(f"malformed or implausibly small PDF: {rel}")
-        try:
-            reader = PdfReader(path, strict=True)
-            if reader.is_encrypted:
-                raise ValidationFailure(f"encrypted human document rejected: {rel}")
-            page_text_characters: list[int] = []
-            extraction_errors: list[dict[str, Any]] = []
-            for page_index, page in enumerate(reader.pages):
-                try:
-                    extracted = page.extract_text() or ""
-                except Exception as exc:
-                    extraction_errors.append(
-                        {"page": page_index + 1, "error_type": type(exc).__name__}
-                    )
-                    extracted = ""
-                page_text_characters.append(len(extracted.strip()))
-        except ValidationFailure:
-            raise
-        except Exception as exc:
-            raise ValidationFailure(f"human PDF parser rejected {rel}: {type(exc).__name__}") from exc
-        if not page_text_characters or extraction_errors or sum(page_text_characters) == 0:
-            raise ValidationFailure(f"human PDF text extraction is incomplete: {rel}")
+        digest = hashlib.sha256(data).hexdigest()
+        summary = _HUMAN_DOCUMENT_SUMMARIES.get(digest)
+        if summary is None:
+            try:
+                reader = PdfReader(path, strict=True)
+                if reader.is_encrypted:
+                    raise ValidationFailure(f"encrypted human document rejected: {rel}")
+                page_text_characters: list[int] = []
+                extraction_errors: list[dict[str, Any]] = []
+                for page_index, page in enumerate(reader.pages):
+                    try:
+                        extracted = page.extract_text() or ""
+                    except Exception as exc:
+                        extraction_errors.append(
+                            {"page": page_index + 1, "error_type": type(exc).__name__}
+                        )
+                        extracted = ""
+                    page_text_characters.append(len(extracted.strip()))
+            except ValidationFailure:
+                raise
+            except Exception as exc:
+                raise ValidationFailure(f"human PDF parser rejected {rel}: {type(exc).__name__}") from exc
+            if not page_text_characters or extraction_errors or sum(page_text_characters) == 0:
+                raise ValidationFailure(f"human PDF text extraction is incomplete: {rel}")
+            if len(_HUMAN_DOCUMENT_SUMMARIES) >= _MAX_HUMAN_DOCUMENT_SUMMARIES:
+                _HUMAN_DOCUMENT_SUMMARIES.popitem(last=False)
+            summary = (
+                len(page_text_characters),
+                sum(page_text_characters),
+                tuple(index + 1 for index, characters in enumerate(page_text_characters) if characters == 0),
+            )
+            _HUMAN_DOCUMENT_SUMMARIES[digest] = summary
+        else:
+            _HUMAN_DOCUMENT_SUMMARIES.move_to_end(digest)
+        page_count, extracted_characters, blank_text_pages = summary
         details.append(
             {
                 "path": rel,
                 "bytes": len(data),
-                "sha256": sha256_file(path),
-                "page_count": len(page_text_characters),
-                "extracted_characters": sum(page_text_characters),
-                "blank_text_pages": [
-                    index + 1
-                    for index, characters in enumerate(page_text_characters)
-                    if characters == 0
-                ],
-                "extraction_errors": extraction_errors,
+                "sha256": digest,
+                "page_count": page_count,
+                "extracted_characters": extracted_characters,
+                "blank_text_pages": list(blank_text_pages),
+                "extraction_errors": [],
             }
         )
     result: dict[str, Any] = {

@@ -12,7 +12,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from promin_package import build_archive, sync_version, verify_archive, write_integrity  # noqa: E402
-from promin_validate import verify_package_integrity  # noqa: E402
+from promin_validate import validate_tree, verify_package_integrity  # noqa: E402
 
 
 def _canonical_package_copy(destination: Path) -> Path:
@@ -71,3 +71,23 @@ def test_exact_archive_is_deterministic_and_cleanly_verifiable() -> None:
         assert verified["clean_extraction"] is True
         assert verified["byte_deterministic"] is True
         assert verified["archive_sha256"] == verified["second_build_sha256"]
+
+
+def test_archive_build_defers_pdf_parsing_to_clean_extraction(monkeypatch) -> None:
+    """The candidate check parses the bytes that are actually archived once."""
+
+    calls: list[bool] = []
+
+    def tracked_validate_tree(*args, **kwargs):
+        calls.append(kwargs["require_docs"])
+        return validate_tree(*args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="promin-r2-package-") as temporary_name:
+        temporary = Path(temporary_name)
+        package = _canonical_package_copy(temporary)
+        archive = temporary / "candidate.zip"
+
+        monkeypatch.setattr("promin_package.validate_tree", tracked_validate_tree)
+        build_archive(package, archive, install_mode=None)
+
+    assert calls == [False, False, True]

@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -1940,8 +1941,20 @@ def test_provider_receipt_survives_restart_and_tamper_fails_closed(tmp_path: Pat
     ) == receipt
 
     os.chmod(receipt, stat.S_IWRITE | stat.S_IREAD)
-    with receipt.open("ab") as handle:
-        handle.write(b"tampered-receipt")
+    # Windows may retain the just-invoked provider executable for a short
+    # interval after its health-check child exits.  The assertion is about the
+    # next Activation verification rejecting a real byte mutation, not about
+    # an arbitrary file-sharing race at process teardown.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            with receipt.open("ab") as handle:
+                handle.write(b"tampered-receipt")
+            break
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
     with pytest.raises(InitError, match="provider receipt digest mismatch"):
         ActivationGuard(project).verify()
 

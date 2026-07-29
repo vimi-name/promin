@@ -231,7 +231,19 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(filesystem_path(temporary), filesystem_path(path))
 
 
-def doctor_with_portability(project_root: Path | str, *, replay: bool = True) -> dict[str, Any]:
+def doctor_with_portability(
+    project_root: Path | str,
+    *,
+    replay: bool = True,
+    include_resolved_plan: bool = False,
+) -> dict[str, Any]:
+    """Diagnose portability and optionally retain the already-resolved plan.
+
+    ``repair_project`` needs the resolved plan only to rehydrate a cloned
+    control layer.  Keeping that value in the normal doctor result would make
+    the public CLI payload needlessly large, so the handoff is opt-in and
+    private to the in-process repair route.
+    """
     root = resolve_identity_path(project_root, strict=True)
     current = host_binding()
     previous = _load_previous(root)
@@ -279,7 +291,7 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
     repair_available = bool(
         integrity_invalid or changed or host_binding_missing or core_failed or issues or derived_stale
     )
-    return {
+    result = {
         "record_type": "PortableDoctorResult",
         "status": status,
         "core": core,
@@ -303,6 +315,12 @@ def doctor_with_portability(project_root: Path | str, *, replay: bool = True) ->
         "authority": False,
         "pass_credit": False,
     }
+    if include_resolved_plan:
+        # This is intentionally an in-process implementation detail.  Callers
+        # that render a doctor result continue to receive the bounded public
+        # diagnostic payload above.
+        result["_resolved_plan"] = plan
+    return result
 
 
 def _brief_from_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -327,17 +345,11 @@ def repair_project(project_root: Path | str, *, apply: bool = False) -> dict[str
     """Plan or apply the same bounded, reversible repair action set."""
 
     root = Path(project_root).resolve()
-    diagnosis = doctor_with_portability(root, replay=False)
+    diagnosis = doctor_with_portability(root, replay=False, include_resolved_plan=True)
     current = diagnosis["current_host"]
-    local_plan = load_resolved_plan(root)
-    portable_plan = _load_portable_plan(root)
+    local_plan = diagnosis.pop("_resolved_plan", None)
     portable_team_state = _load_portable_team_state(root)
     plan = local_plan
-    if plan is None and portable_plan is not None:
-        try:
-            plan = resolve_plan(root, brief=portable_plan)
-        except Exception:
-            plan = None
 
     actions: list[dict[str, Any]] = []
     batches = int(diagnosis.get("event_batch_count", 0))

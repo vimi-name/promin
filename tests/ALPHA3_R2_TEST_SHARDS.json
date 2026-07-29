@@ -15,8 +15,8 @@
     },
     {
       "id": "paths",
-      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha3_reconciliation_paths.py",
-      "test_files": ["tests/test_alpha3_reconciliation_paths.py"],
+      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha3_reconciliation_paths.py tests/test_platform_paths_hotpath.py",
+      "test_files": ["tests/test_alpha3_reconciliation_paths.py", "tests/test_platform_paths_hotpath.py"],
       "expected_markers": [],
       "timeout_seconds": 60,
       "allowed_skips": 0,
@@ -69,8 +69,8 @@
     },
     {
       "id": "service-cli",
-      "command": "python -m pytest -q -m \"not scale\" tests/test_service_cli.py",
-      "test_files": ["tests/test_service_cli.py"],
+      "command": "python -m pytest -q -m \"not scale\" tests/test_service_cli.py tests/test_service_mutation_cache.py",
+      "test_files": ["tests/test_service_cli.py", "tests/test_service_mutation_cache.py"],
       "expected_markers": [],
       "timeout_seconds": 300,
       "allowed_skips": 0,
@@ -87,8 +87,8 @@
     },
     {
       "id": "alpha-experience",
-      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_experience.py tests/test_alpha_host_pickup.py tests/test_alpha_incremental_layer.py tests/test_alpha_monorepo_context.py tests/test_alpha_portability.py tests/test_alpha_skills.py tests/test_alpha_skills_checklist.py tests/test_alpha3_opus_closure.py tests/test_alpha3_workspace_budget.py",
-      "test_files": ["tests/test_alpha_experience.py", "tests/test_alpha_host_pickup.py", "tests/test_alpha_incremental_layer.py", "tests/test_alpha_monorepo_context.py", "tests/test_alpha_portability.py", "tests/test_alpha_skills.py", "tests/test_alpha_skills_checklist.py", "tests/test_alpha3_opus_closure.py", "tests/test_alpha3_workspace_budget.py"],
+      "command": "python -m pytest -q -m \"not scale\" tests/test_alpha_experience.py tests/test_alpha_host_pickup.py tests/test_alpha_incremental_layer.py tests/test_alpha_monorepo_context.py tests/test_alpha_portability.py tests/test_alpha_skills.py tests/test_alpha_skills_checklist.py tests/test_alpha3_opus_closure.py tests/test_alpha3_plan_headroom.py tests/test_alpha3_workspace_budget.py tests/test_bootstrap_mutation_verification.py",
+      "test_files": ["tests/test_alpha_experience.py", "tests/test_alpha_host_pickup.py", "tests/test_alpha_incremental_layer.py", "tests/test_alpha_monorepo_context.py", "tests/test_alpha_portability.py", "tests/test_alpha_skills.py", "tests/test_alpha_skills_checklist.py", "tests/test_alpha3_opus_closure.py", "tests/test_alpha3_plan_headroom.py", "tests/test_alpha3_workspace_budget.py", "tests/test_bootstrap_mutation_verification.py"],
       "expected_markers": [],
       "timeout_seconds": 300,
       "allowed_skips": 0,

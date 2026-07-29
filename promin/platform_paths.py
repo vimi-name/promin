@@ -12,8 +12,10 @@ import os
 import re
 import stat
 import tempfile
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from typing import Iterator
 
 
@@ -21,9 +23,56 @@ class PlatformPathError(ValueError):
     pass
 
 
+_ROOT_IDENTITY_CACHE_LIMIT = 256
+_root_identity_cache: OrderedDict[tuple[str, tuple[int, int, int, int, int]], Path] = (
+    OrderedDict()
+)
+_root_identity_cache_lock = RLock()
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return the change-sensitive identity used for one cache lookup.
+
+    A cached identity is never trusted by name alone: ``resolve_contained_path``
+    stats the lexical root on every use and only reuses its resolved spelling
+    when the observed object is still the same directory.
+    """
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _resolved_root_identity(raw_root: Path, root_stat: os.stat_result) -> Path:
+    """Resolve one unchanged containment root without repeated OS identity I/O."""
+
+    absolute_root = raw_root.absolute()
+    key = (normalize_identity_text(absolute_root), _stat_identity(root_stat))
+    with _root_identity_cache_lock:
+        cached = _root_identity_cache.pop(key, None)
+        if cached is not None:
+            _root_identity_cache[key] = cached
+            return cached
+    try:
+        resolved = resolve_identity_path(absolute_root, strict=True)
+    except OSError as exc:
+        raise PlatformPathError(f"path root cannot be inspected: {exc}") from exc
+    with _root_identity_cache_lock:
+        _root_identity_cache[key] = resolved
+        if len(_root_identity_cache) > _ROOT_IDENTITY_CACHE_LIMIT:
+            _root_identity_cache.popitem(last=False)
+    return resolved
+
+
 def _is_link_or_reparse(path: Path, inspected: os.stat_result | None = None) -> bool:
     value = inspected if inspected is not None else os.lstat(filesystem_path(path))
-    if stat.S_ISLNK(value.st_mode) or os.path.islink(filesystem_path(path)):
+    # ``lstat`` already observes the link bit.  Calling ``os.path.islink``
+    # afterwards repeats that same filesystem lookup for every path component.
+    if stat.S_ISLNK(value.st_mode):
         return True
     is_junction = getattr(path, "is_junction", None)
     if callable(is_junction) and is_junction():
@@ -60,7 +109,7 @@ def resolve_contained_path(
             raw_path = candidate_absolute
     try:
         root_stat = os.stat(filesystem_path(raw_root))
-        resolved_root = resolve_identity_path(raw_root, strict=True)
+        resolved_root = _resolved_root_identity(raw_root, root_stat)
     except OSError as exc:
         raise PlatformPathError(f"path root cannot be inspected: {exc}") from exc
     if not stat.S_ISDIR(root_stat.st_mode):

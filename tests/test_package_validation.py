@@ -262,7 +262,7 @@ class PackageValidationTests(unittest.TestCase):
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
         self.assertTrue(result["closure"])
-        self.assertEqual(result["inventory"]["files"], 135)
+        self.assertEqual(result["inventory"]["files"], 139)
         self.assertEqual(result["inventory"]["directories"], 14)
         manifest = json.loads((self.root / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["builder"], "tools/promin_package.py")
@@ -271,7 +271,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_integrity(self.root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 135)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 139)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 14)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -671,6 +671,20 @@ class PackageValidationTests(unittest.TestCase):
         result = verify_human_documents(self.root)
         self.assertTrue(result["existing_pdf_verification"])
         self.assertFalse(result["rebuild_performed"])
+
+    def test_existing_pdf_verification_reuses_only_freshly_hashed_pdf_summaries(self) -> None:
+        from pypdf import PdfReader
+
+        document = self.root / "human" / "promin_main_en.pdf"
+        document.write_bytes(document.read_bytes() + b"\n")
+        with mock.patch("pypdf.PdfReader", wraps=PdfReader) as reader:
+            first = verify_human_documents(self.root)
+            first_parse_count = reader.call_count
+            second = verify_human_documents(self.root)
+
+        self.assertGreaterEqual(first_parse_count, 1)
+        self.assertEqual(reader.call_count, first_parse_count)
+        self.assertEqual(first, second)
 
     def test_document_rebuild_requires_all_explicit_font_bindings(self) -> None:
         with self.assertRaises(ValidationFailure):

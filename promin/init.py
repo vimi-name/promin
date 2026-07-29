@@ -2456,7 +2456,10 @@ def _read_path_state(label: str, path: Path, kind: str) -> dict[str, Any]:
     ) or (
         kind == "directory" and stat.S_ISDIR(value.st_mode)
     )
-    if stat.S_ISLNK(value.st_mode) or os.path.islink(filesystem_path(path)) or not valid_kind:
+    # ``stat(..., follow_symlinks=False)`` already carries the symbolic-link
+    # bit, so a second ``os.path.islink`` would repeat the same I/O for every
+    # Activation-bound path on every cache guard.
+    if stat.S_ISLNK(value.st_mode) or not valid_kind:
         raise InitError(f"Activation-bound path is not a real {kind}: {path}")
     return {
         "label": label,

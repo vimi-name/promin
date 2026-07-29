@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import promin.portability as portability
 from promin import __version__
 from promin.__main__ import _parser, _run, main
 from promin.audit import duplicate_name_markers
@@ -194,6 +195,33 @@ def test_repair_plan_matches_apply(tmp_path: Path) -> None:
     planned = repair_project(tmp_path, apply=False)
     applied = repair_project(tmp_path, apply=True)
     assert [item["action"] for item in planned["actions"] if item.get("status") != "blocked"] == applied["performed"]
+
+
+def test_clone_repair_resolves_portable_plan_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clone repair must reuse doctor resolution rather than scanning twice."""
+
+    plan = resolve_plan(tmp_path, goal="Create")
+    apply_plan(tmp_path, plan)
+    (tmp_path / ".promin" / "generated" / "resolved-plan.json").unlink()
+
+    public_diagnosis = portability.doctor_with_portability(tmp_path, replay=False)
+    assert "_resolved_plan" not in public_diagnosis
+
+    original = portability.resolve_plan
+    calls = 0
+
+    def counted_resolve(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(portability, "resolve_plan", counted_resolve)
+    repaired = portability.repair_project(tmp_path, apply=False)
+
+    assert calls == 1
+    assert not [item for item in repaired["actions"] if item.get("status") == "blocked"]
 
 
 def test_system_check_exercises_bounded_init(tmp_path: Path) -> None:

@@ -1188,6 +1188,8 @@ def _runtime_state_binding_leaves(
 def _fast_implementation_stat_fingerprint(
     context: ActivationContext,
     project_root: Path,
+    *,
+    bindings: Sequence[tuple[str, Path, str]] | None = None,
 ) -> str | None:
     """Return a bounded guard for a fully byte-verified mutation context.
 
@@ -1205,10 +1207,88 @@ def _fast_implementation_stat_fingerprint(
 
     del project_root  # The verified context owns the exact project root.
     try:
-        bindings = activation_read_bindings(context)
-        return activation_read_fingerprint(context, bindings)
+        selected = (
+            _mutation_cache_bindings(context)
+            if bindings is None
+            else tuple(bindings)
+        )
+        metadata = activation_read_fingerprint(context, selected)
+        topology = _provider_receipt_topology_digest(context)
+        if topology is None:
+            return None
+        return digest_value(
+            {
+                "activation_read_metadata": metadata,
+                "provider_receipt_topology": topology,
+            }
+        )
     except Exception:
         return None
+
+
+def _mutation_cache_bindings(
+    context: ActivationContext,
+) -> tuple[tuple[str, Path, str], ...]:
+    """Compile the metadata guard for reuse of one byte-verified context.
+
+    ``activation_read_bindings`` is deliberately exhaustive and expensive: it
+    re-discovers every provider receipt before a full byte verification.  Once
+    that verification has succeeded, the service may retain its exact file
+    list, but it must still notice receipt-tree topology changes.  Directory
+    witnesses cover replacement and removal; a separate per-reuse topology
+    digest enumerates entry names and types so a new receipt cannot hide behind
+    a coalesced Windows directory timestamp.  The original bindings cover
+    every already-known file and runtime directory.  Any guard mismatch rejects
+    reuse and sends the next command through ``verify_before_mutation`` again.
+    """
+
+    selected = list(activation_read_bindings(context))
+    providers = context.control_root / "providers"
+    for directory, directories, _filenames in os.walk(
+        providers, topdown=True, followlinks=False
+    ):
+        directories.sort()
+        path = Path(directory)
+        relative = path.relative_to(providers).as_posix() or "."
+        selected.append((f"directory/provider-receipts/{relative}", path, "directory"))
+    return tuple(selected)
+
+
+def _provider_receipt_topology_digest(
+    context: ActivationContext,
+) -> str | None:
+    """Return a fail-closed structural witness for provider receipt entries.
+
+    NTFS may preserve a directory timestamp across rapid sibling writes.  A
+    metadata-only guard could then reuse a byte-verified Activation after an
+    unlisted provider receipt appeared.  Enumerating entry names and link-safe
+    types closes that window without re-reading every verified receipt.  A
+    traversal race, unreadable directory, or symlink is never a cache hit.
+    """
+
+    providers = context.control_root / "providers"
+    entries: list[dict[str, str]] = []
+    try:
+        pending = [providers]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name)
+            for entry in children:
+                path = Path(entry.path)
+                relative = path.relative_to(providers).as_posix()
+                if entry.is_symlink():
+                    return None
+                if entry.is_dir(follow_symlinks=False):
+                    entries.append({"path": relative, "kind": "directory"})
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    entries.append({"path": relative, "kind": "file"})
+                else:
+                    return None
+    except OSError:
+        return None
+    return digest_value({"provider_receipt_entries": entries})
 
 
 
@@ -1233,6 +1313,7 @@ class ProminService:
         self._ranked_candidate_cache = RankedCandidateCache(max_entries=1_024)
         self._verified_mutation_cache: ActivationContext | None = None
         self._verified_mutation_fingerprint: str | None = None
+        self._verified_mutation_bindings: tuple[tuple[str, Path, str], ...] | None = None
 
     def _clear_query_runtime(self) -> None:
         with self._query_runtime_lock:
@@ -1246,6 +1327,7 @@ class ProminService:
             self._read_store = None
             self._verified_mutation_cache = None
             self._verified_mutation_fingerprint = None
+            self._verified_mutation_bindings = None
             self._ranked_candidate_cache.clear()
 
     def _bind_query_runtime(
@@ -1354,7 +1436,11 @@ class ProminService:
         cached = self._verified_mutation_cache
         if cached is not None and self._verified_mutation_fingerprint is not None:
             try:
-                current_fingerprint = _fast_implementation_stat_fingerprint(cached, self.root)
+                current_fingerprint = _fast_implementation_stat_fingerprint(
+                    cached,
+                    self.root,
+                    bindings=self._verified_mutation_bindings,
+                )
             except Exception:
                 current_fingerprint = None
             if (
@@ -1365,6 +1451,7 @@ class ProminService:
                 return cached
             self._verified_mutation_cache = None
             self._verified_mutation_fingerprint = None
+            self._verified_mutation_bindings = None
 
         verified = verify_before_mutation(self.root)
         if (
@@ -1382,13 +1469,20 @@ class ProminService:
             provider_dispatch=verified.provider_dispatch,
             receipt_root=verified.control_root / "providers",
         )
-        fingerprint = _fast_implementation_stat_fingerprint(verified, self.root)
+        bindings = _mutation_cache_bindings(verified)
+        fingerprint = _fast_implementation_stat_fingerprint(
+            verified,
+            self.root,
+            bindings=bindings,
+        )
         if fingerprint is not None:
             self._verified_mutation_cache = verified
             self._verified_mutation_fingerprint = fingerprint
+            self._verified_mutation_bindings = bindings
         else:
             self._verified_mutation_cache = None
             self._verified_mutation_fingerprint = None
+            self._verified_mutation_bindings = None
         return verified
 
     def _load_commit_state(

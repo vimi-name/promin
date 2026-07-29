@@ -59,6 +59,7 @@ _REQUIRED_FIELDS = {
     "provider_state",
     "projection_state",
 }
+_FIXTURE_CLEANUP_TIMEOUT_SECONDS = 30.0
 
 
 class BenchError(RuntimeError):
@@ -175,6 +176,43 @@ def _fixture(root: Path) -> None:
     source.mkdir(exist_ok=True)
     for index in range(8):
         (source / f"unit-{index}.py").write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+
+
+def _cleanup_fixture(root: Path) -> None:
+    """Remove an owned default fixture without letting cleanup run forever.
+
+    Windows scanners or a delayed descendant can keep a just-created fixture
+    open.  The benchmark must fail explicitly in that condition rather than
+    turn a bounded measurement command into an unbounded runner hang.  The
+    cleanup helper lives in a child process so its deadline is enforceable.
+    """
+
+    cleanup_program = (
+        "import os, shutil, stat, sys; "
+        "shutil.rmtree(sys.argv[1], onexc=lambda operation, path, exception: "
+        "(os.chmod(path, stat.S_IREAD | stat.S_IWRITE), operation(path)))"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", cleanup_program, str(root)],
+            cwd=PACKAGE_ROOT,
+            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_FIXTURE_CLEANUP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BenchError(
+            "bounded fixture cleanup timed out; retained fixture requires explicit cleanup: "
+            f"{root}"
+        ) from exc
+    if result.returncode != 0 or root.exists():
+        detail = result.stderr.decode("utf-8", errors="replace")[:512]
+        raise BenchError(
+            "bounded fixture cleanup failed; retained fixture requires explicit cleanup: "
+            f"{root}; {detail}"
+        )
 
 
 def _cli_argv(command: str, root: Path) -> list[str]:
@@ -426,8 +464,11 @@ def main(argv: list[str] | None = None) -> int:
     if len(matches) != 1:
         raise BenchError("exactly one matching command/mode contract is required")
     if args.fixture_root is None:
-        with tempfile.TemporaryDirectory(prefix="promin-command-bench-") as temporary:
-            result = measure_contract(matches[0], root=Path(temporary), requested_mode=args.mode)
+        temporary = Path(tempfile.mkdtemp(prefix="promin-command-bench-"))
+        try:
+            result = measure_contract(matches[0], root=temporary, requested_mode=args.mode)
+        finally:
+            _cleanup_fixture(temporary)
     else:
         result = measure_contract(matches[0], root=args.fixture_root, requested_mode=args.mode)
     result["candidate_binding"] = _candidate_binding(args.candidate_binding)

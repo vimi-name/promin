@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,6 +95,37 @@ def test_runtime_warm_result_is_explicitly_non_acceptance_evidence() -> None:
         "public_release_approved": False,
         "pass_credit": False,
     }
+
+
+def test_default_fixture_cleanup_uses_a_bounded_child_process(tmp_path: Path) -> None:
+    fixture = tmp_path / "owned-fixture"
+    fixture.mkdir()
+    (fixture / "sample.txt").write_text("fixture", encoding="utf-8")
+    bench._cleanup_fixture(fixture)
+    assert not fixture.exists()
+
+
+def test_default_fixture_cleanup_removes_an_owned_read_only_file(tmp_path: Path) -> None:
+    fixture = tmp_path / "read-only-fixture"
+    fixture.mkdir()
+    sample = fixture / "sample.txt"
+    sample.write_text("fixture", encoding="utf-8")
+    sample.chmod(stat.S_IREAD)
+    bench._cleanup_fixture(fixture)
+    assert not fixture.exists()
+
+
+def test_default_fixture_cleanup_fails_closed_when_child_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = tmp_path / "retained-fixture"
+    fixture.mkdir()
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="cleanup", timeout=0.01)
+
+    monkeypatch.setattr(bench.subprocess, "run", timeout)
+    with pytest.raises(bench.BenchError, match="retained fixture requires explicit cleanup"):
+        bench._cleanup_fixture(fixture)
+    assert fixture.exists()
 
 
 def test_current_conformance_has_the_r2_canonical_command_cost_owner() -> None:

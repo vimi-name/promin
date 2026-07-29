@@ -44,15 +44,15 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 121 regular files under 14 declared
+The canonical alpha tree contains exactly 139 regular files under 14 declared
 directories, including the nested `skills/example` directory:
 
 | Location | Regular files |
 |---|---:|
-| package root | 15 |
+| package root | 14 |
 | `.github/` | 1 |
 | `core/` | 6 |
-| `docs/` | 12 |
+| `docs/` | 15 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `presets/` | 1 |
@@ -60,10 +60,10 @@ directories, including the nested `skills/example` directory:
 | `promin/` | 31 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 27 |
+| `tests/` | 34 |
 | `tools/` | 13 |
 
-Root files are exactly `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
+Root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `MACHINE_README.md`, `MANIFEST.json`, `NOTICE`, `pyproject.toml`, `README.md`,
 `SECURITY.md`, `SHA256SUMS.txt`, `THIRD_PARTY_NOTICES.md`, `TRADEMARKS.md`, and
 `VERSION.json`. License, governance, dependency, and notice closure is part of
