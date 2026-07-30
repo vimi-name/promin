@@ -15,10 +15,11 @@
   candidate component remains inspected on each call.
 - Clone repair reuses the doctor-resolved plan privately, avoiding a duplicate
   portable-plan resolution without exposing it in public doctor JSON.
-- Mutation-context reuse retains post-verification bindings, re-stats every
-  bound file and directory, and hashes provider-tree topology on every reuse.
-  New, removed, unreadable, raced, or linked receipt entries therefore discard
-  the cache and require a full byte verification.
+- Mutation-context reuse retains post-verification bindings, re-reads their
+  cryptographic byte digest, re-stats every bound file and directory, and hashes
+  provider-tree topology on every reuse. New, removed, unreadable, raced,
+  linked, or same-size/timestamp-restored byte-modified receipt entries therefore
+  discard the cache and require a full byte verification.
 - Activation path metadata and containment checks no longer repeat an
   equivalent symbolic-link lookup after an `lstat`/`stat(...,
   follow_symlinks=False)` already supplied that evidence.
@@ -40,6 +41,8 @@
 | final package shard | pass | 54 passed, 147 subtests, 329.10 s. |
 | clean staging `verify-tree --install-mode none` | pass | 139-file final inventory is revalidated when the final archive is built. |
 | serial `pytest -q -m "not scale"` before final test-only retry patch | fail then targeted repair | 385 passed, 4 skipped, 1 deselected, 774 subtests; the sole failure was a transient Windows executable-sharing race in the receipt-tamper test. The exact repaired test passed 1/1 in 11.67 s. A new full aggregate rerun was deferred; no aggregate-pass claim is made. |
+| `pytest tests/test_service_mutation_cache.py` after F-HV-01 | pass | 2/2. The regression substitutes a byte, preserves file size, and restores `mtime`; the cache guard changes because it includes the file byte digest. |
+| `pytest tests/test_bootstrap_mutation_verification.py` after F-HV-01 | pass | 1/1 in 39.80 s on a clean local TMP. This is a targeted verification route, not a new aggregate-suite claim. |
 
 ## Claim boundaries
 
@@ -74,5 +77,12 @@
 - A fresh full non-scale aggregate run after the last test-only Windows-race
   repair is pending. The earlier aggregate failure must not receive pass
   credit even though its exact repaired test passes.
+- The new byte-integrity cache guard has not received a fresh command benchmark;
+  performance acceptance and budget pass credit remain false. The external
+  re-audit's 62,163 ms p95 remains an observed host result, not a source claim.
+- `OWNER_DECISION_REQUIRED`: the plan has 10.3% serialized headroom but emits
+  zero diagnostic source samples for the audited repository. Keep the current
+  bounded representation, or define a non-empty source-sampling guarantee
+  without consuming the required headroom.
 - Product, visual, release, and performance acceptance are not claimed by
   this diagnostic/deployable alpha validation wave.

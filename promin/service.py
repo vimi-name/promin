@@ -1191,15 +1191,17 @@ def _fast_implementation_stat_fingerprint(
     *,
     bindings: Sequence[tuple[str, Path, str]] | None = None,
 ) -> str | None:
-    """Return a bounded guard for a fully byte-verified mutation context.
+    """Return a fail-closed guard for a fully byte-verified mutation context.
 
     The first authoritative mutation in each ``ProminService`` instance still
     performs the complete cryptographic verification.  Reuse is allowed only
     while the exact Activation-bound files and directories retain the same
-    filesystem identities.  ``activation_read_bindings`` walks materialized
-    content-addressed provider receipts, so additions, removals, replacements
-    and in-place edits invalidate this guard without rehashing provider bytes
-    for every small semantic command.
+    filesystem identities and bytes.  Filesystem metadata cannot prove that
+    an in-place edit did not preserve size and timestamps, particularly on
+    Windows where ``st_ctime`` is creation time.  The guard therefore includes
+    the cryptographic byte digest of every retained file binding.  The
+    provider-tree topology digest separately witnesses new or removed entries
+    that cannot occur in the retained binding list.
 
     This fingerprint is a cache guard only.  It is never an authority proof and
     a mismatch always falls back to the full fail-closed verification path.
@@ -1213,12 +1215,14 @@ def _fast_implementation_stat_fingerprint(
             else tuple(bindings)
         )
         metadata = activation_read_fingerprint(context, selected)
+        content = activation_byte_digest(context, selected)
         topology = _provider_receipt_topology_digest(context)
         if topology is None:
             return None
         return digest_value(
             {
                 "activation_read_metadata": metadata,
+                "activation_read_content": content,
                 "provider_receipt_topology": topology,
             }
         )
@@ -1229,17 +1233,18 @@ def _fast_implementation_stat_fingerprint(
 def _mutation_cache_bindings(
     context: ActivationContext,
 ) -> tuple[tuple[str, Path, str], ...]:
-    """Compile the metadata guard for reuse of one byte-verified context.
+    """Compile the retained bindings for a fail-closed mutation cache guard.
 
     ``activation_read_bindings`` is deliberately exhaustive and expensive: it
     re-discovers every provider receipt before a full byte verification.  Once
     that verification has succeeded, the service may retain its exact file
-    list, but it must still notice receipt-tree topology changes.  Directory
-    witnesses cover replacement and removal; a separate per-reuse topology
-    digest enumerates entry names and types so a new receipt cannot hide behind
-    a coalesced Windows directory timestamp.  The original bindings cover
-    every already-known file and runtime directory.  Any guard mismatch rejects
-    reuse and sends the next command through ``verify_before_mutation`` again.
+    list, but it must still re-digest its bytes and notice receipt-tree topology
+    changes. Directory witnesses cover replacement and removal; a separate
+    per-reuse topology digest enumerates entry names and types so a new receipt
+    cannot hide behind a coalesced Windows directory timestamp. The original
+    bindings cover every already-known file and runtime directory. Any guard
+    mismatch rejects reuse and sends the next command through
+    ``verify_before_mutation`` again.
     """
 
     selected = list(activation_read_bindings(context))
