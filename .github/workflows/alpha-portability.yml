@@ -1,12 +1,17 @@
 name: alpha-portability
 
+# Alpha.3 has a Windows-verified deployment scope. Ubuntu and macOS jobs below
+# are non-normative declared compatibility signals: a green run is not
+# installability, deployment, acceptance, or pass-credit evidence until its
+# host-specific artifacts are independently presented.
+
 on:
   push:
     branches: [alpha, beta, main]
   pull_request:
 
 jobs:
-  focused:
+  non-normative-portability-regression:
     strategy:
       fail-fast: false
       matrix:
@@ -21,26 +26,33 @@ jobs:
           cache: pip
       - name: Install
         run: python -m pip install -e ".[test]"
-      - name: Reconciliation architecture guards
+      - name: Non-normative portability regression guards
         env:
           PROMIN_NO_TELEMETRY: '1'
         run: python -m pytest -q tests/test_alpha3_reconciliation_static.py tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_aliased_temp_tree.py tests/test_alpha3_reconciliation_performance.py tests/test_alpha3_reconciliation_package.py
-      - name: Opus 5 closure regression suite
+      - name: Non-normative portability closure regression
         env:
           PROMIN_NO_TELEMETRY: '1'
         run: python -m pytest -q tests/test_alpha3_opus_closure.py
-      - name: Focused non-scale corpus
+      - name: Non-normative portability non-scale corpus
         env:
           PROMIN_NO_TELEMETRY: '1'
         run: python -m pytest -q -m "not scale"
 
   windows-aliased-paths:
+    # Windows is the current verified alpha.3 deployment scope. This CI route
+    # remains regression evidence; deployment/installability credit still
+    # requires a separately preserved and reviewed artifact.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14']
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - name: Install exactly through a README-style venv
         shell: pwsh
         run: |
@@ -95,6 +107,8 @@ jobs:
           & $env:PROMIN_TEST_EXE --root $project validate
 
   macos-aliased-paths:
+    # Non-normative declared compatibility lane. It must not be read as macOS
+    # deployment, installability, acceptance, or pass-credit evidence.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

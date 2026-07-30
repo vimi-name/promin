@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -61,6 +64,55 @@ def _short_83_spelling(path: Path) -> Path | None:
         return None
     candidate = Path(buffer.value)
     return candidate if str(candidate) != str(path) else None
+
+
+def _non_c_fixed_volume() -> Path | None:
+    """Return a writable local Windows volume other than C:, when one exists.
+
+    A non-C route must be executed on a real volume.  Substituting a C: directory
+    would turn this into a spelling-only test and would not cover the host-bound
+    provider, staging, and SQLite paths that receive a different drive prefix.
+    """
+
+    import ctypes
+
+    override = os.environ.get("PROMIN_TEST_NON_C_ROOT")
+    if override:
+        selected = Path(override).resolve(strict=True)
+        if selected.drive.casefold() == "c:":
+            raise AssertionError("PROMIN_TEST_NON_C_ROOT must not be on C:")
+        return selected
+
+    drive_mask = ctypes.windll.kernel32.GetLogicalDrives()
+    drive_fixed = 3
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZAB":
+        root = Path(f"{letter}:\\")
+        if not drive_mask & (1 << (ord(letter) - ord("A"))):
+            continue
+        if ctypes.windll.kernel32.GetDriveTypeW(str(root)) == drive_fixed:
+            return root
+    return None
+
+
+def _remove_owned_fixture_path(operation: object, path: str, _error: object) -> None:
+    """Permit teardown of Promin's deliberately read-only provider receipts."""
+
+    os.chmod(path, stat.S_IWRITE)
+    operation(path)  # type: ignore[operator]
+
+
+@pytest.fixture
+def non_c_non_ascii_root() -> Path:
+    """Create an owned non-ASCII project root on a real non-C: volume."""
+
+    volume = _non_c_fixed_volume()
+    if volume is None:
+        pytest.skip("requires a writable fixed Windows volume other than C:")
+    base = Path(tempfile.mkdtemp(prefix="promin-київ-", dir=str(volume)))
+    try:
+        yield base / "проєкт-Львів"
+    finally:
+        shutil.rmtree(filesystem_path(base), onexc=_remove_owned_fixture_path)
 
 
 @pytest.fixture(scope="session")
@@ -174,3 +226,31 @@ def test_windows_alias_83_deep_root_public_init_route(
     assert default_store.is_dir()
     assert any(path.is_file() for path in default_store.rglob("*"))
     assert isinstance(runtime.used_short_83_spelling, bool)
+
+
+def test_windows_non_c_non_ascii_root_public_init_route(
+    non_c_non_ascii_root: Path, windows_cli_runtime: WindowsCliRuntime
+) -> None:
+    """Exercise init and validation on a real non-C:, non-ASCII project root."""
+
+    runtime = windows_cli_runtime
+    assert non_c_non_ascii_root.drive.casefold() != "c:"
+    assert any(ord(character) > 127 for character in str(non_c_non_ascii_root))
+    # The separate route above owns the MAX_PATH boundary.  Keep this fixture
+    # focused on the independent non-C: and Unicode dimensions, so a failure
+    # identifies the affected Windows variability rather than a combined path
+    # length limit.
+    root = non_c_non_ascii_root
+    root.mkdir()
+
+    initialized = _run_cli(runtime, root, "init", "--goal", "Windows non-C Unicode route", "--yes")
+    assert initialized.get("record_type") in {"InitializationResult", "InitResult"}
+    assert (root / ".promin").is_dir()
+    assert _run_cli(runtime, root, "doctor", "--checklist").get("status") == "pass"
+    assert _run_cli(runtime, root, "validate").get("status") == "pass"
+
+    # ``LOCALAPPDATA`` is redirected in the subprocess fixture.  Its physical
+    # target, rather than the user's actual profile cache, must contain receipts.
+    redirected_store = runtime.physical_cache / "promin" / "provider-store-v1"
+    assert redirected_store.is_dir()
+    assert any(path.is_file() for path in redirected_store.rglob("*"))

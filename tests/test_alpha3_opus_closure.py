@@ -257,7 +257,7 @@ def test_latency_contracts_are_canonical() -> None:
     assert any(record["command"] == "init review" and record["budget_ms"] <= 5000 for record in records)
 
 
-def test_host_python_materialization_uses_base_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_python_binding_uses_installed_base_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import promin.experience as experience
     import hashlib
 
@@ -267,15 +267,14 @@ def test_host_python_materialization_uses_base_executable(tmp_path: Path, monkey
     venv.write_bytes(b"venv-launcher-needs-pyvenv")
     monkeypatch.setattr(experience.sys, "_base_executable", str(base), raising=False)
     monkeypatch.setattr(experience.sys, "executable", str(venv))
-    monkeypatch.setenv("PROMIN_PROVIDER_STORE", str(tmp_path / "shared-store"))
     project = tmp_path / "project"
     project.mkdir()
-    source_value, materialized = experience._materialize_host_python(project)
-    assert source_value == str(materialized)
-    assert materialized.read_bytes() == base.read_bytes()
-    assert materialized.read_bytes() != venv.read_bytes()
-    assert not materialized.is_relative_to(project)
-    assert hashlib.sha256(materialized.read_bytes()).hexdigest() == hashlib.sha256(base.read_bytes()).hexdigest()
+    source_value, bound = experience._materialize_host_python(project)
+    assert source_value == str(base)
+    assert bound == base
+    assert bound.read_bytes() != venv.read_bytes()
+    assert not bound.is_relative_to(project)
+    assert hashlib.sha256(bound.read_bytes()).hexdigest() == hashlib.sha256(base.read_bytes()).hexdigest()
 
 
 def test_provider_receipt_path_is_bounded_for_deep_windows_root(tmp_path: Path) -> None:

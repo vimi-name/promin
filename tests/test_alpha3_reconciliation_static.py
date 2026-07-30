@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,6 +71,44 @@ def test_portability_workflow_targets_split_reconciliation_lanes() -> None:
     ):
         assert lane in workflow
     assert "test_alpha3_reconciliation.py" not in workflow
+    assert "python: ['3.12', '3.13', '3.14']" in workflow
+
+
+def test_repository_checkout_policy_preserves_text_payload_lf() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "* text=auto eol=lf" in attributes
+    assert "human/*.pdf binary" in attributes
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "check-attr",
+            "text",
+            "eol",
+            "--",
+            "promin/init.py",
+            "MANIFEST.json",
+            "README.md",
+            "human/promin_main_ua.pdf",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    attributes_by_path: dict[str, dict[str, str]] = {}
+    for line in result.stdout.splitlines():
+        path, attribute, value = line.split(": ", maxsplit=2)
+        attributes_by_path.setdefault(path, {})[attribute] = value
+
+    for path in ("promin/init.py", "MANIFEST.json", "README.md"):
+        assert attributes_by_path[path] == {"text": "auto", "eol": "lf"}
+    assert attributes_by_path["human/promin_main_ua.pdf"] == {
+        "text": "unset",
+        "eol": "unset",
+    }
 
 
 def test_command_latency_contract_has_one_canonical_measured_shape() -> None:

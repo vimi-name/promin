@@ -1,1 +1,5 @@
-human/*.pdf binary
+# Canonical checkout encoding: source payloads retain LF regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Generated human-facing artifacts remain byte payloads.
+human/*.pdf binary -eol

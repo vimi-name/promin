@@ -42,6 +42,7 @@ from promin_validate import (  # noqa: E402
     GENERATED_SURFACES,
     ValidationFailure,
     _create_clean_venv,
+    _observe_installed_environment,
     _pip_install_arguments,
     _run_capture_with_deadline,
     canonical_bytes,
@@ -1242,6 +1243,29 @@ class PackageValidationTests(unittest.TestCase):
                     install_mode=mode,
                     wheelhouse=wheelhouse,
                 )
+
+    def test_installed_observation_reads_version_from_canonical_source_root(self) -> None:
+        """The isolated installation cwd intentionally has no canonical source tree."""
+
+        observation = {"promin": {"version": "1.0.0-alpha.3"}}
+        with mock.patch(
+            "promin_validate._run_capture_with_deadline",
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(observation), ""),
+        ), mock.patch(
+            "promin_validate._canonical_standard_version",
+            return_value="1.0.0-alpha.3",
+        ) as canonical_version:
+            result = _observe_installed_environment(
+                python=self.base / "venv" / "python.exe",
+                executable=self.base / "venv" / "promin.exe",
+                cwd=self.base / "isolated-install-cwd",
+                canonical_root=self.root,
+                environment={},
+                pip_report_paths=(),
+            )
+
+        self.assertEqual(result["observation"], observation)
+        canonical_version.assert_called_once_with(self.root)
 
     def test_archive_traversal_is_rejected(self) -> None:
         archive_path = self.base / "traversal.zip"

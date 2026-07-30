@@ -1,4 +1,11 @@
-# Переносимість Windows / macOS / Linux
+# Переносимість: Windows verified; Linux/macOS declared, static-only
+
+Поточний верифікований deployment scope alpha.3 — Windows. Linux і macOS
+лишаються задекларованими portable targets у коді та CI, але для них немає
+пред'явлених runtime, installability або deployment evidence. Тому жодне
+твердження нижче про Linux/macOS не має acceptance або pass credit до окремої
+перевірки на відповідному host. Windows-only scope є явним неблокуючим
+звуженням доказу alpha.3.
 
 Canonical state містить portable relative paths, UTF-8/NFC identifiers, Core і
 profile digests, intent, Tasks, Findings, Decisions, events та evidence
@@ -8,13 +15,15 @@ Host-local derived state містить executable/SDK paths, shell і filesyste
 adapter, locks, caches, SQLite projection, telemetry та installed local skills.
 Він не є source of truth і не комітиться.
 
-Після копіювання папки на інший host:
+Після копіювання папки на інший host очікуваний portable flow:
 
 ```text
 promin doctor --repair
 ```
 
-Doctor повинен:
+На Windows цей маршрут має runtime evidence. Для Linux/macOS нижче наведено
+задекларовану статичну поведінку, яку ще не можна подавати як operational
+verification. Doctor має:
 
 1. виявити зміну host;
 2. перевірити casefold, Unicode, reserved names, EOL і path conflicts;

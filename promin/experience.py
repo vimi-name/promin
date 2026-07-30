@@ -40,7 +40,6 @@ from .platform_paths import (
     resolved_temporary_directory,
     windows_extended_path,
 )
-from .provider_store import ensure_blob
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .skills import discover_skills
 from .telemetry import heartbeat, record_observation, utc_now
@@ -887,18 +886,19 @@ def _license(expression: str, uri: str) -> dict[str, Any]:
 
 
 def _materialize_host_python(project_root: Path) -> tuple[str, Path]:
-    """Bind the real base interpreter through the shared verified store.
+    """Bind the real base interpreter from its installed runtime location.
 
     A venv launcher is not relocatable on Windows, so ``sys._base_executable``
-    is preferred. The shared blob is host-local derived state; the project keeps
-    only one isolated content-addressed receipt created by Core initialization.
+    is preferred.  A CPython executable alone is not a relocatable runtime
+    either: the installed executable may require its adjacent versioned DLL.
+    Core records a content-addressed project receipt for integrity, while a
+    Windows receipt healthcheck may fall back to this independently verified
+    installed source when that isolated executable cannot load its DLLs.
     """
 
-    del project_root  # the shared source is intentionally not project-relative
+    del project_root  # the installed source is intentionally not project-relative
     source = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve(strict=True)
-    source_digest = digest_file(source)
-    blob = ensure_blob(source, source_digest)
-    return str(blob), blob
+    return str(source), source
 
 
 def _provider_bindings(project_root: Path) -> list[dict[str, Any]]:

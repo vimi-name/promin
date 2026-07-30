@@ -11,7 +11,9 @@
   `subprocess`.
 - Provider records, receipts, healthchecks та порівняння зберігають звичайну
   canonical identity.
-- Shared provider-store root фізично резолвиться в Windows, macOS і Linux.
+- Shared provider-store root фізично резолвиться на верифікованому Windows
+  маршруті; Linux/macOS branches задекларовані статично, але не мають runtime
+  або deployment pass credit.
 - Конкурентні `_provider_path`, `_configured_provider_path` та
   `abspath`-normalization видалені.
 
@@ -40,14 +42,19 @@ samples створюють нові процеси, а warm samples повтор
 
 ## Portability evidence
 
-CI має окремі static, path, Windows integration, performance та package lanes.
-Windows lane використовує одну session-scoped install fixture, 8.3/alias
-TEMP і cache roots та deep project root. Несподіваний skip є помилкою, а не
+Поточний верифікований deployment scope — Windows; Windows-only scope є
+неблокуючим звуженням доказу alpha.3. CI має окремі static, path, Windows
+integration, performance та package lanes. Ubuntu/macOS portability jobs є
+non-normative declared compatibility lanes: без окремо пред'явлених артефактів
+вони не доводять Linux/macOS installability, deployment або acceptance.
+Windows lane використовує одну session-scoped install fixture, 8.3/alias TEMP
+і cache roots та deep project root. Несподіваний skip є помилкою, а не
 кредитом.
 
 ## Межа доказу
 
 Локальний пакет доводить лише зафіксовані локальні маршрути. Фізичні 100k,
 A/B і repeated saturation залишаються `alpha_deferred` без pass credit.
-Незалежне Windows/macOS виконання, branch integration та cross-host re-audit
-мають бути виконані окремо.
+Незалежне Linux/macOS виконання, branch integration та cross-host re-audit
+мають бути виконані окремо; до того Linux/macOS лишаються declared,
+static-only targets без pass credit.

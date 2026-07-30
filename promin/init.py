@@ -3913,6 +3913,12 @@ def verify_provider_preflight(
             and receipt_root is not None
         ):
             try:
+                # A receipt is a byte-exact integrity artifact, not proof that
+                # an executable can be relocated without its installed DLL
+                # neighbourhood.  The Windows fallback therefore first proves
+                # every original provider identity again; it never turns a
+                # receipt failure into success from an unchecked host binary.
+                verify_provider_identities(dispatch_input, project_root)
                 source_dispatch = resolve_provider_dispatch(
                     dispatch_input,
                     project_root,

@@ -2073,6 +2073,7 @@ def _observe_installed_environment(
     python: Path,
     executable: Path,
     cwd: Path,
+    canonical_root: Path,
     environment: dict[str, str],
     pip_report_paths: tuple[tuple[str, Path], ...],
     deadline_monotonic: float | None = None,
@@ -2092,7 +2093,11 @@ def _observe_installed_environment(
         value = json.loads(observed.stdout)
     except json.JSONDecodeError as exc:
         raise ValidationFailure("nested installed-environment observation returned non-JSON output") from exc
-    if not isinstance(value, dict) or value.get("promin", {}).get("version") != _canonical_standard_version(cwd):
+    if (
+        not isinstance(value, dict)
+        or value.get("promin", {}).get("version")
+        != _canonical_standard_version(canonical_root)
+    ):
         raise ValidationFailure("nested installed-environment observation is incomplete")
     report_rows: list[dict[str, Any]] = []
     seen_roles: set[str] = set()
@@ -2472,6 +2477,7 @@ def create_clean_installed_environment(
         python=python,
         executable=executable,
         cwd=destination,
+        canonical_root=source,
         environment=environment,
         pip_report_paths=(
             ("build-requirements", build_report_path),
