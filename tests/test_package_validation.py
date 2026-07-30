@@ -263,7 +263,7 @@ class PackageValidationTests(unittest.TestCase):
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
         self.assertTrue(result["closure"])
-        self.assertEqual(result["inventory"]["files"], 139)
+        self.assertEqual(result["inventory"]["files"], 135)
         self.assertEqual(result["inventory"]["directories"], 14)
         manifest = json.loads((self.root / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["builder"], "tools/promin_package.py")
@@ -272,7 +272,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_integrity(self.root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 139)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 135)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 14)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(

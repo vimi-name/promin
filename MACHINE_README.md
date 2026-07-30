@@ -44,7 +44,7 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 139 regular files under 14 declared
+The canonical alpha tree contains exactly 135 regular files under 14 declared
 directories, including the nested `skills/example` directory:
 
 | Location | Regular files |
@@ -52,7 +52,7 @@ directories, including the nested `skills/example` directory:
 | package root | 14 |
 | `.github/` | 1 |
 | `core/` | 6 |
-| `docs/` | 15 |
+| `docs/` | 11 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `presets/` | 1 |

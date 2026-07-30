@@ -28,7 +28,7 @@
     },
     {
       "path": "MACHINE_README.md",
-      "sha256": "15052213ca16404a894fb8420a536be25807f90edaf1f2741f0bf3181c463e4b",
+      "sha256": "53e018fbbf2ddc3da1cd37784069f0dbc6a771326e55592800b8da617888d328",
       "size": 33678
     },
     {
@@ -38,8 +38,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "d15806fffa74d9820c21dfeb54d9641f11b26eca9d5781727fd12a8fdcc66ffd",
-      "size": 33032
+      "sha256": "320e1103acc32a26e78f0f1cad1933fca9e44700876638241c398d219725c46e",
+      "size": 33000
     },
     {
       "path": "SECURITY.md",
@@ -90,26 +90,6 @@
       "path": "core/semantic-model.json",
       "sha256": "1f5af8d8ce12e99aa9964f03396d945c6781fba234afd4fb01ad3d9044aa6fea",
       "size": 34672
-    },
-    {
-      "path": "docs/ALPHA3_OPUS5_FIXES_UA.md",
-      "sha256": "c91f880ed0acec785947c2446d792b3d0122fe834da4795c3af2cb9bc9aaec3b",
-      "size": 4010
-    },
-    {
-      "path": "docs/ALPHA3_R2_B1_B3_WAVE_UA.md",
-      "sha256": "05b83ab207b71fda38eb639424f52f5af123b28981bbcc44b4452219012103e2",
-      "size": 2912
-    },
-    {
-      "path": "docs/ALPHA3_R2_HEADROOM_WAVE_UA.md",
-      "sha256": "472897b1401fd1519fa1744a5ce4a7eca4daeef93126f93cf842d0d58237c00a",
-      "size": 2026
-    },
-    {
-      "path": "docs/ALPHA3_R2_HEAVY_VALIDATION_WAVE_UA.md",
-      "sha256": "ca2b397d06e967e654b66ef7b8288caf47bf8b76385524de43d1982df3ba0317",
-      "size": 7348
     },
     {
       "path": "docs/ALPHA_SCOPE_UA.md",
@@ -593,7 +573,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "ccd99f171c8a933266ebf31422dc3b80e62aa1a28339e8ce4a2f922e190b1284",
+      "sha256": "91be244e88b7c8dd10d1334ae45a7f37496c36c7c91000865b3b14678027ef02",
       "size": 59700
     },
     {
@@ -613,7 +593,7 @@
     },
     {
       "path": "tests/test_service_cli.py",
-      "sha256": "01d1a919cd766c77565ab11996762db3ec2ce810f4529a050ebdb132e562b3fe",
+      "sha256": "3732e8565310dca14e4f4503b21a8d235282a6876f99b67a54b44436e765ccfa",
       "size": 85191
     },
     {
@@ -683,8 +663,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "cbec92095756ed8a702ab16d4e051c6580405744b1c55ab9f3e35bbaaf3d651f",
-      "size": 135633
+      "sha256": "cd13b86405ecc13dd7148648d815007e6c96142cfc304227aabf90bb03ece27b",
+      "size": 135449
     }
   ],
   "generated_surfaces": [

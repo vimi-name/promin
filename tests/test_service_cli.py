@@ -163,7 +163,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         "package root": 14,
         ".github/": 1,
         "core/": 6,
-        "docs/": 15,
+        "docs/": 11,
         "examples/": 1,
         "human/": 4,
         "presets/": 1,
@@ -177,7 +177,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 137
+    assert len(manifest["files"]) == 133
     actual_counts = {key: 0 for key in expected_counts}
     actual_counts["package root"] = 2  # MANIFEST.json and SHA256SUMS.txt
     for item in manifest["files"]:
@@ -185,7 +185,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         location = path.split("/", 1)[0] + "/" if "/" in path else "package root"
         actual_counts[location] += 1
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 139
+    assert sum(expected_counts.values()) == 135
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:

@@ -12,9 +12,9 @@ configurable.
 
 > **Humans define meaning. Agents clarify and implement.**
 
-`1.0.0-alpha.3` implements general fixes for the Windows/init, portability, detection,
-read-only, self-check, and cost defects found by the independent Opus 5 stress review. See
-`docs/ALPHA3_OPUS5_FIXES_UA.md` for the exact boundaries and remaining alpha-deferred evidence.
+`1.0.0-alpha.3` provides the current portable standard surface for Windows/init,
+portability, detection, read-only operation, self-check, and bounded cost controls.
+Its scope and deferred capabilities are defined in `docs/ALPHA_SCOPE_UA.md`.
 
 ## Installation
 
@@ -96,7 +96,7 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 139 regular files under 14 declared
+The canonical alpha tree contains exactly 135 regular files under 14 declared
 directories, including the nested `skills/example` package. `MANIFEST.json`
 enumerates all payload files; `SHA256SUMS.txt` closes those payloads together
 with the manifest.
@@ -106,7 +106,7 @@ with the manifest.
 | package root | 14 |
 | `.github/` | 1 |
 | `core/` | 6 |
-| `docs/` | 15 |
+| `docs/` | 11 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `presets/` | 1 |

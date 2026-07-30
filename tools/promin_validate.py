@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 139
+CANONICAL_PACKAGE_FILE_COUNT = 135
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -102,10 +102,6 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'core/policy-set.json',
         'core/promin.manifest.json',
         'core/semantic-model.json',
-        'docs/ALPHA3_OPUS5_FIXES_UA.md',
-        'docs/ALPHA3_R2_B1_B3_WAVE_UA.md',
-        'docs/ALPHA3_R2_HEADROOM_WAVE_UA.md',
-        'docs/ALPHA3_R2_HEAVY_VALIDATION_WAVE_UA.md',
         'docs/ALPHA_SCOPE_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
         'docs/MODEL_ROUTING_UA.md',
