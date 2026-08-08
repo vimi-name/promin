@@ -42,12 +42,12 @@ from .platform_paths import (
 )
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .skills import discover_skills
-from .telemetry import heartbeat, record_observation, utc_now
+from .telemetry import heartbeat, record_observation
 from .workspace import discover_workspace_map
 
 PACKAGE_ROOT = bundle_root()
 PROFILE_ROOT = PACKAGE_ROOT / "profiles"
-DEFAULT_PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+DEFAULT_PRESET = PACKAGE_ROOT / "presets" / "semantic-standard.json"
 
 _PREFLIGHT_MAX_FILES = PREFLIGHT_FILE_ITEMS_MAX
 _PREFLIGHT_MAX_BYTES = 2 * 1024 * 1024
@@ -566,9 +566,9 @@ def _resolve_profiles(
     if tech & {"windows-native", "visual-studio", "dotnet"}:
         add("windows-development", "Windows project toolchain facts detected", 0.9)
     if tech & {"cpp", "cmake"} and not ({"web-application", "android-application"} & set(layers)):
-        add("morok-tower-studio", "C++/CMake project matches studio baseline", 0.8)
+        add("c-family-development", "C++/CMake project matches studio baseline", 0.8)
     if len(layers) == 1:
-        add("morok-tower-studio", "fallback when repository evidence is insufficient", 0.55)
+        add("c-family-development", "fallback when repository evidence is insufficient", 0.55)
     if signals:
         add("vibe-recovery", "repository complexity/duplication signals detected", 0.65)
     for profile_id in explicit:
@@ -604,19 +604,19 @@ def _default_goal(root: Path, mode: str, technologies: Sequence[Mapping[str, Any
 
 def _operation_profiles(mode: str, layers: Sequence[str]) -> list[dict[str, Any]]:
     operations = [
-        ("repository-preflight", "tool-only", "metadata inspection"),
-        ("exact-search", "tool-only", "exact retrieval"),
-        ("file-classification", "micro", "file classification"),
-        ("plan-refinement", "standard", "project planning"),
-        ("implementation", "standard", "coding and tests"),
-        ("semantic-deduplication", "strong", "source-of-truth analysis"),
-        ("security-review", "strong", "high-consequence review"),
-        ("release-or-destructive-decision", "critical-review", "human authority required"),
+        ("repository-preflight", "tool-only", "metadata"),
+        ("exact-search", "tool-only", "exact"),
+        ("file-classification", "micro", "classification"),
+        ("plan-refinement", "standard", "planning"),
+        ("implementation", "standard", "implementation"),
+        ("semantic-deduplication", "strong", "deduplication"),
+        ("security-review", "strong", "risk review"),
+        ("release-or-destructive-decision", "critical-review", "owner decision"),
     ]
     if mode == "greenfield":
         operations.insert(3, ("architecture-skeleton", "strong", "architecture and invariants"))
     if "vibe-recovery" in layers:
-        operations.append(("concurrent-change-reconciliation", "strong", "stale-base reconciliation"))
+        operations.append(("concurrent-change-reconciliation", "strong", "reconcile"))
     return [
         {"operation": operation, "model_tier": tier, "reason": reason}
         for operation, tier, reason in operations
@@ -663,14 +663,15 @@ def resolve_plan(
     language: str | None = None,
     explicit_profiles: Sequence[str] = (),
     brief: Mapping[str, Any] | None = None,
+    init_capability_selection: Mapping[str, Any] | None = None,
     max_preflight_files: int = _PREFLIGHT_MAX_FILES,
 ) -> dict[str, Any]:
     root = Path(project_root).resolve()
     normalized_brief = _normalize_brief(brief)
-    selected_autonomy = autonomy or normalized_brief.get("autonomy") or "safe-auto"
+    selected_autonomy = autonomy or normalized_brief.get("autonomy") or "ask"
     selected_language_request = language or normalized_brief.get("language") or "auto"
-    if selected_autonomy not in {"ask", "safe-auto", "unsafe-auto"}:
-        raise ExperienceError("autonomy must be ask, safe-auto, or unsafe-auto")
+    if selected_autonomy not in {"ask", "standing-reversible"}:
+        raise ExperienceError("autonomy must be ask or standing-reversible")
     if selected_language_request not in {"auto", "uk", "en"}:
         raise ExperienceError("language must be auto, uk, or en")
     preflight = bounded_preflight(root, max_files=max_preflight_files)
@@ -697,7 +698,7 @@ def resolve_plan(
             "operation_id": "initialize-control-layer",
             "kind": "control",
             "hidden_full_scan": False,
-            "requires_confirmation": selected_autonomy != "unsafe-auto",
+            "requires_confirmation": True,
         }
     ]
     if mode in {"existing-code", "hybrid"}:
@@ -764,8 +765,8 @@ def resolve_plan(
         "available_skills": discover_skills(root),
         "material_permissions": {
             "read_and_analyze": "automatic",
-            "local_tests": "automatic" if selected_autonomy != "ask" else "confirm",
-            "repository_mutation": "automatic-within-grant" if selected_autonomy != "ask" else "confirm",
+            "local_tests": "automatic-within-current-grant" if selected_autonomy == "standing-reversible" else "confirm",
+            "repository_mutation": "automatic-within-current-grant" if selected_autonomy == "standing-reversible" else "confirm",
             "destructive_operations": "human-decision",
             "public_release": "human-decision",
             "network_or_remote_install": "explicit-source-policy",
@@ -788,6 +789,17 @@ def resolve_plan(
         "question_count_before_plan": 0,
         "manual_digest_operations": 0,
         "user_authored_config_files_required": 0,
+        "init_capability_selection": (
+            dict(init_capability_selection)
+            if init_capability_selection is not None
+            else {
+                "status": "PENDING_OWNER_SELECTION",
+                "selection_source": "default",
+                "authority_granted": False,
+                "pass_credit": False,
+                "acceptance_pass": False,
+            }
+        ),
         "authority": False,
         "pass_credit": False,
     }
@@ -877,6 +889,22 @@ def _fit_resolved_plan_budget(plan_identity: dict[str, Any]) -> dict[str, Any]:
     _validate_resolved_plan(fitted)
     return fitted
 
+
+def bind_init_capability_selection(
+    plan: Mapping[str, Any], selection: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind a compact, non-authoritative capability selection to one plan.
+
+    The input is re-digested and re-budgeted rather than mutated in place so a
+    caller cannot attach an unbound profile choice after planning.  This does
+    not probe or execute a host tool.
+    """
+
+    _validate_resolved_plan(plan)
+    identity = {key: value for key, value in plan.items() if key != "plan_digest"}
+    identity["init_capability_selection"] = dict(selection)
+    return _fit_resolved_plan_budget(identity)
+
 def _license(expression: str, uri: str) -> dict[str, Any]:
     return {
         "expression": expression,
@@ -954,7 +982,7 @@ def _root_capability_ceiling(autonomy: str) -> list[str]:
         "projection.rebuild",
         "finding.record",
     }
-    if autonomy in {"safe-auto", "unsafe-auto"}:
+    if autonomy == "standing-reversible":
         common |= {
             "task.execute",
             "lease.manage",
@@ -962,8 +990,6 @@ def _root_capability_ceiling(autonomy: str) -> list[str]:
             "validation.evaluate",
             "finding.resolve",
         }
-    if autonomy == "unsafe-auto":
-        common |= {"export.create"}
     return sorted(common)
 
 
@@ -974,6 +1000,7 @@ def _resolved_profile_record(plan: Mapping[str, Any]) -> dict[str, Any]:
         "detected_technologies": [dict(item) for item in plan["detected_technologies"]],
         "operation_profiles": [dict(item) for item in plan["operation_profiles"]],
         "resolution": [dict(item) for item in plan["profile_resolution"]],
+        "init_capability_selection": dict(plan["init_capability_selection"]),
         "authority_effect": "none",
     }
     return {**identity, "profile_digest": digest_value(identity)}
@@ -1008,8 +1035,8 @@ def compile_core_plans(plan: Mapping[str, Any], project_root: Path) -> dict[str,
             "product_identity_excludes_control_state": True,
             "snapshot_consistency": "observational-best-effort",
         },
-        "preset_id": "semantic-morok-tower",
-        "operating_profile": "morok-local",
+        "preset_id": "semantic-standard",
+        "operating_profile": "baseline",
         "intent": {
             "project_mode": plan["project_mode"],
             "goal": plan["goal"],
@@ -1145,56 +1172,7 @@ def _config_documents(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def _plan_proposal(plan: Mapping[str, Any]) -> dict[str, Any]:
-    mode = str(plan["project_mode"])
-    if mode == "greenfield":
-        tasks = [
-            ("baseline", "Build a specification baseline from the goal, references, and constraints.", "read"),
-            ("architecture", "Propose the smallest architecture that satisfies the success criteria.", "read"),
-            ("skeleton", "Create the first bounded project skeleton after approval.", "mutate"),
-            ("vertical-slice", "Implement and validate one end-to-end vertical slice.", "mutate"),
-        ]
-    else:
-        tasks = [
-            ("inventory", "Build one explicit product inventory and Candidate.", "read"),
-            ("semantic-map", "Build a bounded semantic map and source-of-truth inventory.", "read"),
-            ("audit", "Audit duplicates, monoliths, security boundaries, and missing tests.", "read"),
-            ("prioritize", "Create an evidence-ranked repair and development plan.", "read"),
-        ]
-    items = []
-    previous: str | None = None
-    for index, (suffix, title, operation) in enumerate(tasks, start=1):
-        task_id = f"proposal:{plan['project_id']}:{index:02d}-{suffix}"
-        items.append(
-            {
-                "task_id": task_id,
-                "title": title,
-                "operation": operation,
-                "depends_on": [] if previous is None else [previous],
-                "acceptance_predicate": "Result is evidence-backed, bounded, and does not claim product acceptance.",
-                "allowed_paths": ["**"] if operation == "read" else ["src/**", "tests/**", "docs/**"],
-                "source_bindings": [plan["plan_digest"]],
-                "authority": False,
-                "pass_credit": False,
-            }
-        )
-        previous = task_id
-    identity = {
-        "record_type": "PlanProposal",
-        "proposal_id": "plan:" + str(plan["plan_digest"])[:24],
-        "project_id": plan["project_id"],
-        "project_mode": plan["project_mode"],
-        "goal": plan["goal"],
-        "source_plan_digest": plan["plan_digest"],
-        "created_at": utc_now(),
-        "tasks": items,
-        "authority": False,
-        "pass_credit": False,
-    }
-    return {**identity, "proposal_digest": digest_value(identity)}
-
-
-def _write_alpha_state(project_root: Path, plan: Mapping[str, Any]) -> None:
+def _write_guided_state(project_root: Path, plan: Mapping[str, Any]) -> None:
     config_root = project_root / ".promin" / "generated" / "config-view"
     documents = _config_documents(plan)
     for name, value in documents.items():
@@ -1210,11 +1188,7 @@ def _write_alpha_state(project_root: Path, plan: Mapping[str, Any]) -> None:
     }
     _write_json(config_root / "config.lock.json", {**lock_identity, "lock_digest": digest_value(lock_identity)})
     generated = project_root / ".promin" / "generated"
-    proposal = _plan_proposal(plan)
-    bundle = load_contract_bundle(PACKAGE_ROOT, DEFAULT_PRESET)
-    validate_definition(bundle.schema, "PlanProposal", proposal)
     _write_json(generated / "resolved-plan.json", dict(plan))
-    _write_json(generated / "plan-proposal.json", proposal)
     host_identity_base = {
         "record_type": "HostBinding",
         "system": {"windows": "windows", "darwin": "darwin", "linux": "linux"}.get(platform.system().casefold(), "other"),
@@ -1235,15 +1209,16 @@ def _write_alpha_state(project_root: Path, plan: Mapping[str, Any]) -> None:
 def _cleanup_partial_control_state(project_root: Path) -> None:
     """Remove non-authoritative residue from an incomplete first init.
 
-    Portable team files are preserved so a cloned repository can still be
-    rehydrated. No failed initialization may poison the next attempt.
+    The bounded tracked documentation shell is preserved so a cloned
+    repository can still be initialized. No failed initialization may poison
+    the next attempt.
     """
 
     control = project_root / ".promin"
     if not os.path.isdir(filesystem_path(control)) or os.path.islink(filesystem_path(control)):
         return
     for child in tuple(Path(filesystem_path(control)).iterdir()):
-        if child.name in {"portable", ".gitignore"}:
+        if child.name in {"docs", ".gitignore"}:
             continue
         if os.path.isdir(filesystem_path(child)) and not os.path.islink(filesystem_path(child)):
             _remove_owner_tree(child)
@@ -1314,13 +1289,10 @@ def apply_plan(
             raise ExperienceError(
                 "initialized project resolves to a different plan; review the new plan and use an explicit plan-update workflow"
             )
-        bootstrap = load_bootstrap_state(root)
-        if bootstrap is None:
-            bootstrap = bootstrap_operational_state(root, existing_plan)
-        else:
-            bootstrap = {**bootstrap, "status": "idempotent"}
-        from .refresh import refresh_project
-        refresh = refresh_project(root, apply=True)
+        if (root / ".promin" / "generated" / "bootstrap-state.json").is_file():
+            raise ExperienceError(
+                "legacy bootstrap state is not valid for alpha.4; use owner-confirmed clean reinitialization"
+            )
         record_observation(
             root,
             kind="guided-init",
@@ -1339,9 +1311,12 @@ def apply_plan(
             "product_tree_scans_before_plan": 0,
             "next_command": "promin next",
             "audit_command": "promin audit",
-            "bootstrap": bootstrap,
-            "first_work_card": bootstrap.get("first_work_card"),
-            "refresh": refresh,
+            "minimal_postcheck": {
+                "activation_present": True,
+                "replay_performed": False,
+                "first_work_card": "PENDING_PACKAGE_DEFINED_WORK_CARD",
+            },
+            "first_work_card": None,
             "authority": False,
             "pass_credit": False,
             "product_acceptance_pass": False,
@@ -1383,10 +1358,7 @@ def apply_plan(
                 authority_plan=staging / "authority.json",
             )
             result = ProminService(root).initialize(request)
-        _write_alpha_state(root, plan)
-        bootstrap = bootstrap_operational_state(root, plan)
-        from .refresh import refresh_project
-        refresh = refresh_project(root, apply=True)
+        _write_guided_state(root, plan)
     except Exception:
         if not control_existed and os.path.lexists(filesystem_path(control)):
             _remove_owner_tree(control)
@@ -1421,9 +1393,12 @@ def apply_plan(
         "partial_control_archived": None if partial_archive is None else partial_archive.relative_to(root).as_posix(),
         "next_command": "promin next",
         "audit_command": "promin audit",
-        "bootstrap": bootstrap,
-        "first_work_card": bootstrap.get("first_work_card"),
-        "refresh": refresh,
+        "minimal_postcheck": {
+            "activation_present": True,
+            "replay_performed": False,
+            "first_work_card": "PENDING_PACKAGE_DEFINED_WORK_CARD",
+        },
+        "first_work_card": None,
     }
 
 
@@ -1435,86 +1410,33 @@ def load_resolved_plan(project_root: Path | str) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
-def load_plan_proposal(project_root: Path | str) -> dict[str, Any] | None:
-    path = Path(project_root).resolve() / ".promin" / "generated" / "plan-proposal.json"
-    if not os.path.isfile(filesystem_path(path)):
-        return None
-    value = load_json_strict(path, root=path.parent)
-    return dict(value) if isinstance(value, Mapping) else None
-
-
 def next_proposal(project_root: Path | str) -> dict[str, Any]:
     root = Path(project_root).resolve()
-    bootstrap = load_bootstrap_state(root)
-    if bootstrap is not None:
-        grants = bootstrap.get("grants", {})
-        holder = grants.get("holder", {}) if isinstance(grants, Mapping) else {}
-        reader = grants.get("reader", {}) if isinstance(grants, Mapping) else {}
-        if isinstance(holder, Mapping) and isinstance(reader, Mapping):
-            holder_id = holder.get("grant_id")
-            reader_id = reader.get("grant_id")
-            if isinstance(holder_id, str) and isinstance(reader_id, str):
-                return ProminService(root).next(
-                    subject_id="owner",
-                    grant_id=holder_id,
-                    query_grant_id=reader_id,
-                    depth=1,
-                )
-    proposal = load_plan_proposal(root)
-    if proposal is None:
-        raise ExperienceError("no alpha PlanProposal exists; run promin init")
-    progress_path = root / ".promin" / "state" / "experience" / "progress.json"
-    completed: set[str] = set()
-    if os.path.isfile(filesystem_path(progress_path)):
-        value = load_json_strict(progress_path, root=progress_path.parent)
-        if isinstance(value, Mapping) and isinstance(value.get("completed_task_ids"), list):
-            completed = {str(item) for item in value["completed_task_ids"]}
-    for task in proposal.get("tasks", []):
-        if task.get("task_id") in completed:
-            continue
-        if any(dependency not in completed for dependency in task.get("depends_on", [])):
-            continue
-        plan = load_resolved_plan(root) or {}
-        context_limit = 8192
-        if "tower-strong" in plan.get("profile_layers", []):
-            context_limit = 16384
-        identity = {
-            "record_type": "SuggestedWorkCard",
-            "task": task,
-            "goal": proposal.get("goal"),
-            "project_mode": proposal.get("project_mode"),
-            "profile_layers": plan.get("profile_layers", []),
-            "autonomy": plan.get("autonomy", "safe-auto"),
-            "max_context_bytes": context_limit,
-            "authority": False,
-            "pass_credit": False,
-            "note": "Proposal-only card; strict Core Task/Grant flow is required before authoritative mutation or acceptance.",
-        }
-        return {**identity, "context_digest": digest_value(identity)}
+    if not (root / ".promin" / "init" / "activation.json").is_file():
+        raise ExperienceError("project is not initialized; run promin init")
     return {
         "record_type": "SuggestedWorkCard",
-        "status": "no-ready-proposal",
+        "status": "PENDING_PACKAGE_DEFINED_WORK_CARD",
         "authority": False,
         "pass_credit": False,
+        "product_acceptance_pass": False,
+        "reason": "alpha.4 does not synthesize a generic first task; import one from a verified project package after activation",
     }
 
 
 def experience_status(project_root: Path | str) -> dict[str, Any]:
     root = Path(project_root).resolve()
     plan = load_resolved_plan(root)
-    proposal = load_plan_proposal(root)
-    bootstrap = load_bootstrap_state(root)
     return {
-        "record_type": "AlphaExperienceStatus",
+        "record_type": "ExperienceStatus",
         "initialized": (root / ".promin" / "init" / "activation.json").is_file(),
         "project_mode": None if plan is None else plan.get("project_mode"),
         "goal": None if plan is None else plan.get("goal"),
         "profile_layers": [] if plan is None else plan.get("profile_layers", []),
         "autonomy": None if plan is None else plan.get("autonomy"),
         "reporting_language": None if plan is None else plan.get("reporting_language"),
-        "proposal_task_count": 0 if proposal is None else len(proposal.get("tasks", [])),
-        "bootstrap_status": None if bootstrap is None else bootstrap.get("status"),
-        "first_task_id": None if bootstrap is None else bootstrap.get("task_id"),
+        "proposal_task_count": 0,
+        "first_work_card": "PENDING_PACKAGE_DEFINED_WORK_CARD",
         "heartbeat": heartbeat(root),
         "authority": False,
         "pass_credit": False,
@@ -1545,406 +1467,3 @@ def emit_expert_config(destination: Path, plan: Mapping[str, Any], project_root:
         "authority": False,
         "pass_credit": False,
     }
-
-
-def _utc_second(offset_seconds: int = 0) -> str:
-    from datetime import timedelta
-
-    return (
-        datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _grant_record(
-    authority: Mapping[str, Any],
-    activation_digest: str,
-    *,
-    grant_id: str,
-    capability_id: str,
-    issued_at: str,
-    project_id: str,
-    issuer: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-
-    expires_at = (
-        _dt.strptime(issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
-        + _td(days=7 if issuer is not None else 30)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    record: dict[str, Any] = {
-        "record_type": "Grant",
-        "grant_id": grant_id,
-        "subject_id": "owner",
-        "capability_id": capability_id,
-        "scope": [{"kind": "project", "value": project_id}],
-        "activation_digest": activation_digest,
-        "issued_at": issued_at,
-        "expires_at": expires_at,
-        "nonce": "nonce-" + grant_id,
-    }
-    record["claim_digest"] = digest_value(record)
-    if issuer is None:
-        record["trust_proofs"] = [
-            {
-                "kind": "local-root",
-                "root_subject_id": "owner",
-                "authority_init_digest": digest_value(authority),
-                "signed_claim_digest": record["claim_digest"],
-            }
-        ]
-    else:
-        record["trust_proofs"] = [
-            {
-                "kind": "issuer-grant",
-                "issuer_grant_id": issuer["grant_id"],
-                "issuer_signed_claim_digest": issuer["claim_digest"],
-                "signed_claim_digest": record["claim_digest"],
-            }
-        ]
-    return record
-
-
-def _grant_authorization(grant: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "kind": "grant",
-        "grant_id": grant["grant_id"],
-        "grant_claim_digest": grant["claim_digest"],
-    }
-
-
-def _command_request(
-    *,
-    activation_digest: str,
-    project_id: str,
-    command_id: str,
-    command_kind: str,
-    payload: Mapping[str, Any],
-    expected_head_digest: str | None,
-    issued_at: str,
-    authorization: Mapping[str, Any],
-    effect_scope: Sequence[Mapping[str, str]] = (),
-) -> dict[str, Any]:
-    requested_scope: list[dict[str, str]] = [
-        {"kind": "project", "value": project_id}
-    ]
-    task_id = payload.get("task_id")
-    if isinstance(task_id, str):
-        requested_scope.append({"kind": "task", "value": task_id})
-    for selector in effect_scope:
-        normalized = {"kind": str(selector["kind"]), "value": str(selector["value"])}
-        if normalized not in requested_scope:
-            requested_scope.append(normalized)
-    command: dict[str, Any] = {
-        "record_type": "CommandRequest",
-        "command_id": command_id,
-        "command_kind": command_kind,
-        "subject_id": "owner",
-        "activation_digest": activation_digest,
-        "idempotency_key": "idempotency:" + command_id,
-        "requested_scope": requested_scope,
-        "expected_head_digest": expected_head_digest,
-        "issued_at": issued_at,
-        "payload": dict(payload),
-    }
-    command["intent_digest"] = digest_value(command)
-    command["authorization"] = dict(authorization)
-    return command
-
-
-def _task_gate_definition(
-    service: ProminService,
-    task: Mapping[str, Any],
-    *,
-    head_digest: str,
-) -> dict[str, Any]:
-    value = dict(task)
-    owner_digest = digest_value(
-        {key: item for key, item in value.items() if key != "state"}
-    )
-    context = service._context()
-    definition = {
-        "definition_kind": "GateRunDefinition",
-        "definition_id": "definition:alpha-initial-readonly",
-        "owner_kind": "Task",
-        "owner_digest": owner_digest,
-        "defined_at_head_digest": head_digest,
-        "gate_id": "gate:alpha-initial-readonly",
-        "run_kind": "validation",
-        "expected_evidence_class": "validator",
-        "expected_evidence_purpose": "gate",
-        "product_credit_required": False,
-        "target_kind": "candidate",
-        "target_digest": value["candidate_digest"],
-        "target_scope": [
-            {"kind": "candidate", "value": value["candidate_digest"]}
-        ],
-        "candidate_digest": value["candidate_digest"],
-        "policy_digest": digest_value({"policy": "alpha-readonly-audit"}),
-        "tool_digest": digest_value({"tool": "promin-audit"}),
-        "implementation_closure_digest": context.implementation_closure_digest,
-        "provider_binding_digest": digest_value(
-            list(context.provider_dispatch.binding_evidence())
-        ),
-        "input_digests": [digest_value({"plan": value["task_id"]})],
-        "activation_digest": value["activation_digest"],
-    }
-    value["gate_run_definitions"] = [
-        {
-            "definition_digest": digest_value(definition),
-            "definition": definition,
-        }
-    ]
-    return value
-
-
-def load_bootstrap_state(project_root: Path | str) -> dict[str, Any] | None:
-    path = (
-        Path(project_root).resolve()
-        / ".promin"
-        / "generated"
-        / "bootstrap-state.json"
-    )
-    if not os.path.isfile(filesystem_path(path)):
-        return None
-    value = load_json_strict(path, root=path.parent)
-    return dict(value) if isinstance(value, Mapping) else None
-
-
-def bootstrap_operational_state(
-    project_root: Path | str,
-    plan: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Create the minimal authoritative read-only workflow for deployable alpha.
-
-    The bootstrap is idempotent through the generated binding and immutable event
-    idempotency keys.  It does not grant product acceptance or release authority.
-    """
-
-    root = Path(project_root).resolve()
-    service = ProminService(root)
-    # Execute provider preflight on the same service context before status/commit.
-    service.doctor(replay=False)
-    existing = load_bootstrap_state(root)
-    if existing is not None:
-        try:
-            status = service.status()
-        except Exception as exc:
-            raise ExperienceError(
-                "bootstrap state exists but the control layer is unreadable"
-            ) from exc
-        return {
-            **existing,
-            "status": "idempotent",
-            "current_head": status.get("head"),
-        }
-    status = service.status()
-    head = status.get("head")
-    if isinstance(head, Mapping) and int(head.get("sequence", 0)) != 0:
-        raise ExperienceError(
-            "operational history exists without a guided bootstrap binding"
-        )
-    context = service._context()
-    activation_digest = context.activation_digest
-    authority = context.plans["authority.json"]
-    project_id = context.plans["project.json"]["project_id"]
-    issued_at = _utc_second()
-    manager = _grant_record(
-        authority,
-        activation_digest,
-        grant_id="grant:alpha-owner-manager",
-        capability_id="authority.manage",
-        issued_at=issued_at,
-        project_id=project_id,
-    )
-    bootstrap = _command_request(
-        activation_digest=activation_digest,
-        project_id=project_id,
-        command_id="command:alpha-bootstrap-manager",
-        command_kind="grant.issue",
-        payload=manager,
-        expected_head_digest=None,
-        issued_at=issued_at,
-        authorization={
-            "kind": "root",
-            "subject_id": "owner",
-            "proofs": [
-                {
-                    "kind": "local-root-command",
-                    "subject_id": "owner",
-                    "authority_init_digest": digest_value(authority),
-                    "signed_intent_digest": "0" * 64,
-                }
-            ],
-        },
-    )
-    bootstrap["authorization"]["proofs"][0]["signed_intent_digest"] = bootstrap[
-        "intent_digest"
-    ]
-    current_head = service.commit(bootstrap)["batch_digest"]
-    grants: dict[str, dict[str, Any]] = {"manager": manager}
-    for name, capability in (
-        ("planner", "task.plan"),
-        ("holder", "task.execute"),
-        ("reader", "projection.read"),
-        ("finder", "finding.record"),
-        ("validator", "validation.evaluate"),
-        ("publisher", "evidence.publish"),
-    ):
-        grant = _grant_record(
-            authority,
-            activation_digest,
-            grant_id=f"grant:alpha-owner-{name}",
-            capability_id=capability,
-            issued_at=issued_at,
-            project_id=project_id,
-            issuer=manager,
-        )
-        command = _command_request(
-            activation_digest=activation_digest,
-            project_id=project_id,
-            command_id=f"command:alpha-issue-{name}",
-            command_kind="grant.issue",
-            payload=grant,
-            expected_head_digest=current_head,
-            issued_at=issued_at,
-            authorization=_grant_authorization(manager),
-        )
-        current_head = service.commit(command)["batch_digest"]
-        grants[name] = grant
-
-    specification_digest = str(plan["plan_digest"])
-    candidate_identity = {
-        "kind": "alpha-specification-candidate",
-        "project_id": project_id,
-        "plan_digest": specification_digest,
-        "activation_digest": activation_digest,
-    }
-    candidate_digest = digest_value(candidate_identity)
-    candidate = {
-        "record_type": "Candidate",
-        "candidate_id": "candidate:alpha-specification",
-        "candidate_digest": candidate_digest,
-        "inventory_digest": digest_value(
-            {"kind": "specification-inventory", "plan": specification_digest}
-        ),
-        "product_root_digest": digest_value(
-            {"kind": "specification-root", "project": project_id}
-        ),
-        "control_excluded": True,
-        "candidate_recipe_digest": digest_value(
-            context.plans["project.json"]["candidate_recipe"]
-        ),
-        "consistency_mode": "observational-best-effort",
-        "creditable": False,
-        "baseline_kind": "specification",
-        "specification_digest": specification_digest,
-    }
-    candidate_command = _command_request(
-        activation_digest=activation_digest,
-        project_id=project_id,
-        command_id="command:alpha-record-specification-candidate",
-        command_kind="candidate.record",
-        payload=candidate,
-        expected_head_digest=current_head,
-        issued_at=issued_at,
-        authorization=_grant_authorization(grants["holder"]),
-        effect_scope=[
-            {"kind": "candidate", "value": candidate["candidate_id"]}
-        ],
-    )
-    current_head = service.commit(candidate_command)["batch_digest"]
-
-    mode = str(plan["project_mode"])
-    first_operation = (
-        "build-one-pass-inventory"
-        if mode in {"existing-code", "hybrid"}
-        else "build-specification-baseline"
-    )
-    model_tier = "tool-only" if first_operation == "build-one-pass-inventory" else "standard"
-    task = {
-        "record_type": "Task",
-        "task_id": "task:alpha-first-operation",
-        "state": "PLANNED",
-        "required_capability": "task.execute",
-        "acceptance_predicate": (
-            "Produce bounded evidence for the first project operation without "
-            "claiming product acceptance or public release."
-        ),
-        "allowed_paths": ["**"],
-        "activation_digest": activation_digest,
-        "candidate_digest": candidate_digest,
-        "created_at": issued_at,
-        "operation_profile_id": first_operation,
-        "recommended_model_tier": model_tier,
-        "orchestration_required": True,
-    }
-    task = _task_gate_definition(service, task, head_digest=current_head)
-    task_command = _command_request(
-        activation_digest=activation_digest,
-        project_id=project_id,
-        command_id="command:alpha-record-first-task",
-        command_kind="task.record",
-        payload=task,
-        expected_head_digest=current_head,
-        issued_at=issued_at,
-        authorization=_grant_authorization(grants["planner"]),
-    )
-    current_head = service.commit(task_command)["batch_digest"]
-    ready_command = _command_request(
-        activation_digest=activation_digest,
-        project_id=project_id,
-        command_id="command:alpha-first-task-ready",
-        command_kind="task.transition",
-        payload={
-            "task_id": task["task_id"],
-            "from_state": "PLANNED",
-            "to_state": "READY",
-            "reason": "guided alpha plan is ready for one bounded operation",
-        },
-        expected_head_digest=current_head,
-        issued_at=issued_at,
-        authorization=_grant_authorization(grants["planner"]),
-    )
-    current_head = service.commit(ready_command)["batch_digest"]
-    service.rebuild()
-    next_result = service.next(
-        subject_id="owner",
-        grant_id=grants["holder"]["grant_id"],
-        query_grant_id=grants["reader"]["grant_id"],
-        depth=1,
-    )
-    identity = {
-        "record_type": "AlphaBootstrapState",
-        "activation_digest": activation_digest,
-        "project_id": project_id,
-        "candidate_id": candidate["candidate_id"],
-        "candidate_digest": candidate_digest,
-        "task_id": task["task_id"],
-        "grants": {
-            name: {
-                "grant_id": grant["grant_id"],
-                "claim_digest": grant["claim_digest"],
-                "capability_id": grant["capability_id"],
-            }
-            for name, grant in sorted(grants.items())
-        },
-        "head_digest": current_head,
-        "first_work_card": next_result.get("work_card"),
-        "authority": False,
-        "pass_credit": False,
-        "product_acceptance_pass": False,
-    }
-    result = {**identity, "bootstrap_digest": digest_value(identity), "status": "created"}
-    _write_json(root / ".promin" / "generated" / "bootstrap-state.json", result)
-    record_observation(
-        root,
-        kind="bootstrap-operational-state",
-        status="pass",
-        details={
-            "task_id": task["task_id"],
-            "operation": first_operation,
-            "model_tier": model_tier,
-            "component": "orchestration",
-        },
-    )
-    return result

@@ -39,10 +39,10 @@ def _preflight(paths: list[str], *, samples: dict[str, str] | None = None) -> di
 
 
 def test_alpha3_version_and_python_projection() -> None:
-    assert __version__ == "1.0.0-alpha.3"
+    assert __version__ == "1.0.0-alpha.4"
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
-    assert 'version = "1.0.0a3"' in text
+    assert 'version = "1.0.0a4"' in text
     assert 'requires-python = ">=3.12,<3.15"' in text
 
 
@@ -197,10 +197,10 @@ def test_repair_plan_matches_apply(tmp_path: Path) -> None:
     assert [item["action"] for item in planned["actions"] if item.get("status") != "blocked"] == applied["performed"]
 
 
-def test_clone_repair_resolves_portable_plan_once(
+def test_clone_repair_never_rehydrates_or_replays_a_portable_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Clone repair must reuse doctor resolution rather than scanning twice."""
+    """Alpha.4 repair does not revive a cloned operational plan."""
 
     plan = resolve_plan(tmp_path, goal="Create")
     apply_plan(tmp_path, plan)
@@ -220,8 +220,8 @@ def test_clone_repair_resolves_portable_plan_once(
     monkeypatch.setattr(portability, "resolve_plan", counted_resolve)
     repaired = portability.repair_project(tmp_path, apply=False)
 
-    assert calls == 1
-    assert not [item for item in repaired["actions"] if item.get("status") == "blocked"]
+    assert calls == 0
+    assert any(item.get("status") == "blocked" for item in repaired["actions"])
 
 
 def test_system_check_exercises_bounded_init(tmp_path: Path) -> None:
@@ -418,4 +418,4 @@ def test_alpha3_version_is_canonical() -> None:
             encoding="utf-8"
         )
     )
-    assert manifest["version"] == "1.0.0-alpha.3"
+    assert manifest["version"] == "1.0.0-alpha.4"

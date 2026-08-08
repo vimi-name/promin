@@ -46,6 +46,7 @@ from .platform_paths import (
     resolved_temporary_directory,
     subprocess_path,
 )
+from .artifact_policy import DOCS_ROOT, validate_control_docs_shell
 
 from .contracts import (
     CORE_FILES,
@@ -140,56 +141,30 @@ def _project_init_lock(project_root: Path):
 
 
 def _is_portable_control_shell(control: Path) -> bool:
-    """Return true only for the bounded Git-committed `.promin` shell.
+    """Return true only for the bounded tracked `.promin/docs` shell.
 
-    A clone may contain `.promin/portable/**` and `.promin/.gitignore` before
-    host-local initialization.  Treating that shell as an initialized control
-    plane would make rehydration impossible.
+    The historical ``.promin/portable`` root is intentionally not an alpha.4
+    compatibility alias.  The artifact policy performs the link, collision,
+    class, count and byte checks in one place before init is allowed to move a
+    control root.
     """
 
-    if control.is_symlink() or not control.is_dir():
+    try:
+        validate_control_docs_shell(control)
+    except Exception:
         return False
-    entries = {item.name for item in control.iterdir()}
-    if not entries <= {"portable", ".gitignore"}:
-        return False
-    total = 0
-    seen: set[str] = set()
-    ignore = control / ".gitignore"
-    if ignore.exists():
-        if ignore.is_symlink() or not ignore.is_file():
-            return False
-        total += ignore.stat().st_size
-    portable = control / "portable"
-    if portable.exists():
-        if portable.is_symlink() or not portable.is_dir():
-            return False
-        for item in sorted(portable.rglob("*"), key=lambda value: value.as_posix().casefold()):
-            relative = item.relative_to(portable).as_posix()
-            folded = relative.casefold()
-            if folded in seen:
-                return False
-            seen.add(folded)
-            if item.is_symlink():
-                return False
-            if item.is_dir():
-                continue
-            if not item.is_file():
-                return False
-            total += item.stat().st_size
-            if total > _PORTABLE_CONTROL_MAX_BYTES:
-                return False
-    return total <= _PORTABLE_CONTROL_MAX_BYTES
+    return True
 
 
 def _merge_portable_control_shell(source: Path, target: Path) -> None:
     if not _is_portable_control_shell(source):
-        raise InitError("portable Promin control shell is malformed")
+        raise InitError("tracked Promin documentation shell is malformed")
     ignore = source / ".gitignore"
     if ignore.is_file():
         shutil.copy2(ignore, target / ".gitignore")
-    portable = source / "portable"
-    if portable.is_dir():
-        shutil.copytree(portable, target / "portable", dirs_exist_ok=True)
+    docs = source / DOCS_ROOT.name
+    if docs.is_dir():
+        shutil.copytree(docs, target / DOCS_ROOT.name, dirs_exist_ok=True)
 
 
 def _parse_provider_timestamp(value: Any) -> datetime:
@@ -1318,7 +1293,7 @@ def provider_protocol_table(bundle: ContractBundle) -> Mapping[str, ProviderProt
 
 def _canonical_runtime_bundle() -> ContractBundle:
     package = bundle_root()
-    preset = package / "presets" / "semantic-morok-tower.json"
+    preset = package / "presets" / "semantic-standard.json"
     return load_contract_bundle(package, preset)
 
 

@@ -11,11 +11,11 @@ lockfiles, build/test stack, conventions, backlog/references, доступні t
 profile composition, standards/sources, autonomy, language, material rights,
 planned scans/external actions, first operations і material unknowns.
 
-Використовуй Morok Tower Studio та safe reversible defaults, якщо evidence
+Використовуй Promin Standard Studio та safe reversible defaults, якщо evidence
 недостатньо. Питай лише коли material ambiguity впливає на authority,
 architecture або irreversible output і не має safe default.
 
-Покажи plan. У `ask` і `safe-auto` чекай підтвердження або природномовного
-уточнення. У `unsafe-auto` зафіксуй plan і продовжуй у межах чинної authority.
+Покажи plan. `ask` потребує підтвердження. `standing-reversible` все одно
+потребує чинної Core authority і дозволяє лише зворотні local-дії.
 Після init покажи status, profile revision, next action, чи потрібна людина, а
 також команди `promin doctor`, `promin refresh` і `promin audit`.

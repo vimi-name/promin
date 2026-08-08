@@ -16,7 +16,7 @@ from . import __version__
 from .canonical import canonical_bytes
 from .context_index import context_index_status
 from .documentation import documentation_status
-from .experience import DEFAULT_PRESET, PACKAGE_ROOT, compile_core_plans, experience_status, load_bootstrap_state, load_resolved_plan, resolve_plan
+from .experience import DEFAULT_PRESET, PACKAGE_ROOT, compile_core_plans, experience_status, load_resolved_plan, resolve_plan
 from .gitpolicy import commit_footprint, git_tracking_status
 from .host_integration import host_surface_status
 from .platform_paths import resolved_temporary_directory
@@ -197,33 +197,25 @@ def run_system_check(project_root: Path | str) -> dict[str, Any]:
         ))
         profiles = plan.get("profile_layers", []) if isinstance(plan.get("profile_layers"), list) else []
         checks.append(_check(
-            "SYS-PROFILE-001", "profiles", "pass" if "general-development" in profiles and any(item in profiles for item in ("morok-tower-studio", "web-application", "android-application", "windows-development")) else "warn",
+            "SYS-PROFILE-001", "profiles", "pass" if "general-development" in profiles and any(item in profiles for item in ("c-family-development", "web-application", "android-application", "windows-development")) else "warn",
             "A general layer and at least one domain/fallback profile are active.",
             {"profile_layers": profiles, "autonomy": plan.get("autonomy"), "reporting_language": plan.get("reporting_language")},
             "Review detected facts or explicitly select a trusted profile; profile changes must not expand authority.",
         ))
 
-    bootstrap = load_bootstrap_state(root)
-    first_card = None if bootstrap is None else bootstrap.get("first_work_card")
-    grants = {} if bootstrap is None else bootstrap.get("grants", {})
-    orchestration_ok = (
-        isinstance(first_card, Mapping)
-        and first_card.get("record_type") == "WorkCard"
-        and first_card.get("orchestration_required") is True
-        and isinstance(grants, Mapping)
-        and bool(grants)
-    )
+    first_card = None
+    grants: dict[str, Any] = {}
     checks.append(_check(
-        "SYS-ORCH-001", "orchestration", "pass" if orchestration_ok else "fail",
-        "The first Task, scoped Grants and bounded WorkCard are operational." if orchestration_ok else "Orchestration exists only partially or no real WorkCard is available.",
+        "SYS-ORCH-001", "orchestration", "warn",
+        "Alpha.4 does not synthesize a first Task; a verified project package must import it after activation.",
         {
-            "bootstrap_present": bootstrap is not None,
-            "grant_count": len(grants) if isinstance(grants, Mapping) else 0,
-            "work_card_type": first_card.get("record_type") if isinstance(first_card, Mapping) else None,
-            "operation_profile_id": first_card.get("operation_profile_id") if isinstance(first_card, Mapping) else None,
-            "recommended_model_tier": first_card.get("recommended_model_tier") if isinstance(first_card, Mapping) else None,
+            "package_defined_work_card_required": True,
+            "grant_count": 0,
+            "work_card_type": None,
+            "operation_profile_id": None,
+            "recommended_model_tier": None,
         },
-        "Run `promin doctor --repair`; authoritative agent work must enter through Task/Candidate/Grant/WorkCard contracts.",
+        "Use owner-confirmed clean reinitialization with a verified package; authoritative work enters only through Task/Candidate/Grant/WorkCard contracts.",
     ))
 
     model_tiers = {"tool-only", "micro", "standard", "strong", "critical-review", "weak-local", "capable"}
@@ -235,8 +227,8 @@ def run_system_check(project_root: Path | str) -> dict[str, Any]:
         and card_bytes <= 16 * 1024
     )
     checks.append(_check(
-        "SYS-MODEL-001", "model-routing", "pass" if model_route_ok else "fail",
-        "The first operation is routed to a declared minimal model tier inside a bounded WorkCard." if model_route_ok else "The first operation lacks a valid model route or exceeds the WorkCard byte budget.",
+        "SYS-MODEL-001", "model-routing", "pass" if model_route_ok else "warn",
+        "The first operation is routed to a declared minimal model tier inside a bounded WorkCard." if model_route_ok else "A package-defined WorkCard is pending; this is not a validation pass.",
         {
             "operation_profile_id": first_card.get("operation_profile_id") if isinstance(first_card, Mapping) else None,
             "recommended_model_tier": first_card.get("recommended_model_tier") if isinstance(first_card, Mapping) else None,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, local command-cost measurements for the alpha.3 contract.
+"""Bounded, local command-cost measurements for the alpha.4 contract.
 
 The harness deliberately distinguishes a new command process from a reused
 ``ProminService``.  It is evidence tooling, not a product/release gate: every
@@ -223,7 +223,18 @@ def _cli_argv(command: str, root: Path) -> list[str]:
         "context": ["context", "README"],
         "audit": ["audit", "--max-files", "32", "--max-bytes", "65536"],
         "init review": ["init", "--goal", "bounded benchmark"],
-        "init apply small": ["init", "--goal", "bounded benchmark", "--yes", "--max-preflight-files", "32"],
+        "init apply small": [
+            "init",
+            "--goal",
+            "bounded benchmark",
+            "--yes",
+            "--documentation",
+            "decline",
+            "--verification",
+            "decline",
+            "--max-preflight-files",
+            "32",
+        ],
         "validate": ["validate", "--no-replay"],
     }
     try:
@@ -263,25 +274,15 @@ def _run_cli_cold(command: str, root: Path) -> Sample:
 def _runtime_operation(command: str, root: Path, service: Any) -> Mapping[str, Any]:
     from promin.audit import audit_project
     from promin.context_index import query_context
-    from promin.experience import load_bootstrap_state
+    from promin.experience import next_proposal
 
     if command == "status":
         return service.status()
     if command == "next":
-        bootstrap = load_bootstrap_state(root)
-        grants = {} if not isinstance(bootstrap, Mapping) else bootstrap.get("grants", {})
-        holder = grants.get("holder", {}) if isinstance(grants, Mapping) else {}
-        reader = grants.get("reader", {}) if isinstance(grants, Mapping) else {}
-        holder_id = holder.get("grant_id") if isinstance(holder, Mapping) else None
-        reader_id = reader.get("grant_id") if isinstance(reader, Mapping) else None
-        if not isinstance(holder_id, str) or not isinstance(reader_id, str):
-            raise BenchError("runtime_warm next fixture lacks verified bootstrap grants")
-        return service.next(
-            subject_id="owner",
-            grant_id=holder_id,
-            query_grant_id=reader_id,
-            depth=1,
-        )
+        # Alpha.4 never fabricates a first authoritative WorkCard.  The
+        # supported warm-path observation is therefore the bounded pending
+        # package-defined card, not legacy bootstrap Grants.
+        return next_proposal(root)
     if command == "context":
         return query_context(root, "README", limit=4, max_bytes=2048)
     if command == "audit":

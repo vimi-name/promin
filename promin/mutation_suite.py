@@ -892,7 +892,7 @@ class MutationFixture:
         self.root = root.resolve(strict=True)
         self.package_root = package_root.resolve(strict=True)
         self.core_dir = self.package_root / "core"
-        self.preset_path = self.package_root / "presets" / "semantic-morok-tower.json"
+        self.preset_path = self.package_root / "presets" / "semantic-standard.json"
         self.bundle = load_contract_bundle(self.package_root, self.preset_path)
         semantic = self.bundle.core["semantic-model.json"]
         self.relation_domains = compile_relation_domains(semantic)
@@ -973,7 +973,7 @@ class MutationFixture:
         policies = self.bundle.core["policy-set.json"]
         continuation = authority["continuation_access_rule"]
         scale = conformance["scale_contracts"]["workcard"]
-        profile_id = "tower-strong"
+        profile_id = "extended"
         profile = self.bundle.preset["profiles"][profile_id]
         identity = {
             "record_type": "ProjectionLimits",
@@ -1219,9 +1219,16 @@ class MutationFixture:
         provider_executable = Path(
             getattr(sys, "_base_executable", sys.executable)
         ).resolve()
-        provider = project / provider_executable.name
-        shutil.copy2(provider_executable, provider)
-        if sys.platform != "win32":
+        # A copied CPython launcher on Windows is not a runnable provider: its
+        # adjacent DLL/runtime neighbourhood is part of the host installation.
+        # Keep the fixture's identity bound to that real source so receipt
+        # verification can exercise the documented Windows fallback instead of
+        # fabricating an executable healthcheck failure.
+        if sys.platform == "win32":
+            provider = provider_executable
+        else:
+            provider = project / provider_executable.name
+            shutil.copy2(provider_executable, provider)
             provider.chmod(provider.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         license_value = {
             "expression": "Python-2.0",

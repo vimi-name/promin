@@ -263,8 +263,8 @@ class PackageValidationTests(unittest.TestCase):
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
         self.assertTrue(result["closure"])
-        self.assertEqual(result["inventory"]["files"], 135)
-        self.assertEqual(result["inventory"]["directories"], 14)
+        self.assertEqual(result["inventory"]["files"], CANONICAL_PACKAGE_FILE_COUNT)
+        self.assertEqual(result["inventory"]["directories"], CANONICAL_PACKAGE_DIRECTORY_COUNT)
         manifest = json.loads((self.root / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["builder"], "tools/promin_package.py")
         (self.root / "unowned.txt").write_text("unowned\n", encoding="utf-8")
@@ -272,8 +272,8 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_integrity(self.root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 135)
-        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 14)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 187)
+        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 16)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
             len(CANONICAL_PACKAGE_DIRECTORIES),
@@ -281,7 +281,7 @@ class PackageValidationTests(unittest.TestCase):
         )
         self.assertEqual(
             CANONICAL_PACKAGE_DIRECTORIES,
-            {".github", ".github/workflows", "core", "docs", "examples", "human", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
+            {".github", ".github/workflows", "capability_profiles", "core", "docs", "examples", "human", "language_profiles", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
         )
         self.assertEqual(CANONICAL_PACKAGE_FILES - CANONICAL_PAYLOAD_FILES, GENERATED_SURFACES)
         for required in (
@@ -298,7 +298,7 @@ class PackageValidationTests(unittest.TestCase):
             "core/policy-set.json",
             "core/promin.manifest.json",
             "core/semantic-model.json",
-            "presets/semantic-morok-tower.json",
+            "presets/semantic-standard.json",
         ):
             self.assertIn(required, CANONICAL_PACKAGE_FILES)
         self.assertTrue({
@@ -432,7 +432,7 @@ class PackageValidationTests(unittest.TestCase):
 
         self.assertEqual(result["gate_id"], "REC-006")
         self.assertEqual(result["status"], "pass", result["violations"])
-        self.assertTrue(result["pass_credit"])
+        self.assertFalse(result["pass_credit"])
         self.assertEqual(
             result["identity"]["definitions"], ["promin/platform_paths.py"]
         )
@@ -1247,24 +1247,63 @@ class PackageValidationTests(unittest.TestCase):
     def test_installed_observation_reads_version_from_canonical_source_root(self) -> None:
         """The isolated installation cwd intentionally has no canonical source tree."""
 
-        observation = {"promin": {"version": "1.0.0-alpha.3"}}
-        with mock.patch(
-            "promin_validate._run_capture_with_deadline",
+        observation = {"promin": {"version": "1.0.0-alpha.4"}}
+        isolated_cwd = self.base / "isolated-install-cwd"
+        isolated_cwd.mkdir()
+        self.assertNotEqual(isolated_cwd.resolve(), self.root.resolve())
+        self.assertNotIn(self.root.resolve(), isolated_cwd.resolve().parents)
+        python = self.base / "venv" / "python.exe"
+        executable = self.base / "venv" / "promin.exe"
+        capture = mock.create_autospec(
+            _observe_installed_environment.__globals__["_run_capture_with_deadline"],
             return_value=subprocess.CompletedProcess([], 0, json.dumps(observation), ""),
-        ), mock.patch(
-            "promin_validate._canonical_standard_version",
-            return_value="1.0.0-alpha.3",
-        ) as canonical_version:
+        )
+        canonical_version = mock.create_autospec(
+            _observe_installed_environment.__globals__["_canonical_standard_version"],
+            return_value="1.0.0-alpha.4",
+        )
+        # Mutation fixtures may replace sys.modules['promin_validate'] with a
+        # package-local module. Patch this function's lexical globals instead
+        # of that mutable registry entry so no nested process can escape.
+        with mock.patch.dict(
+            _observe_installed_environment.__globals__,
+            {
+                "_run_capture_with_deadline": capture,
+                "_canonical_standard_version": canonical_version,
+            },
+        ):
             result = _observe_installed_environment(
-                python=self.base / "venv" / "python.exe",
-                executable=self.base / "venv" / "promin.exe",
-                cwd=self.base / "isolated-install-cwd",
+                python=python,
+                executable=executable,
+                cwd=isolated_cwd,
                 canonical_root=self.root,
                 environment={},
                 pip_report_paths=(),
             )
 
         self.assertEqual(result["observation"], observation)
+        self.assertEqual(
+            result["pip_report"],
+            {
+                "reports": [],
+                "report_count": 0,
+                "artifact_digest": hashlib.sha256(canonical_bytes([])).hexdigest(),
+            },
+        )
+        capture.assert_called_once_with(
+            [
+                str(python),
+                "-I",
+                "-B",
+                "-c",
+                _observe_installed_environment.__globals__["_INSTALLED_ENVIRONMENT_PROBE"],
+                str(executable),
+            ],
+            cwd=isolated_cwd,
+            environment={},
+            deadline_monotonic=None,
+            phase="installed environment observation",
+        )
         canonical_version.assert_called_once_with(self.root)
 
     def test_archive_traversal_is_rejected(self) -> None:

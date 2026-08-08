@@ -492,7 +492,7 @@ class EventConcurrencyCrashTests(unittest.TestCase):
         package_root = Path(__file__).parents[1]
         bundle = load_contract_bundle(
             package_root,
-            package_root / "presets" / "semantic-morok-tower.json",
+            package_root / "presets" / "semantic-standard.json",
         )
         for profile_name, profile in bundle.preset["profiles"].items():
             with self.subTest(profile=profile_name):

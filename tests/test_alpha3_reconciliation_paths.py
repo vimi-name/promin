@@ -62,7 +62,7 @@ def test_bundle_install_uses_final_filesystem_boundary_for_deep_project_staging(
     staging = deep_root / ".p-long-boundary"
     os.mkdir(filesystem_path(staging))
     bundle = load_contract_bundle(
-        ROOT, ROOT / "presets" / "semantic-morok-tower.json"
+        ROOT, ROOT / "presets" / "semantic-standard.json"
     )
 
     installed = init_module._install_bundle(staging, bundle)

@@ -14,12 +14,20 @@ from .canonical import canonical_bytes, load_json_strict
 from .context_index import query_context
 from .experience import (
     apply_plan,
+    bind_init_capability_selection,
     emit_expert_config,
     experience_status,
     next_proposal,
     resolve_plan,
     write_plan,
 )
+from .init_profiles import (
+    InitProfileError,
+    load_init_profile,
+    negotiate_language_capabilities,
+    resolve_init_profile,
+)
+from .resources import bundle_root
 from .init import InitRequest, emit_canonical_init_plans, review_init_request
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .portability import doctor_with_portability, repair_project
@@ -46,12 +54,16 @@ def _parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="resolve and optionally apply a guided initialization plan")
     init.add_argument("--goal")
     init.add_argument("--brief", type=Path, help="optional simple JSON project brief")
-    init.add_argument("--autonomy", choices=("ask", "safe-auto", "unsafe-auto"))
+    init.add_argument("--autonomy", choices=("ask", "standing-reversible"))
     init.add_argument("--language", choices=("auto", "uk", "en"))
     init.add_argument("--profile", action="append", default=[], help="additional installed profile layer")
+    init.add_argument("--documentation", choices=("accept", "decline", "custom"))
+    init.add_argument("--verification", choices=("accept", "decline", "custom"))
+    init.add_argument("--documentation-tool", action="append", default=[])
+    init.add_argument("--verification-tool", action="append", default=[])
     init.add_argument("--max-preflight-files", type=int, default=PREFLIGHT_FILE_ITEMS_MAX)
     init.add_argument("--apply", "--yes", dest="apply", action="store_true", help="apply the resolved plan")
-    init.add_argument("--plan-only", action="store_true", help="never auto-apply, including unsafe-auto")
+    init.add_argument("--plan-only", action="store_true", help="never apply the resolved plan")
     init.add_argument("--plan-out", type=Path)
     init.add_argument("--emit-expert-config", type=Path)
 
@@ -90,6 +102,13 @@ def _parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="validate Core and current operational state")
     validate.add_argument("--no-replay", action="store_true")
 
+    static_admission = sub.add_parser(
+        "static-admission",
+        help="run bounded source/docs/portability checks without provider, build, runtime, or SQLite effects",
+    )
+    static_admission.add_argument("--profile", choices=("minimal", "diagnostic-host-local"), default="minimal")
+    static_admission.add_argument("--handoff", type=Path)
+
     continuation = sub.add_parser("continue", help="continue a bounded WorkCard context")
     continuation.add_argument("token")
     continuation.add_argument("--subject")
@@ -103,7 +122,7 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--max-files", type=int, default=10_000)
     audit.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024)
 
-    refresh = sub.add_parser("refresh", help="refresh portable documentation, context, and host surfaces")
+    refresh = sub.add_parser("refresh", help="refresh tracked documentation, context, and host surfaces")
     refresh.add_argument("--deep-context", action="store_true")
     refresh.add_argument("--plan-only", action="store_true", help="show the refresh plan without writing")
     refresh.add_argument("--reset-derived", action="store_true", help="rebuild ignored projections and caches before refresh")
@@ -232,14 +251,74 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         brief=brief,
         max_preflight_files=args.max_preflight_files,
     )
+    try:
+        profile = load_init_profile(bundle_root() / "capability_profiles" / "standard-init.json")
+        cli_override: dict[str, Any] = {}
+        if args.autonomy is not None:
+            cli_override["autonomy"] = args.autonomy
+        requested_documentation = args.documentation or "ask"
+        requested_verification = args.verification or "ask"
+        if args.documentation is not None or args.verification is not None:
+            cli_override["selection"] = {
+                "documentationChoice": requested_documentation,
+                "verificationChoice": requested_verification,
+                "customProfile": "cli-custom" if "custom" in {requested_documentation, requested_verification} else None,
+            }
+        resolved_init_profile = resolve_init_profile(
+            profile,
+            cli_override=cli_override or None,
+        )
+        tech_ids = {str(item.get("technology", "")) for item in plan.get("detected_technologies", []) if isinstance(item, Mapping)}
+        languages = [language for language in ("c", "cpp") if {"cpp", "cmake"} & tech_ids]
+        selection = resolved_init_profile["effective"]["selection"]
+        if selection["documentationChoice"] == "ask" or selection["verificationChoice"] == "ask":
+            compact_selection: dict[str, Any] = {
+                "status": "PENDING_OWNER_SELECTION",
+                "selection_source": resolved_init_profile["selection_source"],
+                "profile_digest": resolved_init_profile["profile_digest"],
+                "documentation_choice": selection["documentationChoice"],
+                "verification_choice": selection["verificationChoice"],
+                "authority_granted": False,
+                "pass_credit": False,
+                "acceptance_pass": False,
+            }
+        else:
+            language_selection = negotiate_language_capabilities(
+                profile["language_capability_profiles"],
+                languages=languages,
+                documentation_choice=selection["documentationChoice"],
+                verification_choice=selection["verificationChoice"],
+                selection_source=resolved_init_profile["selection_source"],
+                custom_documentation=tuple(args.documentation_tool),
+                custom_verification=tuple(args.verification_tool),
+            )
+            compact_selection = {
+                "status": language_selection["status"],
+                "selection_source": resolved_init_profile["selection_source"],
+                "profile_digest": resolved_init_profile["profile_digest"],
+                "selection_digest": language_selection["selection_digest"],
+                "documentation_choice": selection["documentationChoice"],
+                "verification_choice": selection["verificationChoice"],
+                "authority_granted": False,
+                "pass_credit": False,
+                "acceptance_pass": False,
+            }
+        plan = bind_init_capability_selection(plan, compact_selection)
+    except InitProfileError as exc:
+        raise ServiceError(f"init capability selection is invalid: {exc}") from exc
     if args.plan_out:
         write_plan(args.plan_out.resolve(), plan)
     if args.emit_expert_config:
         emitted = emit_expert_config(args.emit_expert_config.resolve(), plan, root)
     else:
         emitted = None
-    should_apply = args.apply or (plan["autonomy"] == "unsafe-auto" and not args.plan_only)
+    should_apply = args.apply and not args.plan_only
     if should_apply:
+        selection_status = plan["init_capability_selection"]["status"]
+        if selection_status == "PENDING_OWNER_SELECTION":
+            raise ServiceError(
+                "--yes requires explicit --documentation and --verification choices; unresolved ask is fail-closed"
+            )
         result = apply_plan(root, plan)
         if emitted is not None:
             result["expert_config"] = emitted
@@ -300,7 +379,7 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
     """Return whether this invocation may intentionally persist project-local state."""
 
     workflow = args.workflow
-    if workflow in {"status", "context", "validate", "audit"}:
+    if workflow in {"status", "context", "validate", "audit", "static-admission"}:
         return False
     if workflow == "doctor":
         return bool(getattr(args, "apply_repair", False))
@@ -376,16 +455,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise ServiceError("continue requires --subject and --grant together")
             subject = args.subject
             grant = args.grant
-            if subject is None:
-                from .experience import load_bootstrap_state
-
-                bootstrap = load_bootstrap_state(root)
-                grants = {} if bootstrap is None else bootstrap.get("grants", {})
-                reader = grants.get("reader", {}) if isinstance(grants, dict) else {}
-                grant = reader.get("grant_id") if isinstance(reader, dict) else None
-                subject = "owner" if isinstance(grant, str) else None
             if not isinstance(subject, str) or not isinstance(grant, str):
-                raise ServiceError("continue requires an explicit Grant or guided bootstrap state")
+                raise ServiceError("continue requires an explicit current Grant; alpha.4 has no guided bootstrap grant")
             result = continue_work(root, args.token, subject_id=subject, grant_id=grant)
         elif args.workflow == "audit":
             result = audit_project(
@@ -414,6 +485,19 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 limit=args.limit,
                 max_bytes=args.max_bytes,
             )
+        elif args.workflow == "static-admission":
+            handoff = None
+            if args.handoff is not None:
+                loaded_handoff = load_json_strict(args.handoff, root=args.handoff.parent)
+                if not isinstance(loaded_handoff, dict):
+                    raise ServiceError("--handoff must contain one JSON object")
+                handoff = loaded_handoff
+            # Import only at the explicit command boundary.  The implementation
+            # is source-only and its focused tests spy on provider/build/runtime
+            # and SQLite surfaces to keep this operation side-effect free.
+            from .static_admission import run_static_admission
+
+            result = run_static_admission(root, profile=args.profile, handoff=handoff)
         elif args.workflow == "skills":
             if args.skills_action == "list":
                 result = skill_catalog(root)

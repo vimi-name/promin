@@ -78,24 +78,16 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 135
-CANONICAL_PACKAGE_DIRECTORY_COUNT = 14
+CANONICAL_PACKAGE_FILE_COUNT = 187
+CANONICAL_PACKAGE_DIRECTORY_COUNT = 16
 CANONICAL_PACKAGE_FILES = frozenset(
     {
-        '.github/workflows/alpha-portability.yml',
         '.gitattributes',
+        '.github/workflows/alpha-portability.yml',
         '.gitignore',
+        'capability_profiles/standard-init.json',
+        'capability_profiles/standing-reversible.json',
         'CONTRIBUTING.md',
-        'LICENSE',
-        'MACHINE_README.md',
-        'MANIFEST.json',
-        'NOTICE',
-        'README.md',
-        'SECURITY.md',
-        'SHA256SUMS.txt',
-        'THIRD_PARTY_NOTICES.md',
-        'TRADEMARKS.md',
-        'VERSION.json',
         'core/authority-model.json',
         'core/conformance.json',
         'core/contracts.schema.json',
@@ -103,85 +95,109 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'core/promin.manifest.json',
         'core/semantic-model.json',
         'docs/ALPHA_SCOPE_UA.md',
+        'docs/ARTIFACT_TAXONOMY_UA.md',
+        'docs/C_CPP_CAPABILITY_PROFILE_UA.md',
+        'docs/CLEAN_REINITIALIZATION_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
+        'docs/INIT_CAPABILITIES_UA.md',
+        'docs/MIGRATION_ALPHA3_TO_ALPHA4_UA.md',
         'docs/MODEL_ROUTING_UA.md',
         'docs/PORTABILITY_UA.md',
         'docs/PORTABLE_CONTEXT_ARCHITECTURE_UA.md',
         'docs/PRODUCT_DOCTRINE_UA.md',
         'docs/PROFILE_CATALOG_UA.md',
+        'docs/PROVIDER_IDENTITIES_UA.md',
         'docs/QUICKSTART_IF_THEN_UA.md',
+        'docs/RECEIPTS_AND_INVALIDATION_UA.md',
         'docs/RUNTIME_AUDIT_UA.md',
         'docs/SKILLS_UA.md',
+        'docs/STATIC_ADMISSION_UA.md',
         'docs/SYSTEM_CHECKLIST_UA.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
         'human/promin_appendices_ua.pdf',
         'human/promin_main_en.pdf',
         'human/promin_main_ua.pdf',
-        'presets/semantic-morok-tower.json',
-        'profiles/README.md',
+        'language_profiles/c-family-semantic.json',
+        'LICENSE',
+        'MACHINE_README.md',
+        'MANIFEST.json',
+        'NOTICE',
+        'presets/semantic-standard.json',
         'profiles/android-application.json',
         'profiles/ask.json',
+        'profiles/c-family-development.json',
         'profiles/en.json',
         'profiles/general-development.json',
         'profiles/mobile-application.json',
-        'profiles/morok-tower-studio.json',
-        'profiles/safe-auto.json',
+        'profiles/README.md',
+        'profiles/standing-reversible.json',
         'profiles/uk.json',
-        'profiles/unsafe-auto.json',
         'profiles/vibe-recovery.json',
         'profiles/web-application.json',
         'profiles/windows-development.json',
         'promin/__init__.py',
         'promin/__main__.py',
+        'promin/artifact_policy.py',
         'promin/audit.py',
         'promin/authority.py',
+        'promin/autonomy_policy.py',
         'promin/canonical.py',
+        'promin/clean_reinitialization.py',
+        'promin/cmake_file_api.py',
+        'promin/compilation_database.py',
         'promin/conformance.py',
         'promin/context_index.py',
         'promin/contracts.py',
+        'promin/cpp_lexical.py',
         'promin/documentation.py',
         'promin/domain.py',
+        'promin/dynamic_handoff.py',
         'promin/events.py',
         'promin/evidence.py',
         'promin/experience.py',
+        'promin/final_admission.py',
+        'promin/gate_admission.py',
         'promin/gitpolicy.py',
         'promin/host_integration.py',
         'promin/init.py',
+        'promin/init_profiles.py',
+        'promin/input_identity.py',
+        'promin/language_analysis.py',
         'promin/limits.py',
         'promin/mutation_suite.py',
         'promin/platform_paths.py',
         'promin/portability.py',
+        'promin/project_package.py',
         'promin/projection.py',
+        'promin/provider_envelope.py',
+        'promin/provider_receipts.py',
         'promin/provider_store.py',
+        'promin/publication.py',
+        'promin/recovery.py',
         'promin/refresh.py',
-        'promin/rehydrate_worker.py',
         'promin/resources.py',
+        'promin/selector_shards.py',
+        'promin/semantic_scope.py',
         'promin/service.py',
         'promin/skills.py',
+        'promin/static_admission.py',
         'promin/system_check.py',
         'promin/telemetry.py',
         'promin/version.py',
         'promin/workspace.py',
+        'promin/writer_identity.py',
         'prompts/INIT_PROMPT_EN.txt',
         'prompts/INIT_PROMPT_UA.txt',
         'pyproject.toml',
-        'skills/README.md',
-        'skills/example/SKILL.md',
+        'README.md',
+        'SECURITY.md',
+        'SHA256SUMS.txt',
         'skills/example/promin.skill.json',
+        'skills/example/SKILL.md',
+        'skills/README.md',
         'skills/skill.schema.json',
-        'tests/test_alpha3_opus_closure.py',
-        'tests/test_alpha3_ingress_budget.py',
-        'tests/test_alpha3_plan_headroom.py',
-        'tests/test_alpha3_workspace_budget.py',
-        'tests/ALPHA3_R2_TEST_SHARDS.json',
-        'tests/test_alpha3_reconciliation_aliased_temp_tree.py',
-        'tests/test_alpha3_reconciliation_package.py',
-        'tests/test_alpha3_reconciliation_paths.py',
-        'tests/test_alpha3_reconciliation_performance.py',
-        'tests/test_alpha3_reconciliation_static.py',
-        'tests/test_alpha3_reconciliation_windows.py',
-        'tests/test_bootstrap_mutation_verification.py',
+        'tests/ALPHA4_TEST_SHARDS.json',
         'tests/test_alpha_audit.py',
         'tests/test_alpha_context_index.py',
         'tests/test_alpha_deployable.py',
@@ -190,9 +206,42 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_alpha_incremental_layer.py',
         'tests/test_alpha_monorepo_context.py',
         'tests/test_alpha_portability.py',
+        'tests/test_alpha_promin_docs_shell.py',
         'tests/test_alpha_skills.py',
         'tests/test_alpha_skills_checklist.py',
+        'tests/test_alpha3_ingress_budget.py',
+        'tests/test_alpha3_opus_closure.py',
+        'tests/test_alpha3_plan_headroom.py',
+        'tests/test_alpha3_reconciliation_aliased_temp_tree.py',
+        'tests/test_alpha3_reconciliation_package.py',
+        'tests/test_alpha3_reconciliation_paths.py',
+        'tests/test_alpha3_reconciliation_performance.py',
+        'tests/test_alpha3_reconciliation_static.py',
+        'tests/test_alpha3_reconciliation_windows.py',
+        'tests/test_alpha3_workspace_budget.py',
+        'tests/test_alpha4_artifact_lifecycle.py',
+        'tests/test_alpha4_autonomy_policy.py',
+        'tests/test_alpha4_clean_reinitialization_operation.py',
+        'tests/test_alpha4_cmake_file_api.py',
+        'tests/test_alpha4_compilation_database.py',
+        'tests/test_alpha4_dynamic_handoff.py',
+        'tests/test_alpha4_extensions_clean_init.py',
+        'tests/test_alpha4_final_package_admission.py',
+        'tests/test_alpha4_gate_admission.py',
+        'tests/test_alpha4_genericity.py',
+        'tests/test_alpha4_init_profiles.py',
+        'tests/test_alpha4_language_analysis.py',
+        'tests/test_alpha4_project_package.py',
+        'tests/test_alpha4_provider_envelopes.py',
+        'tests/test_alpha4_provider_receipts.py',
+        'tests/test_alpha4_recovery_locks.py',
+        'tests/test_alpha4_selector_shard_runner.py',
+        'tests/test_alpha4_selector_shards.py',
+        'tests/test_alpha4_semantic_scope_gates.py',
+        'tests/test_alpha4_static_admission.py',
+        'tests/test_alpha4_windows_publication.py',
         'tests/test_authority_domain.py',
+        'tests/test_bootstrap_mutation_verification.py',
         'tests/test_canonical_init.py',
         'tests/test_concurrency_crash.py',
         'tests/test_contract_mutations.py',
@@ -204,6 +253,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_search_scale.py',
         'tests/test_service_cli.py',
         'tests/test_service_mutation_cache.py',
+        'THIRD_PARTY_NOTICES.md',
         'tools/compile_schema.py',
         'tools/generate_human.py',
         'tools/promin.py',
@@ -217,16 +267,20 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tools/promin_saturation_audit.py',
         'tools/promin_service.py',
         'tools/promin_validate.py',
+        'TRADEMARKS.md',
+        'VERSION.json',
     }
 )
 CANONICAL_PACKAGE_DIRECTORIES = frozenset(
     {
         '.github',
         '.github/workflows',
+        'capability_profiles',
         'core',
         'docs',
         'examples',
         'human',
+        'language_profiles',
         'presets',
         'profiles',
         'promin',
@@ -834,6 +888,12 @@ def iter_regular_files(root: Path, *, include_generated: bool = True) -> list[tu
         for name in list(dirnames):
             child = current / name
             rel = child.relative_to(root).as_posix()
+            # Repository metadata is outside the candidate tree.  It is not a
+            # packaged artifact and must never be scanned as one merely
+            # because validation is invoked from a checkout.
+            if rel == ".git":
+                dirnames.remove(name)
+                continue
             if _is_transient_directory(name):
                 raise ValidationFailure(f"transient directory is forbidden: {rel}")
             if _is_link_or_reparse(child):
@@ -919,8 +979,11 @@ def verify_package_inventory(
     actual_directories: set[str] = set()
     for dirpath, dirnames, _ in os.walk(root, topdown=True, followlinks=False):
         current = Path(dirpath)
-        for name in dirnames:
+        for name in list(dirnames):
             rel = (current / name).relative_to(root).as_posix()
+            if rel == ".git":
+                dirnames.remove(name)
+                continue
             validate_relative_path(rel)
             actual_directories.add(rel)
     missing_directories = sorted(
@@ -947,15 +1010,14 @@ def verify_package_inventory(
 
 EXPECTED_EXPERIENCE_PROFILES = frozenset({
     "general-development",
-    "morok-tower-studio",
+    "c-family-development",
     "web-application",
     "android-application",
     "mobile-application",
     "windows-development",
     "vibe-recovery",
     "ask",
-    "safe-auto",
-    "unsafe-auto",
+    "standing-reversible",
     "uk",
     "en",
 })
@@ -1185,15 +1247,15 @@ def verify_preset(root: Path, schema: dict[str, Any]) -> dict[str, Any]:
     if presets.is_symlink() or not presets.is_dir():
         raise ValidationFailure("missing real presets directory")
     entries = list(presets.iterdir())
-    if len(entries) != 1 or entries[0].name != "semantic-morok-tower.json" or not entries[0].is_file() or entries[0].is_symlink():
+    if len(entries) != 1 or entries[0].name != "semantic-standard.json" or not entries[0].is_file() or entries[0].is_symlink():
         raise ValidationFailure("exactly one selected preset is required outside Core")
     preset = load_json(entries[0])
-    if preset.get("version") != standard_version or preset.get("preset_id") != "semantic-morok-tower":
+    if preset.get("version") != standard_version or preset.get("preset_id") != "semantic-standard":
         raise ValidationFailure("selected preset identity/version mismatch")
     _validate_schema_instance(schema, "Preset", preset)
-    if preset.get("base_user_commands") != ["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]:
-        raise ValidationFailure("selected preset must expose exactly the ten alpha user workflows in canonical order")
-    return {"path": "presets/semantic-morok-tower.json", "sha256": sha256_file(entries[0])}
+    if preset.get("base_user_commands") != ["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"]:
+        raise ValidationFailure("selected preset must expose the exact alpha user workflows in canonical order")
+    return {"path": "presets/semantic-standard.json", "sha256": sha256_file(entries[0])}
 
 
 def verify_version(root: Path, core_result: dict[str, Any], preset_result: dict[str, Any]) -> dict[str, Any]:
@@ -1334,7 +1396,7 @@ def verify_human_documents(
     if generator.is_symlink() or not generator.is_file():
         raise ValidationFailure("missing deterministic human document generator")
     font_arguments = _font_generator_arguments(font_bindings)
-    protected = [root / "core" / name for name in sorted(CORE_FILES)] + [root / "presets" / "semantic-morok-tower.json"]
+    protected = [root / "core" / name for name in sorted(CORE_FILES)] + [root / "presets" / "semantic-standard.json"]
     before = {str(path.relative_to(root)): sha256_file(path) for path in protected}
     with tempfile.TemporaryDirectory(prefix="promin-human-verify-") as temporary_name:
         regenerated = Path(temporary_name) / "human"
@@ -1370,7 +1432,7 @@ def verify_human_documents(
             raise ValidationFailure("human document build evidence generator digest mismatch")
         if generator_result.get("core_bundle_digest") != load_json(root / "core" / "promin.manifest.json").get("bundle_digest"):
             raise ValidationFailure("human document build evidence Core digest mismatch")
-        if generator_result.get("selected_preset_sha256") != sha256_file(root / "presets" / "semantic-morok-tower.json"):
+        if generator_result.get("selected_preset_sha256") != sha256_file(root / "presets" / "semantic-standard.json"):
             raise ValidationFailure("human document build evidence preset digest mismatch")
         evidence_fonts = generator_result.get("font_bindings")
         if not isinstance(evidence_fonts, dict) or set(evidence_fonts) != set(FONT_ROLES):
@@ -2809,7 +2871,7 @@ def _temporary_root_is_normalized(tree: ast.AST) -> bool:
 
 
 def verify_reconciliation_path_ownership(root: Path) -> dict[str, Any]:
-    """Fail closed on the alpha.3 identity/transport ownership invariant.
+    """Fail closed on the identity/transport ownership invariant.
 
     This is deliberately a narrow static package gate.  It protects the seams
     where a second provider-path owner or a Windows transport spelling would
@@ -2930,7 +2992,9 @@ def verify_reconciliation_path_ownership(root: Path) -> dict[str, Any]:
     return {
         "gate_id": "REC-006",
         "status": "pass" if not violations else "fail",
-        "pass_credit": not violations,
+        # This is a static structural gate.  It is useful diagnostic evidence,
+        # never product, acceptance, or release credit.
+        "pass_credit": False,
         "scope": {
             "identity_owner": platform_rel,
             "provider_layer": init_rel,

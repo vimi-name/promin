@@ -72,7 +72,7 @@ from .projection import (
 
 
 ZERO_DIGEST = "0" * 64
-BASE_COMMANDS = ("init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills")
+BASE_COMMANDS = ("init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills")
 
 
 def _thaw_frozen(value: Any) -> Any:

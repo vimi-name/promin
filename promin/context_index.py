@@ -109,7 +109,7 @@ def compile_context_records(plan: Mapping[str, Any], reference_records: Sequence
         _record(
             record_id="plan:project",
             unit_id=None,
-            path=".promin/portable/project-brief.json",
+            path=".promin/docs/project-brief.json",
             kind="project-plan",
             title=str(plan.get("goal") or "project plan"),
             content=json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
@@ -426,7 +426,7 @@ def query_context(
         results.append(item)
         used += size
     retrieval_tokens = estimate_tokens(json.dumps(results, ensure_ascii=False))
-    policy = _load_json(root / ".promin/portable/context-policy.json") or {}
+    policy = _load_json(root / ".promin/docs/context-policy.json") or {}
     startup_tokens = int(policy.get("agent_entry_estimated_tokens") or 0)
     cost = context_cost_model(
         startup_tokens=startup_tokens,

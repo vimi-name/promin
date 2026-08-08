@@ -1,0 +1,27 @@
+{
+  "authority_effect": "none",
+  "category": "language",
+  "defaults": {
+    "documentation": "profile-driven",
+    "language_family": "c-family",
+    "verification": "profile-driven"
+  },
+  "detect": [
+    "CMakeLists.txt",
+    "*.c",
+    "*.cc",
+    "*.cpp",
+    "*.cxx",
+    "*.h",
+    "*.hh",
+    "*.hpp",
+    "*.hxx"
+  ],
+  "dynamic_composition": true,
+  "license": "Apache-2.0",
+  "profile_id": "c-family-development",
+  "purpose": "C and C++ language capability defaults with profile-selected documentation and verification",
+  "record_type": "ExperienceProfile",
+  "schema_version": 1,
+  "trusted_by_default": true
+}

@@ -1,0 +1,59 @@
+{
+  "agent_slots": 1,
+  "analysis_profile": "minimal",
+  "artifact_profile": "minimal",
+  "autonomy": "ask",
+  "canonical_build_owners": 1,
+  "documentation_profile": "minimal",
+  "id": "standard-init",
+  "language_capability_profiles": [
+    {
+      "artifactPolicy": {
+        "defaultMode": "minimal",
+        "diagnosticRoot": "host-local-diagnostic",
+        "forensicRoot": "host-local-forensic",
+        "trackedSummary": true
+      },
+      "documentation": {
+        "optional": [
+          "doxygen",
+          "clang-doc"
+        ],
+        "primary": [
+          "compact-contract-index"
+        ],
+        "recommended": true,
+        "userChoice": "ask"
+      },
+      "languages": [
+        "c",
+        "cpp"
+      ],
+      "profileId": "c-family-semantic",
+      "schema": "promin.language-capability-profile.v1",
+      "verification": {
+        "cheapRequired": [
+          "canonical-compilation-database"
+        ],
+        "optional": [
+          "clangd",
+          "clang-tidy"
+        ],
+        "recommended": [
+          "clangd",
+          "clang-tidy"
+        ]
+      }
+    }
+  ],
+  "provider_strategy": "reuse-preferred",
+  "schema": "promin.init-profile.v1",
+  "selection_defaults": {
+    "customProfile": null,
+    "documentationChoice": "ask",
+    "profile": "minimal",
+    "schema": "promin.init-analysis-choice.v1",
+    "selectionSource": "default",
+    "verificationChoice": "ask"
+  }
+}

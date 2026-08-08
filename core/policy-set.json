@@ -1,4 +1,154 @@
 {
+  "alpha4_standard_contracts": {
+    "artifact_policy": {
+      "classes": [
+        "portable-normative-doc",
+        "compact-current-report",
+        "diagnostic-inventory",
+        "forensic-log",
+        "runtime-evidence",
+        "cache",
+        "recovery-backup"
+      ],
+      "default_mode": "minimal",
+      "detailed_output": "host-local-only",
+      "single_current_registry": true,
+      "tracked_boundary": ".promin/docs"
+    },
+    "authority": {
+      "dual_authority": "reject",
+      "legacy_compatibility": "reject",
+      "owner": "core/policy-set.json",
+      "project_specific_defaults": "reject"
+    },
+    "claims": {
+      "acceptance_pass": false,
+      "pass_credit": false,
+      "product_acceptance_pass": false,
+      "release_eligible": false,
+      "runtime_validated": false
+    },
+    "documentation_boundary": {
+      "extension_root": ".promin/docs/extensions",
+      "forbidden_operational_roots": [
+        "cache",
+        "evidence",
+        "init",
+        "leases",
+        "locks",
+        "providers",
+        "state"
+      ],
+      "link_or_reparse": "reject",
+      "manifest": "typed-byte-exact",
+      "normalization_collision": "reject"
+    },
+    "dynamic_handoff": {
+      "acceptance_promotion": "forbidden",
+      "execution": "dynamic-only",
+      "required_status": "PENDING_DYNAMIC",
+      "shortcuts": [
+        "direct-projection-edit",
+        "direct-sqlite-edit",
+        "synthetic-evidence",
+        "bypassed-gate"
+      ]
+    },
+    "gate_invalidation": {
+      "classes": [
+        "BODY_ONLY",
+        "IMPORT_SURFACE",
+        "CMAKE_TOPOLOGY",
+        "TOOLING_ONLY"
+      ],
+      "git-head-alone": "not-an-invalidation-input",
+      "receipt": "input-digest-scope-timing-status-credit",
+      "source_first": true
+    },
+    "init_profiles": {
+      "authority_effect": "none",
+      "precedence": [
+        "default",
+        "host-profile",
+        "project-package",
+        "cli",
+        "interactive-user"
+      ],
+      "selection": [
+        "accept",
+        "decline",
+        "custom"
+      ],
+      "unavailable_is_pass": false
+    },
+    "language_analysis": {
+      "finding_classification": [
+        "PROVEN",
+        "REVIEW",
+        "SAFE"
+      ],
+      "interface_weight": "review-only",
+      "lexical_mask": "offset-preserving",
+      "missing_tool": "UNAVAILABLE",
+      "semantic_tool_input": "canonical-compilation-database"
+    },
+    "project_package": {
+      "clean_init": "owner-confirmed-only",
+      "member_identity": [
+        "path",
+        "class",
+        "mode",
+        "bytes",
+        "sha256"
+      ],
+      "old_operational_state": "quarantine-or-rollback-only",
+      "replay_or_progress_import": false,
+      "tree_digest": "required"
+    },
+    "provider_receipts": {
+      "byte_authority": "content-addressed-merkle",
+      "coverage_modes": [
+        "FullScan",
+        "Reuse"
+      ],
+      "metadata_only_reuse": "forbidden",
+      "target_scoped": true,
+      "transient_inputs": "exclude-with-receipt"
+    },
+    "schema": "promin.alpha4-standard-contracts.v1",
+    "static_admission": {
+      "allowed_kinds": [
+        "source",
+        "documentation",
+        "portability",
+        "package",
+        "handoff"
+      ],
+      "forbidden_side_effects": [
+        "provider",
+        "configure",
+        "build",
+        "runtime",
+        "sqlite",
+        "projection"
+      ],
+      "timing_receipts": "required"
+    },
+    "test_sharding": {
+      "aggregate_coverage": "exact-once",
+      "duplicate_credit": false,
+      "memory_limit": "identical-per-shard",
+      "terminal_receipt": "required",
+      "timeout": "identical-per-shard"
+    },
+    "writer_publication": {
+      "intent_reuse": "exact-verified-only",
+      "liveness": "pid-process-start-lease",
+      "preflight_before_reservation": true,
+      "post_reservation_revalidation": true,
+      "publication": "create-only-overlap-safe"
+    }
+  },
   "derived_result_contracts": {
     "DoctorResult": {
       "archival_diagnostics_effect": "none",
@@ -864,5 +1014,5 @@
     }
   },
   "validator_registry_version": 1,
-  "version": "1.0.0-alpha.3"
+  "version": "1.0.0-alpha.4"
 }

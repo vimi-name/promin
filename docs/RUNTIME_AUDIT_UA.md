@@ -11,7 +11,7 @@ promin audit --record
 promin status --watch
 ```
 
-## Реалізовано в `1.0.0-alpha.3`
+## Реалізовано в `1.0.0-alpha.4`
 
 Repository findings:
 

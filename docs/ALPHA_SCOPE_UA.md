@@ -1,12 +1,12 @@
-# Обсяг promin 1.0.0-alpha.3
+# Обсяг promin 1.0.0-alpha.4
 
 В alpha входять:
 
 - no-question-first guided init;
 - greenfield, existing-code і hybrid Candidate;
 - mixed web/mobile/backend repository під одним control layer;
-- Morok Tower Studio, Web, Android, Windows і Vibe Recovery profiles;
-- ask, safe-auto й unsafe-auto;
+- generic C-family, Web, Android, Windows і Vibe Recovery profiles;
+- ask і standing-reversible (лише як додатковий predicate до чинної Core authority);
 - українська та англійська звітність;
 - Task/Grant/Lease/WorkCard/evidence control loop;
 - hash-driven documentation refresh і bounded context index;
@@ -14,7 +14,7 @@
 - portable/project-local skills;
 - runtime audit, heartbeat і doctor repair;
 - Windows portable canonical state — поточний верифікований deployment scope
-  alpha.3.
+  alpha.4.
 
 Свідомо відкладено:
 
@@ -31,5 +31,5 @@
 `no_acceptance_credit`. Runtime telemetry допомагає знаходити проблеми в полі,
 але не підмінює невиконані release tests.
 
-Windows-only verified scope не є блокером alpha.3: це явне поточне звуження
+Windows-only verified scope не є блокером alpha.4: це явне поточне звуження
 доказу, а не твердження, що Linux або macOS не підтримуватимуться надалі.

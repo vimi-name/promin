@@ -2,30 +2,30 @@
   "acceptance_predicate_count": 102,
   "action_capability_count": 16,
   "aliases": [],
-  "bundle_digest": "4ae2f4b86b408af59118160a00d0bae071778df66965867ec94def625910fbac",
+  "bundle_digest": "47dfe980435788c3c7d12b97b6059251d5ee5d045f7597e937304a4ada507749",
   "canonical_name": "promin",
   "canonical_name_only": true,
   "core_artifact_count": 6,
   "core_components": [
     {
       "path": "semantic-model.json",
-      "sha256": "1f5af8d8ce12e99aa9964f03396d945c6781fba234afd4fb01ad3d9044aa6fea"
+      "sha256": "4bfb782f986bd65ec7f10c16109587c6167af9c4aee468efcd8c6f8e3d72c8f9"
     },
     {
       "path": "authority-model.json",
-      "sha256": "24c3993062893ace123fa5e8e5d85a76e2ed8e622f4422f8f2fbdb00248c5ca1"
+      "sha256": "6c2addec663f8f979601466fa947e9a4347a3053d872ae89ced137fd174c315c"
     },
     {
       "path": "policy-set.json",
-      "sha256": "88146d4e87aaee238ec497e155b8549d9c62a2b3d591da9d75069112c4c7902e"
+      "sha256": "e9f8d0c51c624fbabf9b4e973aed577480f17b8785c043ac7701c25f2394546a"
     },
     {
       "path": "contracts.schema.json",
-      "sha256": "bfbc28d653b2a7356a6db0038d9cb0fbceb83f08300de0ff0f7eb72b9aa55e0a"
+      "sha256": "6880be82afac157d4a248431c27da83d4963ad43c78c1fdffd6c6476287e7cd8"
     },
     {
       "path": "conformance.json",
-      "sha256": "afcefec3a1316f8f7af570ac49ad32a6c36d94120f06b07173fa22f7676fc27d"
+      "sha256": "3925dbac85b3cb99c7192a915bdacffb8d6b10c19e98b3c8d0711669cf3a065a"
     }
   ],
   "function": "Own Core bundle identity and exact digest binding for the five other Core artifacts.",
@@ -34,9 +34,9 @@
   "policy_count": 68,
   "record_type": "StandardManifest",
   "relation_kind_count": 6,
-  "schema_definition_count": 127,
+  "schema_definition_count": 141,
   "schema_ref": "urn:promin:contracts:1#/$defs/StandardManifest",
   "selected_preset_count": 1,
   "technology_capability_count": 9,
-  "version": "1.0.0-alpha.3"
+  "version": "1.0.0-alpha.4"
 }

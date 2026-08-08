@@ -245,7 +245,7 @@ def validate_skill_directory(path: Path | str) -> dict[str, Any]:
 def _skill_roots(project_root: Path) -> list[tuple[str, Path]]:
     return [
         ("bundled", bundle_root() / "skills"),
-        ("project-portable", project_root / ".promin" / "portable" / "skills"),
+        ("project-docs", project_root / ".promin" / "docs" / "skills"),
         ("project-local", project_root / ".promin" / "skills"),
     ]
 
@@ -478,7 +478,7 @@ def create_skill(
         raise SkillError("skill version must be SemVer")
     if security_scope not in _ALLOWED_SCOPES:
         raise SkillError("skill security scope is invalid")
-    destination_root = root / ".promin" / ("portable/skills" if portable else "skills")
+    destination_root = root / ".promin" / ("docs/skills" if portable else "skills")
     destination = destination_root / skill_id
     if destination.exists() or destination.is_symlink():
         raise SkillError(f"skill already exists: {skill_id}")
@@ -733,7 +733,7 @@ def install_skill(
         binding["content_digest"] = content_digest
         _atomic_json(binding_path, binding)
         validate_skill_directory(candidate)
-        destination_root = root / ".promin" / ("portable/skills" if portable else "skills")
+        destination_root = root / ".promin" / ("docs/skills" if portable else "skills")
         destination = destination_root / skill_id
         if destination.exists() or destination.is_symlink():
             raise SkillError(f"skill already exists: {skill_id}")
@@ -758,7 +758,7 @@ def install_skill(
 def remove_skill(project_root: Path | str, *, name: str, portable: bool = True) -> dict[str, Any]:
     root = Path(project_root).resolve()
     skill_id = _normalize_name(name)
-    path = root / ".promin" / ("portable/skills" if portable else "skills") / skill_id
+    path = root / ".promin" / ("docs/skills" if portable else "skills") / skill_id
     if not path.is_dir() or path.is_symlink():
         raise SkillError(f"skill is not installed: {skill_id}")
     receipt = validate_skill_directory(path)
@@ -771,8 +771,3 @@ def remove_skill(project_root: Path | str, *, name: str, portable: bool = True) 
         "authority": False,
         "pass_credit": False,
     }
-
-
-# Compatibility alias retained only inside the current alpha source tree. The
-# public model is the open Agent Skills directory contract above.
-validate_skill = validate_skill_directory

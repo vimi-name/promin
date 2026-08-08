@@ -18,7 +18,7 @@ CLAUDE.md
 .agents/skills/promin*/SKILL.md
 .claude/skills/promin*/SKILL.md
 .cursor/skills/promin*/SKILL.md
-.promin/portable/**
+.promin/docs/**
 ```
 
 Events, SQLite, caches, provider receipts, telemetry payloads, absolute tool

@@ -126,7 +126,7 @@ def test_host_pickup_preserves_human_text_and_commit_surface_is_small(tmp_path: 
     assert _git(tmp_path, "check-ignore", "-q", ".promin/state/projection/context.sqlite3") == ""
 
 
-def test_clone_rehydrates_without_committing_databases(tmp_path: Path) -> None:
+def test_clone_requires_owner_confirmed_clean_reinitialization_without_replay(tmp_path: Path) -> None:
     source = tmp_path / "source"
     clone = tmp_path / "clone"
     source.mkdir()
@@ -136,24 +136,25 @@ def test_clone_rehydrates_without_committing_databases(tmp_path: Path) -> None:
     (source / "src" / "app.tsx").write_text("export const App = () => null;\n", encoding="utf-8")
     plan = resolve_plan(source, goal="Continue the project across developer hosts")
     created = apply_plan(source, plan)
-    assert created["first_work_card"]["record_type"] == "WorkCard"
-    team_state = json.loads((source / ".promin" / "portable" / "team-state.json").read_text(encoding="utf-8"))
-    assert team_state["record_type"] == "PortableTeamState"
-    assert team_state["active_tasks"]
+    assert created["first_work_card"] is None
+    refreshed = refresh_project(source, apply=True)
+    assert refreshed["documentation"]["status"] in {"updated", "current"}
+    team_seed = json.loads((source / ".promin" / "docs" / "team-seed.json").read_text(encoding="utf-8"))
+    assert team_seed["record_type"] == "NonAuthoritativeTeamSeed"
+    assert team_seed["operational_state_import"] == "forbidden"
 
     _git(source, "add", ".")
     staged = set(_git(source, "diff", "--cached", "--name-only").splitlines())
-    assert ".promin/portable/team-state.json" in staged
+    assert ".promin/docs/team-seed.json" in staged
     assert not any("context.sqlite3" in value or ".promin/state/" in value for value in staged)
     _git(source, "commit", "-qm", "initialize promin")
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(source), str(clone)], check=True)
 
+    seed_before = (clone / ".promin" / "docs" / "team-seed.json").read_bytes()
     repaired = repair_project(clone, apply=True)
-    assert repaired["status"] in {"applied", "healthy"}
-    assert (clone / ".promin" / "init" / "activation.json").is_file()
-    assert (clone / ".promin" / "state" / "projection" / "context.sqlite3").is_file()
-    proposal = json.loads((clone / ".promin" / "generated" / "team-import-proposal.json").read_text(encoding="utf-8"))
-    assert proposal["automatic_authoritative_import"] is False
-    assert proposal["requires_authority"] is True
-    assert proposal["active_tasks"]
-    assert (clone / ".promin" / "portable" / "team-state.json").is_file()
+    assert repaired["status"] == "blocked"
+    assert any(item["status"] == "blocked" for item in repaired["actions"])
+    assert not (clone / ".promin" / "init" / "activation.json").exists()
+    assert not (clone / ".promin" / "state" / "projection" / "context.sqlite3").exists()
+    assert (clone / ".promin" / "docs" / "team-seed.json").read_bytes() == seed_before
+    assert (clone / ".promin" / "docs" / "team-seed.json").is_file()

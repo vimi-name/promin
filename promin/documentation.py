@@ -10,34 +10,39 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sqlite3
 import stat
 import subprocess
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
+from .artifact_policy import (
+    DOCS_ROOT,
+    ArtifactPolicyError,
+    build_document_manifest,
+    validate_artifact_mode,
+    validate_document_payloads,
+)
 from .canonical import digest_value
 from .gitpolicy import estimate_tokens
 from .platform_paths import filesystem_path
 from .workspace import unit_for_path, workspace_navigation_summary
 
-_PORTABLE = Path(".promin/portable")
+_DOCS = DOCS_ROOT
 _GENERATED = Path(".promin/generated/documentation")
 _CACHE = Path(".promin/cache/documentation")
 _STATE_FILE = _CACHE / "documentation-state.json"
 _REPOSITORY_MANIFEST_FILE = _CACHE / "repository-manifest.json"
 _FALLBACK_CACHE_FILE = _CACHE / "file-state.json"
-_ENTRY_FILE = _PORTABLE / "AGENT_ENTRY.md"
-_WORKSPACE_FILE = _PORTABLE / "workspace-map.json"
-_BRIEF_FILE = _PORTABLE / "project-brief.json"
-_HANDOFF_FILE = _PORTABLE / "handoff.json"
-_TEAM_STATE_FILE = _PORTABLE / "team-state.json"
-_CONTEXT_POLICY_FILE = _PORTABLE / "context-policy.json"
-_PROJECT_CONTEXT_FILE = _PORTABLE / "PROJECT_CONTEXT.md"
-_WORKSPACE_MARKDOWN_FILE = _PORTABLE / "WORKSPACE_MAP.md"
-_OPERATIONS_FILE = _PORTABLE / "OPERATIONS.md"
-_DOCUMENTATION_MANIFEST_FILE = _PORTABLE / "documentation-manifest.json"
+_ENTRY_FILE = _DOCS / "AGENT_ENTRY.md"
+_WORKSPACE_FILE = _DOCS / "workspace-map.json"
+_BRIEF_FILE = _DOCS / "project-brief.json"
+_TEAM_SEED_FILE = _DOCS / "team-seed.json"
+_CONTEXT_POLICY_FILE = _DOCS / "context-policy.json"
+_PROJECT_CONTEXT_FILE = _DOCS / "PROJECT_CONTEXT.md"
+_WORKSPACE_MARKDOWN_FILE = _DOCS / "WORKSPACE_MAP.md"
+_OPERATIONS_FILE = _DOCS / "OPERATIONS.md"
+_DOCUMENTATION_MANIFEST_FILE = _DOCS / "documentation-manifest.json"
 _MAX_ENTRY_BYTES = 4096
 _MAX_PROJECT_CONTEXT_BYTES = 6144
 _MAX_WORKSPACE_MARKDOWN_BYTES = 8192
@@ -48,8 +53,6 @@ _MAX_REFERENCE_RECORDS = 256
 _MAX_REFERENCE_RECORD_BYTES = 64 * 1024
 _MAX_REFERENCE_TOTAL_BYTES = 2 * 1024 * 1024
 _MAX_TEAM_STATE_BYTES = 512 * 1024
-_MAX_TEAM_TASKS = 128
-_MAX_TEAM_FINDINGS = 64
 
 _IGNORE_DIRS = {
     ".git", ".promin", ".promin-host", ".idea", ".vscode", ".venv", "venv",
@@ -491,139 +494,51 @@ def _portable_brief(plan: Mapping[str, Any]) -> dict[str, Any]:
         "deliverables": list(plan.get("deliverables", [])), "references": list(plan.get("references", [])),
         "work_sources": list(plan.get("work_sources", [])), "autonomy": plan.get("autonomy"),
         "language": plan.get("reporting_language"),
-        "profile_overrides": [value for value in plan.get("profile_layers", []) if value not in {"general-development", "ask", "safe-auto", "unsafe-auto", "uk", "en"}],
+        "profile_overrides": [value for value in plan.get("profile_layers", []) if value not in {"general-development", "ask", "standing-reversible", "uk", "en"}],
         "authority": False, "pass_credit": False,
     }
     return {**identity, "brief_digest": digest_value(identity)}
 
 
-def _portable_handoff(plan: Mapping[str, Any]) -> dict[str, Any]:
-    identity = {
-        "record_type": "PortableTeamHandoff", "standard_version": plan.get("standard_version"),
-        "project_id": plan.get("project_id"), "source_plan_digest": plan.get("plan_digest"),
-        "workspace_map_digest": _portable_workspace(plan.get("workspace_map", {})).get("workspace_map_digest"),
-        "project_mode": plan.get("project_mode"), "profile_layers": list(plan.get("profile_layers", [])),
-        "reporting_language": plan.get("reporting_language"), "autonomy": plan.get("autonomy"),
-        "rehydration_command": "promin doctor --repair", "repository_identity_strategy": "recompute-on-clone-or-refresh",
-        "authoritative_operational_state_included": False,
-        "bounded_team_state_included": True,
-        "note": (
-            "Portable data contains intent, navigation and a bounded non-authoritative "
-            "team checkpoint. Re-resolve providers and authority on the receiving host."
-        ),
-        "authority": False, "pass_credit": False,
-    }
-    return {**identity, "handoff_digest": digest_value(identity)}
-
-
-def _portable_team_state(
-    root: Path,
+def _non_authoritative_team_seed(
     plan: Mapping[str, Any],
     manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build a bounded, non-authoritative checkpoint for Git handoff.
+    """Build a cloneable seed without reading local events or projections.
 
-    The event journal, Grants, Leases, evidence bodies and SQLite databases stay
-    local.  A receiving host imports this record only as a proposal after it has
-    created a fresh Activation and verified the current repository content.
+    A seed carries portable intent only.  It deliberately cannot preserve a
+    running task, lease, finding, candidate, receipt, or database identity.
+    The receiving host creates a fresh Activation first and derives its first
+    WorkCard through the authoritative command path.
     """
 
-    projection_path = root / ".promin" / "state" / "projection" / "promin.sqlite3"
-    tasks: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
-    latest_candidate: dict[str, Any] | None = None
-    projection_metadata: dict[str, str] = {}
-
-    if projection_path.is_file() and not projection_path.is_symlink():
-        try:
-            connection = sqlite3.connect(f"file:{projection_path}?mode=ro", uri=True)
-            connection.row_factory = sqlite3.Row
-            try:
-                projection_metadata = {
-                    str(row["key"]): str(row["value"])
-                    for row in connection.execute("SELECT key, value FROM metadata")
-                }
-                rows = connection.execute(
-                    """
-                    SELECT e.entity_type, e.payload_json,
-                           COALESCE(o.event_sequence, 0) AS event_sequence,
-                           COALESCE(o.event_index, 0) AS event_index
-                    FROM entities e
-                    LEFT JOIN operational_order o ON o.entity_id=e.id
-                    WHERE e.entity_type IN ('Task','Finding','Candidate')
-                    ORDER BY event_sequence DESC, event_index DESC, e.id
-                    """
-                )
-                for row in rows:
-                    try:
-                        payload = json.loads(row["payload_json"])
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    if row["entity_type"] == "Task" and len(tasks) < _MAX_TEAM_TASKS:
-                        if payload.get("state") in {"COMPLETED", "CANCELLED"}:
-                            continue
-                        tasks.append({
-                            key: payload.get(key)
-                            for key in (
-                                "task_id", "state", "required_capability",
-                                "acceptance_predicate", "allowed_paths",
-                                "candidate_digest", "created_at",
-                                "operation_profile_id", "recommended_model_tier",
-                            )
-                            if key in payload
-                        })
-                    elif row["entity_type"] == "Finding" and len(findings) < _MAX_TEAM_FINDINGS:
-                        if payload.get("status") not in {"OPEN", "BLOCKED", "WAIVED"}:
-                            continue
-                        findings.append({
-                            key: payload.get(key)
-                            for key in (
-                                "finding_id", "status", "severity", "blocking",
-                                "statement", "candidate_digest", "created_at",
-                            )
-                            if key in payload
-                        })
-                    elif row["entity_type"] == "Candidate" and latest_candidate is None:
-                        latest_candidate = {
-                            key: payload.get(key)
-                            for key in (
-                                "candidate_id", "candidate_digest", "baseline_kind",
-                                "creditable", "consistency_mode",
-                            )
-                            if key in payload
-                        }
-            finally:
-                connection.close()
-        except (OSError, sqlite3.DatabaseError):
-            projection_metadata = {"projection_read": "unavailable"}
-
     identity = {
-        "record_type": "PortableTeamState",
+        "record_type": "NonAuthoritativeTeamSeed",
         "schema_version": 1,
         "project_id": plan.get("project_id"),
+        "standard_version": plan.get("standard_version"),
         "source_plan_digest": plan.get("plan_digest"),
         "repository_content_digest": manifest.get("repository_content_digest"),
-        "projection_head_digest": projection_metadata.get("head_digest"),
-        "latest_candidate": latest_candidate,
-        "active_tasks": tasks,
-        "active_findings": findings,
-        "task_count_truncated": len(tasks) >= _MAX_TEAM_TASKS,
-        "finding_count_truncated": len(findings) >= _MAX_TEAM_FINDINGS,
-        "import_policy": "proposal-only-revalidate-under-receiving-activation",
+        "workspace_map_digest": _portable_workspace(plan.get("workspace_map", {})).get("workspace_map_digest"),
+        "project_mode": plan.get("project_mode"),
+        "profile_layers": list(plan.get("profile_layers", [])),
+        "reporting_language": plan.get("reporting_language"),
+        "autonomy": plan.get("autonomy"),
+        "clean_reinitialization": "owner-confirmed project-package operation",
+        "work_card_derivation": "after-activation",
+        "operational_state_import": "forbidden",
         "excluded": [
-            "grants", "leases", "trust-roots", "evidence-bodies",
-            "provider-receipts", "host-paths", "telemetry", "databases",
+            "tasks", "work-cards", "findings", "candidates", "grants", "leases",
+            "trust-roots", "events", "projections", "databases", "evidence-bodies",
+            "provider-receipts", "host-paths", "telemetry",
         ],
         "authoritative": False,
         "authority": False,
         "pass_credit": False,
     }
-    result = {**identity, "team_state_digest": digest_value(identity)}
-    payload = _json_bytes(result)
-    if len(payload) > _MAX_TEAM_STATE_BYTES:
-        raise DocumentationError("portable team state exceeds the alpha budget")
+    result = {**identity, "team_seed_digest": digest_value(identity)}
+    if len(_json_bytes(result)) > _MAX_TEAM_STATE_BYTES:
+        raise DocumentationError("non-authoritative team seed exceeds the documentation budget")
     return result
 
 
@@ -638,7 +553,7 @@ def _agent_entry(plan: Mapping[str, Any]) -> str:
 
 - Версія: `{plan.get('standard_version', 'unknown')}`
 - Режим: `{plan.get('project_mode', 'unknown')}`
-- Автономність: `{plan.get('autonomy', 'safe-auto')}`
+- Автономність: `{plan.get('autonomy', 'ask')}`
 - Профілі: {profiles}
 
 1. `promin doctor`
@@ -660,7 +575,7 @@ def _agent_entry(plan: Mapping[str, Any]) -> str:
 
 - Version: `{plan.get('standard_version', 'unknown')}`
 - Mode: `{plan.get('project_mode', 'unknown')}`
-- Autonomy: `{plan.get('autonomy', 'safe-auto')}`
+- Autonomy: `{plan.get('autonomy', 'ask')}`
 - Profiles: {profiles}
 
 1. `promin doctor`
@@ -709,7 +624,7 @@ def _project_context_markdown(plan: Mapping[str, Any]) -> str:
 
 - Мета: {plan.get('goal', 'Продовжити проєкт надійно.')}
 - Режим: `{plan.get('project_mode', 'unknown')}`
-- Автономність: `{plan.get('autonomy', 'safe-auto')}`
+- Автономність: `{plan.get('autonomy', 'ask')}`
 - Профілі: {profiles}
 - Технології: {technology_text}
 
@@ -732,7 +647,7 @@ def _project_context_markdown(plan: Mapping[str, Any]) -> str:
 
 - Goal: {plan.get('goal', 'Continue the project reliably.')}
 - Mode: `{plan.get('project_mode', 'unknown')}`
-- Autonomy: `{plan.get('autonomy', 'safe-auto')}`
+- Autonomy: `{plan.get('autonomy', 'ask')}`
 - Profiles: {profiles}
 - Technologies: {technology_text}
 
@@ -806,7 +721,7 @@ def _operations_markdown(plan: Mapping[str, Any]) -> str:
 5. `promin refresh` — hash-driven оновлення коротких документів і локального індексу.
 6. `promin audit` — знайти loops, drift, дублікати, degradation і portability issues.
 
-У Git комітяться лише `.promin/portable/**`, `AGENTS.md`, `CLAUDE.md` та host skill/rule files. Events, databases, caches, evidence payloads і host paths залишаються локальними та rebuildable.
+У Git комітяться лише `.promin/docs/**`, `AGENTS.md`, `CLAUDE.md` та host skill/rule files. Events, databases, caches, evidence payloads і host paths залишаються локальними та rebuildable.
 
 Після перенесення папки на іншу ОС: `promin doctor --repair`.
 """
@@ -820,7 +735,7 @@ def _operations_markdown(plan: Mapping[str, Any]) -> str:
 5. `promin refresh` — hash-driven repair of short docs and the local index.
 6. `promin audit` — detect loops, drift, duplicates, degradation, and portability issues.
 
-Only `.promin/portable/**`, `AGENTS.md`, `CLAUDE.md`, and host skill/rule files belong in Git. Events, databases, caches, evidence payloads, and host paths remain local and rebuildable.
+Only `.promin/docs/**`, `AGENTS.md`, `CLAUDE.md`, and host skill/rule files belong in Git. Events, databases, caches, evidence payloads, and host paths remain local and rebuildable.
 
 After moving the folder to another OS: `promin doctor --repair`.
 """
@@ -839,7 +754,7 @@ def _context_policy(entry: str) -> dict[str, Any]:
     return {**identity, "policy_digest": digest_value(identity)}
 
 
-def _expected_portable(root: Path, plan: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[Path, bytes]:
+def _expected_docs(plan: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[Path, bytes]:
     entry = _agent_entry(plan)
     outputs: dict[Path, bytes] = {
         _ENTRY_FILE: entry.encode("utf-8"),
@@ -848,37 +763,36 @@ def _expected_portable(root: Path, plan: Mapping[str, Any], manifest: Mapping[st
         _OPERATIONS_FILE: _operations_markdown(plan).encode("utf-8"),
         _WORKSPACE_FILE: _json_bytes(_portable_workspace(plan.get("workspace_map", {}))),
         _BRIEF_FILE: _json_bytes(_portable_brief(plan)),
-        _HANDOFF_FILE: _json_bytes(_portable_handoff(plan)),
-        _TEAM_STATE_FILE: _json_bytes(_portable_team_state(root, plan, manifest)),
+        _TEAM_SEED_FILE: _json_bytes(_non_authoritative_team_seed(plan, manifest)),
         _CONTEXT_POLICY_FILE: _json_bytes(_context_policy(entry)),
     }
-    manifest_identity = {
-        "record_type": "PortableDocumentationManifest",
-        "source_algorithm": manifest.get("kind"),
-        "repository_content_digest": manifest.get("repository_content_digest"),
-        "workspace_map_digest": plan.get("workspace_map", {}).get("workspace_map_digest"),
-        "outputs": {
-            path.as_posix(): hashlib.sha256(payload).hexdigest()
-            for path, payload in sorted(outputs.items(), key=lambda item: item[0].as_posix())
-        },
-        "generated": True,
-        "authoritative": False,
-        "pass_credit": False,
-    }
-    outputs[_DOCUMENTATION_MANIFEST_FILE] = _json_bytes({
-        **manifest_identity,
-        "manifest_digest": digest_value(manifest_identity),
-    })
+    try:
+        manifest_identity = build_document_manifest(
+            outputs,
+            metadata={
+                "source_algorithm": manifest.get("kind"),
+                "repository_content_digest": manifest.get("repository_content_digest"),
+                "workspace_map_digest": plan.get("workspace_map", {}).get("workspace_map_digest"),
+                "generated": True,
+            },
+        )
+    except ArtifactPolicyError as exc:
+        raise DocumentationError(str(exc)) from exc
+    outputs[_DOCUMENTATION_MANIFEST_FILE] = _json_bytes(manifest_identity)
+    try:
+        validate_document_payloads(outputs)
+    except ArtifactPolicyError as exc:
+        raise DocumentationError(str(exc)) from exc
     return outputs
 
 
-def _build_snapshot(plan: Mapping[str, Any], manifest: Mapping[str, Any], unit_states: Mapping[str, Any], portable: Mapping[Path, bytes]) -> dict[str, Any]:
+def _build_snapshot(plan: Mapping[str, Any], manifest: Mapping[str, Any], unit_states: Mapping[str, Any], docs: Mapping[Path, bytes]) -> dict[str, Any]:
     identity = {
         "record_type": "DocumentationSnapshot", "algorithm": "git-objects-plus-dirty-overlay-or-cached-merkle",
         "plan_digest": plan.get("plan_digest"), "workspace_map_digest": plan.get("workspace_map", {}).get("workspace_map_digest"),
         "repository_content_digest": manifest.get("repository_content_digest"), "repository_identity_kind": manifest.get("kind"),
         "units": unit_states,
-        "portable_outputs": {path.as_posix(): hashlib.sha256(payload).hexdigest() for path, payload in sorted(portable.items(), key=lambda item: item[0].as_posix())},
+        "tracked_document_outputs": {path.as_posix(): hashlib.sha256(payload).hexdigest() for path, payload in sorted(docs.items(), key=lambda item: item[0].as_posix())},
         "authority": False, "pass_credit": False,
     }
     return {**identity, "documentation_snapshot_digest": digest_value(identity)}
@@ -889,7 +803,7 @@ def _reference_records(
     plan: Mapping[str, Any],
     manifest: Mapping[str, Any],
     summaries: Mapping[str, str],
-    portable: Mapping[Path, bytes],
+    docs: Mapping[Path, bytes],
 ) -> list[dict[str, Any]]:
     requested = {str(value) for value in (*plan.get("references", []), *plan.get("work_sources", []))}
     result: list[dict[str, Any]] = []
@@ -919,17 +833,17 @@ def _reference_records(
         })
         if len(result) >= _MAX_REFERENCE_RECORDS:
             break
-    for relative, payload in sorted(portable.items(), key=lambda item: item[0].as_posix()):
+    for relative, payload in sorted(docs.items(), key=lambda item: item[0].as_posix()):
         if relative.suffix.casefold() not in {".md", ".json"}:
             continue
         if used + len(payload) > _MAX_REFERENCE_TOTAL_BYTES:
             break
         used += len(payload)
         result.append({
-            "record_id": f"portable:{relative.as_posix()}",
+            "record_id": f"tracked-document:{relative.as_posix()}",
             "unit_id": None,
             "path": relative.as_posix(),
-            "kind": "portable-project-context",
+            "kind": "tracked-project-documentation",
             "title": relative.name,
             "content": payload.decode("utf-8", errors="replace"),
             "source_sha256": hashlib.sha256(payload).hexdigest(),
@@ -974,15 +888,15 @@ def _calculate(project_root: Path | str, plan: Mapping[str, Any]) -> tuple[Path,
             "summary_path": (_GENERATED / "units" / f"{unit_id}.md").as_posix(),
             "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(), "file_count": len(records),
         }
-    portable = _expected_portable(root, plan, manifest)
-    snapshot = _build_snapshot(plan, manifest, states, portable)
-    return root, manifest, summaries, states, portable, snapshot
+    docs = _expected_docs(plan, manifest)
+    snapshot = _build_snapshot(plan, manifest, states, docs)
+    return root, manifest, summaries, states, docs, snapshot
 
 
 def documentation_status(project_root: Path | str, plan: Mapping[str, Any] | None) -> dict[str, Any]:
     if plan is None:
         return {"record_type": "DocumentationStatus", "status": "uninitialized", "stale_units": [], "authority": False, "pass_credit": False}
-    root, manifest, summaries, states, portable, snapshot = _calculate(project_root, plan)
+    root, manifest, summaries, states, docs, snapshot = _calculate(project_root, plan)
     previous = _load_json(root / _STATE_FILE)
     stale_units = []
     for unit_id, state in states.items():
@@ -993,7 +907,7 @@ def documentation_status(project_root: Path | str, plan: Mapping[str, Any] | Non
         if not isinstance(prior, Mapping) or prior.get("source_digest") != state["source_digest"] or actual != state["summary_sha256"]:
             stale_units.append(unit_id)
     stale_paths = []
-    for relative, payload in portable.items():
+    for relative, payload in docs.items():
         path = root / relative
         observed = _regular_file_bytes(path)
         actual = None if observed is None else hashlib.sha256(observed).hexdigest()
@@ -1009,8 +923,18 @@ def documentation_status(project_root: Path | str, plan: Mapping[str, Any] | Non
     }
 
 
-def sync_documentation(project_root: Path | str, plan: Mapping[str, Any], *, apply: bool = True) -> dict[str, Any]:
-    root, manifest, summaries, states, portable, snapshot = _calculate(project_root, plan)
+def sync_documentation(
+    project_root: Path | str,
+    plan: Mapping[str, Any],
+    *,
+    apply: bool = True,
+    artifact_mode: str = "minimal",
+) -> dict[str, Any]:
+    try:
+        selected_artifact_mode = validate_artifact_mode(artifact_mode)
+    except ArtifactPolicyError as exc:
+        raise DocumentationError(str(exc)) from exc
+    root, manifest, summaries, states, docs, snapshot = _calculate(project_root, plan)
     previous = _load_json(root / _STATE_FILE) or {}
     previous_units = previous.get("units", {}) if isinstance(previous.get("units"), dict) else {}
     changed_units: list[str] = []
@@ -1047,7 +971,7 @@ def sync_documentation(project_root: Path | str, plan: Mapping[str, Any], *, app
                 os.unlink(filesystem_path(old))
             removed.append(relative.as_posix())
 
-    for relative, payload in sorted(portable.items(), key=lambda item: item[0].as_posix()):
+    for relative, payload in sorted(docs.items(), key=lambda item: item[0].as_posix()):
         path = root / relative
         observed = _regular_file_bytes(path)
         actual = None if observed is None else hashlib.sha256(observed).hexdigest()
@@ -1059,8 +983,8 @@ def sync_documentation(project_root: Path | str, plan: Mapping[str, Any], *, app
         _atomic_json(root / _STATE_FILE, snapshot)
     written.append(_STATE_FILE.as_posix()) if previous.get("documentation_snapshot_digest") != snapshot["documentation_snapshot_digest"] else None
 
-    refs = _reference_records(root, plan, manifest, summaries, portable)
-    entry = portable[_ENTRY_FILE].decode("utf-8")
+    refs = _reference_records(root, plan, manifest, summaries, docs)
+    entry = docs[_ENTRY_FILE].decode("utf-8")
     return {
         "record_type": "DocumentationSyncResult",
         "status": "updated" if written or removed else "current" if apply else "planned",
@@ -1069,7 +993,8 @@ def sync_documentation(project_root: Path | str, plan: Mapping[str, Any], *, app
         "repository_manifest_file_count": len(manifest.get("records", [])), "repository_manifest_truncated": bool(manifest.get("truncated")),
         "agent_entry_bytes": len(entry.encode("utf-8")), "agent_entry_estimated_tokens": estimate_tokens(entry),
         "unit_summary_bytes": sum(len(value.encode("utf-8")) for value in summaries.values()),
-        "portable_documentation_bytes": sum(len(payload) for payload in portable.values()),
+        "artifact_mode": selected_artifact_mode,
+        "tracked_documentation_bytes": sum(len(payload) for payload in docs.values()),
         "reference_record_count": len(refs), "reference_records": refs,
         "documentation_snapshot_digest": snapshot["documentation_snapshot_digest"],
         "full_content_scan": manifest.get("kind") != "git-objects-plus-working-overlay",

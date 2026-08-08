@@ -57,7 +57,7 @@ POLICY_SET = json.loads(
     (PACKAGE_ROOT / "core" / "policy-set.json").read_text(encoding="utf-8")
 )
 PRESET = json.loads(
-    (PACKAGE_ROOT / "presets" / "semantic-morok-tower.json").read_text(
+    (PACKAGE_ROOT / "presets" / "semantic-standard.json").read_text(
         encoding="utf-8"
     )
 )
@@ -131,7 +131,7 @@ def projection_limits(
     conformance = json.loads(
         (PACKAGE_ROOT / "core" / "conformance.json").read_text(encoding="utf-8")
     )
-    selected_profile_id = "tower-strong"
+    selected_profile_id = "extended"
     selected_profile = PRESET["profiles"][selected_profile_id]
     default_budget = {
         "max_bytes": selected_profile["max_context_bytes"],

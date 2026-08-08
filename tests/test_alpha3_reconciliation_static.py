@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import promin.init as init_module
+from promin.selector_shards import load_selector_shard_manifest
 
 
 ROOT = Path(__file__).parents[1]
@@ -22,7 +23,7 @@ def test_rec_006_path_ownership_gate_passes() -> None:
 
     assert report["gate_id"] == "REC-006"
     assert report["status"] == "pass", report["violations"]
-    assert report["pass_credit"] is True
+    assert report["pass_credit"] is False
     assert report["identity"]["definitions"] == ["promin/platform_paths.py"]
     assert report["process_transport"]["provider_subprocess_run_count"] == 1
     assert report["temporary_boundaries"]["all_routed_through_platform_owner"] is True
@@ -57,20 +58,26 @@ def test_runtime_temporary_directories_have_one_identity_owner() -> None:
     assert offenders == []
 
 
-def test_portability_workflow_targets_split_reconciliation_lanes() -> None:
+def test_portability_workflow_declares_windows_runtime_and_static_other_platforms() -> None:
     workflow = (ROOT / ".github" / "workflows" / "alpha-portability.yml").read_text(
         encoding="utf-8"
     )
 
     for lane in (
+        "test_alpha4_genericity.py",
+        "test_alpha4_static_admission.py",
+        "test_alpha4_selector_shards.py",
         "test_alpha3_reconciliation_static.py",
-        "test_alpha3_reconciliation_paths.py",
+        "test_alpha4_windows_publication.py",
+        "test_alpha4_recovery_locks.py",
+        "test_alpha4_extensions_clean_init.py",
         "test_alpha3_reconciliation_windows.py",
-        "test_alpha3_reconciliation_performance.py",
-        "test_alpha3_reconciliation_package.py",
+        "test_alpha3_reconciliation_aliased_temp_tree.py",
     ):
         assert lane in workflow
-    assert "test_alpha3_reconciliation.py" not in workflow
+    assert "declared-platform-static-validation" in workflow
+    assert "Linux/macOS are intentionally static-only" in workflow
+    assert "macos-aliased-paths" not in workflow
     assert "python: ['3.12', '3.13', '3.14']" in workflow
 
 
@@ -153,44 +160,28 @@ def test_command_latency_contract_has_one_canonical_measured_shape() -> None:
     assert {"cli_cold", "runtime_warm"} <= validate_modes
 
 
-def test_shard_manifest_defines_bounded_reconciliation_lanes() -> None:
-    manifest = json.loads((ROOT / "tests" / "ALPHA3_R2_TEST_SHARDS.json").read_text(encoding="utf-8"))
+def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
+    manifest_path = ROOT / "tests" / "ALPHA4_TEST_SHARDS.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validated = load_selector_shard_manifest(manifest_path)
 
-    assert manifest["record_type"] == "ProminAlpha3R2TestShards"
-    assert manifest["non_scale_selector"] == "not scale"
-    assert manifest["unexpected_skip_policy"] == "fail"
+    assert manifest["schema"] == "promin.selector-shards.v1"
+    assert manifest["selector_set_id"] == "standard-alpha4-non-scale-v1"
+    assert manifest["marker_expression"] == "not scale"
+    assert manifest["selector_count"] == len(manifest["selectors"])
+    assert manifest["per_process"] == {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824,
+    }
+    assert manifest["aggregate"] == {"timeout_seconds": 3600}
+    assert validated["selector_count"] == manifest["selector_count"]
     shards = manifest["shards"]
-    assert [shard["id"] for shard in shards] == [
-        "static",
-        "paths",
-        "aliased-temp-tree",
-        "windows-integration",
-        "performance",
-        "core-contracts",
-        "mutations",
-        "service-cli",
-        "package",
-        "alpha-experience",
-    ]
+    assert len(shards) == 6
     for shard in shards:
-        assert set(shard) == {
-            "id",
-            "command",
-            "test_files",
-            "expected_markers",
-            "timeout_seconds",
-            "allowed_skips",
-            "evidence_output",
-        }
-        assert shard["command"].startswith("python -m pytest ")
-        assert isinstance(shard["timeout_seconds"], int) and shard["timeout_seconds"] > 0
-        assert shard["allowed_skips"] == 0
-        assert shard["evidence_output"].startswith("external/")
-        assert shard["test_files"]
-        assert all(path.startswith("tests/test_") and path.endswith(".py") for path in shard["test_files"])
-        for path in shard["test_files"]:
-            assert path in shard["command"]
-    declared = [path for shard in shards for path in shard["test_files"]]
+        assert shard["selectors"]
+        assert shard["limits"] == manifest["per_process"]
+        assert all(path.startswith("tests/test_") and path.endswith(".py") for path in shard["selectors"])
+    declared = [path for shard in shards for path in shard["selectors"]]
     discovered = sorted(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "tests").glob("test_*.py")

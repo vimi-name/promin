@@ -100,6 +100,35 @@
         }
       ]
     },
+    "AffectedSemanticScope": {
+      "additionalProperties": false,
+      "properties": {
+        "input_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "invalidation_class": {
+          "enum": [
+            "BODY_ONLY",
+            "IMPORT_SURFACE",
+            "CMAKE_TOPOLOGY",
+            "TOOLING_ONLY"
+          ]
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "invalidation_class",
+        "input_digest",
+        "truncated",
+        "pass_credit"
+      ],
+      "type": "object"
+    },
     "Artifact": {
       "additionalProperties": false,
       "allOf": [
@@ -1469,7 +1498,7 @@
           }
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -2080,6 +2109,42 @@
         "path_identity",
         "collision_policy",
         "product_identity_excludes_control_state"
+      ],
+      "type": "object"
+    },
+    "CanonicalCompilationDatabase": {
+      "additionalProperties": false,
+      "properties": {
+        "command_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNAVAILABLE"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "digest",
+        "command_count",
+        "pass_credit"
       ],
       "type": "object"
     },
@@ -3042,6 +3107,16 @@
             "zero-unowned-normative-facts": "package-static"
           }
         },
+        "alpha4_no_credit_rules": {
+          "const": {
+            "acceptance_pass": false,
+            "diagnostic_or_static_only_pass_credit": false,
+            "dynamic_handoff_pass_credit": false,
+            "product_acceptance_pass": false,
+            "release_eligible": false,
+            "unavailable_is_pass": false
+          }
+        },
         "command_latency_contracts": {
           "const": [
             {
@@ -3705,7 +3780,7 @@
         "structural_budgets": {
           "const": {
             "authority_bearing_init_records": 5,
-            "base_user_commands_max": 10,
+            "base_user_commands_max": 11,
             "core_normative_artifacts": 6,
             "persistent_entity_kinds_max": 9,
             "relation_kinds_max": 6,
@@ -3715,7 +3790,7 @@
           }
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         },
         "workcard_hard_ceiling": {
           "const": {
@@ -3741,6 +3816,7 @@
         "mutation_families",
         "production_claim_rule",
         "dependency_depth_hard_max",
+        "alpha4_no_credit_rules",
         "acceptance_proof_class_counts",
         "acceptance_proof_classes",
         "command_latency_contracts"
@@ -5607,6 +5683,32 @@
       "type": "object",
       "x-promin-persistence": "derived-live-only"
     },
+    "DynamicValidationHandoff": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_write_scope": {
+          "minItems": 1,
+          "type": "array"
+        },
+        "forbidden": {
+          "minItems": 1,
+          "type": "array"
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "status": {
+          "const": "PENDING_DYNAMIC"
+        }
+      },
+      "required": [
+        "status",
+        "allowed_write_scope",
+        "forbidden",
+        "pass_credit"
+      ],
+      "type": "object"
+    },
     "EffectTarget": {
       "additionalProperties": false,
       "properties": {
@@ -6509,6 +6611,35 @@
       ],
       "type": "object"
     },
+    "FinalStaticAdmission": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_pass": {
+          "const": false
+        },
+        "checks": {
+          "minItems": 1,
+          "type": "array"
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "runtime_validated": {
+          "const": false
+        },
+        "schema": {
+          "const": "promin.final-static-admission.v1"
+        }
+      },
+      "required": [
+        "schema",
+        "checks",
+        "acceptance_pass",
+        "pass_credit",
+        "runtime_validated"
+      ],
+      "type": "object"
+    },
     "Finding": {
       "additionalProperties": false,
       "allOf": [
@@ -6619,6 +6750,13 @@
         "created_at"
       ],
       "type": "object"
+    },
+    "FindingClassification": {
+      "enum": [
+        "PROVEN",
+        "REVIEW",
+        "SAFE"
+      ]
     },
     "GateEvidenceArtifactBinding": {
       "additionalProperties": false,
@@ -7970,6 +8108,32 @@
         "issuer_grant_id",
         "issuer_signed_claim_digest",
         "signed_claim_digest"
+      ],
+      "type": "object"
+    },
+    "LanguageCapabilityProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_effect": {
+          "const": "none"
+        },
+        "languages": {
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "profileId": {
+          "$ref": "#/$defs/Id"
+        },
+        "schema": {
+          "const": "promin.language-capability-profile.v1"
+        }
+      },
+      "required": [
+        "schema",
+        "profileId",
+        "languages",
+        "authority_effect"
       ],
       "type": "object"
     },
@@ -11524,6 +11688,158 @@
     "PolicySet": {
       "additionalProperties": false,
       "properties": {
+        "alpha4_standard_contracts": {
+          "const": {
+            "artifact_policy": {
+              "classes": [
+                "portable-normative-doc",
+                "compact-current-report",
+                "diagnostic-inventory",
+                "forensic-log",
+                "runtime-evidence",
+                "cache",
+                "recovery-backup"
+              ],
+              "default_mode": "minimal",
+              "detailed_output": "host-local-only",
+              "single_current_registry": true,
+              "tracked_boundary": ".promin/docs"
+            },
+            "authority": {
+              "dual_authority": "reject",
+              "legacy_compatibility": "reject",
+              "owner": "core/policy-set.json",
+              "project_specific_defaults": "reject"
+            },
+            "claims": {
+              "acceptance_pass": false,
+              "pass_credit": false,
+              "product_acceptance_pass": false,
+              "release_eligible": false,
+              "runtime_validated": false
+            },
+            "documentation_boundary": {
+              "extension_root": ".promin/docs/extensions",
+              "forbidden_operational_roots": [
+                "cache",
+                "evidence",
+                "init",
+                "leases",
+                "locks",
+                "providers",
+                "state"
+              ],
+              "link_or_reparse": "reject",
+              "manifest": "typed-byte-exact",
+              "normalization_collision": "reject"
+            },
+            "dynamic_handoff": {
+              "acceptance_promotion": "forbidden",
+              "execution": "dynamic-only",
+              "required_status": "PENDING_DYNAMIC",
+              "shortcuts": [
+                "direct-projection-edit",
+                "direct-sqlite-edit",
+                "synthetic-evidence",
+                "bypassed-gate"
+              ]
+            },
+            "gate_invalidation": {
+              "classes": [
+                "BODY_ONLY",
+                "IMPORT_SURFACE",
+                "CMAKE_TOPOLOGY",
+                "TOOLING_ONLY"
+              ],
+              "git-head-alone": "not-an-invalidation-input",
+              "receipt": "input-digest-scope-timing-status-credit",
+              "source_first": true
+            },
+            "init_profiles": {
+              "authority_effect": "none",
+              "precedence": [
+                "default",
+                "host-profile",
+                "project-package",
+                "cli",
+                "interactive-user"
+              ],
+              "selection": [
+                "accept",
+                "decline",
+                "custom"
+              ],
+              "unavailable_is_pass": false
+            },
+            "language_analysis": {
+              "finding_classification": [
+                "PROVEN",
+                "REVIEW",
+                "SAFE"
+              ],
+              "interface_weight": "review-only",
+              "lexical_mask": "offset-preserving",
+              "missing_tool": "UNAVAILABLE",
+              "semantic_tool_input": "canonical-compilation-database"
+            },
+            "project_package": {
+              "clean_init": "owner-confirmed-only",
+              "member_identity": [
+                "path",
+                "class",
+                "mode",
+                "bytes",
+                "sha256"
+              ],
+              "old_operational_state": "quarantine-or-rollback-only",
+              "replay_or_progress_import": false,
+              "tree_digest": "required"
+            },
+            "provider_receipts": {
+              "byte_authority": "content-addressed-merkle",
+              "coverage_modes": [
+                "FullScan",
+                "Reuse"
+              ],
+              "metadata_only_reuse": "forbidden",
+              "target_scoped": true,
+              "transient_inputs": "exclude-with-receipt"
+            },
+            "schema": "promin.alpha4-standard-contracts.v1",
+            "static_admission": {
+              "allowed_kinds": [
+                "source",
+                "documentation",
+                "portability",
+                "package",
+                "handoff"
+              ],
+              "forbidden_side_effects": [
+                "provider",
+                "configure",
+                "build",
+                "runtime",
+                "sqlite",
+                "projection"
+              ],
+              "timing_receipts": "required"
+            },
+            "test_sharding": {
+              "aggregate_coverage": "exact-once",
+              "duplicate_credit": false,
+              "memory_limit": "identical-per-shard",
+              "terminal_receipt": "required",
+              "timeout": "identical-per-shard"
+            },
+            "writer_publication": {
+              "intent_reuse": "exact-verified-only",
+              "liveness": "pid-process-start-lease",
+              "post_reservation_revalidation": true,
+              "preflight_before_reservation": true,
+              "publication": "create-only-overlap-safe"
+            }
+          }
+        },
         "derived_result_contracts": {
           "const": {
             "DoctorResult": {
@@ -12414,7 +12730,7 @@
           "const": 1
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -12427,6 +12743,7 @@
         "optimization_gate",
         "state_machines",
         "policies",
+        "alpha4_standard_contracts",
         "derived_result_contracts",
         "gate_run_definition_contract",
         "research_draft_sanitation",
@@ -12444,6 +12761,7 @@
             "status",
             "next",
             "validate",
+            "static-admission",
             "continue",
             "audit",
             "refresh",
@@ -12510,7 +12828,7 @@
           "type": "object"
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -12594,8 +12912,7 @@
             "autonomy": {
               "enum": [
                 "ask",
-                "safe-auto",
-                "unsafe-auto"
+                "standing-reversible"
               ]
             },
             "constraints": {
@@ -12788,6 +13105,66 @@
               "maxItems": 128,
               "type": "array"
             },
+            "init_capability_selection": {
+              "additionalProperties": false,
+              "properties": {
+                "acceptance_pass": {
+                  "const": false
+                },
+                "authority_granted": {
+                  "const": false
+                },
+                "documentation_choice": {
+                  "enum": [
+                    "accept",
+                    "decline",
+                    "custom",
+                    "ask"
+                  ]
+                },
+                "pass_credit": {
+                  "const": false
+                },
+                "profile_digest": {
+                  "$ref": "#/$defs/Digest"
+                },
+                "selection_digest": {
+                  "$ref": "#/$defs/Digest"
+                },
+                "selection_source": {
+                  "enum": [
+                    "default",
+                    "host-profile",
+                    "project-package",
+                    "cli",
+                    "interactive-user"
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "AVAILABLE",
+                    "PENDING_OWNER_SELECTION",
+                    "UNAVAILABLE"
+                  ]
+                },
+                "verification_choice": {
+                  "enum": [
+                    "accept",
+                    "decline",
+                    "custom",
+                    "ask"
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "selection_source",
+                "authority_granted",
+                "pass_credit",
+                "acceptance_pass"
+              ],
+              "type": "object"
+            },
             "layers": {
               "items": {
                 "$ref": "#/$defs/Id"
@@ -12872,6 +13249,7 @@
             "detected_technologies",
             "operation_profiles",
             "resolution",
+            "init_capability_selection",
             "authority_effect",
             "profile_digest"
           ],
@@ -12941,6 +13319,35 @@
         "resolved_profile",
         "orchestration",
         "telemetry"
+      ],
+      "type": "object"
+    },
+    "ProjectPackageManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "members": {
+          "minItems": 1,
+          "type": "array"
+        },
+        "package_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "schema": {
+          "const": "promin.project-package.v1"
+        },
+        "tree_digest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schema",
+        "package_id",
+        "tree_digest",
+        "members",
+        "pass_credit"
       ],
       "type": "object"
     },
@@ -13276,7 +13683,7 @@
           "const": true
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -15743,6 +16150,61 @@
         "invocation_receipt_digest",
         "authoritative",
         "pass_credit"
+      ],
+      "type": "object"
+    },
+    "ProviderReceiptEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "merkle_root": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "mode": {
+          "enum": [
+            "FullScan",
+            "Reuse"
+          ]
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "schema": {
+          "const": "promin.provider-receipt-envelope.v1"
+        }
+      },
+      "required": [
+        "schema",
+        "mode",
+        "merkle_root",
+        "coverage_digest",
+        "pass_credit"
+      ],
+      "type": "object"
+    },
+    "ReactivationIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "intent_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "owner_confirmed": {
+          "const": true
+        },
+        "rollback": {
+          "const": "whole-root-only"
+        },
+        "schema": {
+          "const": "promin.reactivation-intent.v1"
+        }
+      },
+      "required": [
+        "schema",
+        "intent_digest",
+        "owner_confirmed",
+        "rollback"
       ],
       "type": "object"
     },
@@ -18688,6 +19150,36 @@
       ],
       "type": "object"
     },
+    "SelectorShardAggregate": {
+      "additionalProperties": false,
+      "properties": {
+        "pass_credit": {
+          "const": false
+        },
+        "selector_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "TIMEOUT",
+            "UNAVAILABLE",
+            "INVALID_HARNESS"
+          ]
+        },
+        "terminal_receipt": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "selector_digest",
+        "terminal_receipt",
+        "pass_credit"
+      ],
+      "type": "object"
+    },
     "SemVer": {
       "maxLength": 128,
       "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
@@ -18848,6 +19340,12 @@
         },
         "design_rules": {
           "const": {
+            "alpha4_standard_authority": {
+              "canonical_policy_owner": "policy-set.json.alpha4_standard_contracts",
+              "derived_outputs": "non-authoritative",
+              "project_specific_defaults": "reject",
+              "standard_only": true
+            },
             "artifact_subtypes": {
               "candidate-delta": "An Artifact with kind diff binds one base Candidate, one new Candidate, one WorkCard, and the complete normalized changed-path set.",
               "evidence": "An evidence Artifact binds exact Candidate, policy, tool, inputs, and every invoked provider adapter; Finding disposition evidence additionally binds the canonical Finding digest."
@@ -19775,7 +20273,7 @@
           }
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -20070,7 +20568,7 @@
           "type": "integer"
         },
         "schema_definition_count": {
-          "const": 127,
+          "const": 141,
           "type": "integer"
         },
         "schema_ref": {
@@ -20085,7 +20583,7 @@
           "type": "integer"
         },
         "version": {
-          "const": "1.0.0-alpha.3"
+          "const": "1.0.0-alpha.4"
         }
       },
       "required": [
@@ -21575,6 +22073,87 @@
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
       "type": "string"
     },
+    "ToolOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_pass": {
+          "const": false
+        },
+        "availability": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE"
+          ]
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "SKIPPED",
+            "UNAVAILABLE",
+            "TIMEOUT"
+          ]
+        }
+      },
+      "required": [
+        "availability",
+        "status",
+        "pass_credit",
+        "acceptance_pass"
+      ],
+      "type": "object"
+    },
+    "TrackedDocumentationBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "pass_credit": {
+          "const": false
+        },
+        "record_type": {
+          "const": "TrackedDocumentationBoundary"
+        },
+        "root": {
+          "const": ".promin/docs"
+        }
+      },
+      "required": [
+        "record_type",
+        "root",
+        "manifest_digest",
+        "pass_credit"
+      ],
+      "type": "object"
+    },
+    "TrackedExtensionSet": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_exact": {
+          "const": true
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/Sha256"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "root": {
+          "const": ".promin/docs/extensions"
+        }
+      },
+      "required": [
+        "root",
+        "members",
+        "byte_exact"
+      ],
+      "type": "object"
+    },
     "TrustKey": {
       "additionalProperties": false,
       "properties": {
@@ -21874,6 +22453,36 @@
       ],
       "type": "object",
       "x-promin-persistence": "derived-live-only"
+    },
+    "WriterIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "lease_digest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "pid": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "process_start_identity": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "state": {
+          "enum": [
+            "LIVE",
+            "DEAD",
+            "EXPIRED",
+            "UNVERIFIABLE"
+          ]
+        }
+      },
+      "required": [
+        "pid",
+        "process_start_identity",
+        "lease_digest",
+        "state"
+      ],
+      "type": "object"
     }
   },
   "$id": "urn:promin:contracts:1",
@@ -21957,5 +22566,5 @@
     }
   ],
   "title": "promin composed contracts",
-  "version": "1.0.0-alpha.3"
+  "version": "1.0.0-alpha.4"
 }

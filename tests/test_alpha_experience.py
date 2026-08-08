@@ -34,7 +34,7 @@ def test_profiles_detect_android_windows_and_vibe(tmp_path: Path) -> None:
     assert "vibe-recovery" in plan["profile_layers"]
 
 
-def test_guided_apply_creates_portable_alpha_state_and_first_card(tmp_path: Path) -> None:
+def test_guided_apply_keeps_first_work_card_package_defined(tmp_path: Path) -> None:
     plan = resolve_plan(tmp_path, goal="Create a small reliable tool", language="en")
     result = apply_plan(tmp_path, plan)
     assert result["status"] == "created"
@@ -43,10 +43,8 @@ def test_guided_apply_creates_portable_alpha_state_and_first_card(tmp_path: Path
     assert status["initialized"] is True
     assert status["project_mode"] == "greenfield"
     card_result = next_proposal(tmp_path)
-    assert card_result["status"] == "ready"
-    card = card_result["work_card"]
-    assert card["record_type"] == "WorkCard"
-    assert card["orchestration_required"] is True
+    assert card_result["status"] == "PENDING_PACKAGE_DEFINED_WORK_CARD"
+    assert result["first_work_card"] is None
     config = json.loads((tmp_path / ".promin" / "generated" / "config-view" / "project.json").read_text(encoding="utf-8"))
     assert config["goal"] == "Create a small reliable tool"
     repeated = apply_plan(tmp_path, plan)
@@ -77,4 +75,4 @@ def test_bundle_root_resolves_canonical_standard_package() -> None:
 
     root = bundle_root()
     assert (root / "core" / "promin.manifest.json").is_file()
-    assert (root / "presets" / "semantic-morok-tower.json").is_file()
+    assert (root / "presets" / "semantic-standard.json").is_file()

@@ -2231,7 +2231,7 @@ def _validate_exact_artifact_binding(
     if (
         not isinstance(preset, Mapping)
         or set(preset) != {"path", "sha256"}
-        or preset.get("path") != "presets/semantic-morok-tower.json"
+        or preset.get("path") != "presets/semantic-standard.json"
         or preset.get("sha256") != "sha256:" + candidate["preset_digest"]
     ):
         raise EvidenceError("exact artifact preset binding is invalid")

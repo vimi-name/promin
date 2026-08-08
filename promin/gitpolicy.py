@@ -15,32 +15,40 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .artifact_policy import (
+    DEFAULT_ARTIFACT_POLICY,
+    DOCS_ROOT,
+    ArtifactPolicyError,
+    iter_tracked_document_paths,
+    iter_tracked_extension_paths,
+    validate_tracked_docs,
+    validate_tracked_extensions,
+)
 from .canonical import digest_value
 
 _MANAGED_START = "# >>> promin managed git policy >>>"
 _MANAGED_END = "# <<< promin managed git policy <<<"
 _ROOT_BLOCK = """# >>> promin managed git policy >>>
-# Promin keeps only a compact portable handoff in Git.
+# Promin keeps only bounded typed documentation in Git.
 .promin-host/
 # Re-open the control directory even if an older repository rule ignored it;
 # .promin/.gitignore owns the detailed allow-list below this boundary.
 !.promin/
 !.promin/.gitignore
-!.promin/portable/
-!.promin/portable/**
+!.promin/docs/
+!.promin/docs/**
 # <<< promin managed git policy <<<
 """
-_CONTROL_IGNORE = """# promin portable commit policy
-# Ignore all operational state by default. Commit only the compact portable
-# handoff required for another developer/agent to rehydrate the layer.
+_CONTROL_IGNORE = """# promin tracked documentation policy
+# Ignore all operational state by default. Commit only bounded typed project
+# documentation required for another developer/agent to rehydrate the layer.
 *
 !.gitignore
-!portable/
-!portable/**
+!docs/
+!docs/**
 """
-_POLICY_PATH = Path(".promin/portable/commit-policy.json")
-_MAX_PORTABLE_BYTES = 2 * 1024 * 1024
-_MAX_PORTABLE_TOKENS = 20_000
+_POLICY_PATH = DOCS_ROOT / "commit-policy.json"
+_MAX_TRACKED_TOKENS = 20_000
 _MAX_STARTUP_TOKENS = 2_500
 
 
@@ -120,12 +128,13 @@ def ensure_git_policy(project_root: Path | str, *, apply: bool = True) -> dict[s
         "status": "updated" if changed else "healthy" if apply else "planned",
         "changed": changed,
         "tracked_roots": [
-            ".promin/portable", "AGENTS.md", "CLAUDE.md", ".cursor/rules/promin.mdc",
+            ".promin/docs", "AGENTS.md", "CLAUDE.md", ".cursor/rules/promin.mdc",
             ".agents/skills/promin", ".claude/skills/promin",
         ],
         "local_only_roots": [
             ".promin/init", ".promin/host", ".promin/providers", ".promin/standard",
             ".promin/generated", ".promin/cache", ".promin/state", ".promin/evidence",
+            ".promin/logs", ".promin/recovery",
             ".promin-host",
         ],
         "authority": False,
@@ -133,10 +142,9 @@ def ensure_git_policy(project_root: Path | str, *, apply: bool = True) -> dict[s
     }
 
 
-def _portable_files(root: Path) -> Iterable[Path]:
+def _tracked_files(root: Path) -> Iterable[Path]:
     candidates = [
         root / ".promin" / ".gitignore",
-        root / ".promin" / "portable",
         root / "AGENTS.md",
         root / "CLAUDE.md",
         root / ".cursor" / "rules" / "promin.mdc",
@@ -144,6 +152,19 @@ def _portable_files(root: Path) -> Iterable[Path]:
         root / ".claude" / "skills" / "promin",
     ]
     seen: set[Path] = set()
+    try:
+        docs = tuple(iter_tracked_document_paths(root))
+        extensions = tuple(iter_tracked_extension_paths(root))
+    except ArtifactPolicyError as exc:
+        raise GitPolicyError(str(exc)) from exc
+    for path in docs:
+        if path not in seen:
+            seen.add(path)
+            yield path
+    for path in extensions:
+        if path not in seen:
+            seen.add(path)
+            yield path
     for candidate in candidates:
         if candidate.is_file() and not candidate.is_symlink():
             if candidate not in seen:
@@ -162,11 +183,33 @@ def commit_footprint(project_root: Path | str) -> dict[str, Any]:
     total_bytes = 0
     text_tokens = 0
     startup_tokens = 0
-    for path in _portable_files(root):
+    try:
+        docs_boundary = validate_tracked_docs(root)
+        extensions_boundary = validate_tracked_extensions(root)
+    except ArtifactPolicyError as exc:
+        return {
+            "record_type": "TrackedCommitFootprint",
+            "file_count": 0,
+            "total_bytes": 0,
+            "estimated_text_tokens": 0,
+            "startup_instruction_tokens": 0,
+            "token_estimate_kind": "modeled-conservative",
+            "budgets": {
+                "tracked_documentation": DEFAULT_ARTIFACT_POLICY.tracked_budget.as_dict(),
+                "tracked_text_tokens_max": _MAX_TRACKED_TOKENS,
+                "startup_instruction_tokens_max": _MAX_STARTUP_TOKENS,
+            },
+            "within_budget": False,
+            "policy_error": str(exc),
+            "files": [],
+            "authority": False,
+            "pass_credit": False,
+        }
+    for path in _tracked_files(root):
         size = path.stat().st_size
         total_bytes += size
         token_estimate = 0
-        if size <= _MAX_PORTABLE_BYTES and path.suffix.casefold() in {"", ".md", ".mdc", ".txt", ".json", ".yaml", ".yml", ".toml"}:
+        if size <= DEFAULT_ARTIFACT_POLICY.tracked_budget.max_file_bytes and path.suffix.casefold() in {"", ".md", ".mdc", ".txt", ".json", ".yaml", ".yml", ".toml"}:
             text = path.read_text(encoding="utf-8", errors="replace")
             token_estimate = estimate_tokens(text)
             text_tokens += token_estimate
@@ -179,20 +222,22 @@ def commit_footprint(project_root: Path | str) -> dict[str, Any]:
             "estimated_tokens": token_estimate,
         })
     return {
-        "record_type": "PortableCommitFootprint",
+        "record_type": "TrackedCommitFootprint",
         "file_count": len(files),
         "total_bytes": total_bytes,
         "estimated_text_tokens": text_tokens,
         "startup_instruction_tokens": startup_tokens,
         "token_estimate_kind": "modeled-conservative",
         "budgets": {
-            "portable_total_bytes_max": _MAX_PORTABLE_BYTES,
-            "portable_text_tokens_max": _MAX_PORTABLE_TOKENS,
+            "tracked_documentation": DEFAULT_ARTIFACT_POLICY.tracked_budget.as_dict(),
+            "tracked_text_tokens_max": _MAX_TRACKED_TOKENS,
             "startup_instruction_tokens_max": _MAX_STARTUP_TOKENS,
         },
         "within_budget": (
-            total_bytes <= _MAX_PORTABLE_BYTES
-            and text_tokens <= _MAX_PORTABLE_TOKENS
+            docs_boundary.get("within_budget") is True
+            and extensions_boundary.get("within_budget") is True
+            and total_bytes <= DEFAULT_ARTIFACT_POLICY.tracked_budget.max_total_bytes
+            and text_tokens <= _MAX_TRACKED_TOKENS
             and startup_tokens <= _MAX_STARTUP_TOKENS
         ),
         "files": files,
@@ -236,11 +281,11 @@ def _git_check_ignore(root: Path, relative: str) -> dict[str, Any]:
 
 def git_tracking_status(project_root: Path | str) -> dict[str, Any]:
     root = Path(project_root).resolve()
-    portable = (
-        ".promin/portable/project-brief.json",
-        ".promin/portable/AGENT_ENTRY.md",
-        ".promin/portable/workspace-map.json",
-        ".promin/portable/team-state.json",
+    tracked = (
+        ".promin/docs/project-brief.json",
+        ".promin/docs/AGENT_ENTRY.md",
+        ".promin/docs/workspace-map.json",
+        ".promin/docs/team-seed.json",
         "AGENTS.md",
         "CLAUDE.md",
         ".cursor/rules/promin.mdc",
@@ -249,15 +294,18 @@ def git_tracking_status(project_root: Path | str) -> dict[str, Any]:
         ".promin/state/projection/context.sqlite3",
         ".promin/cache/documentation/repository-manifest.json",
         ".promin/init/activation.json",
+        ".promin/evidence/run.json",
+        ".promin/logs/forensic.log",
+        ".promin/recovery/backup.json",
     )
-    details = [_git_check_ignore(root, relative) for relative in (*portable, *local)]
-    ignored_portable = [item["path"] for item in details[: len(portable)] if item.get("ignored") is True]
-    exposed_local = [item["path"] for item in details[len(portable) :] if item.get("ignored") is False]
+    details = [_git_check_ignore(root, relative) for relative in (*tracked, *local)]
+    ignored_tracked = [item["path"] for item in details[: len(tracked)] if item.get("ignored") is True]
+    exposed_local = [item["path"] for item in details[len(tracked) :] if item.get("ignored") is False]
     return {
         "record_type": "GitTrackingStatus",
         "git_detected": (root / ".git").exists(),
-        "status": "blocked" if ignored_portable or exposed_local else "healthy",
-        "ignored_portable_paths": ignored_portable,
+        "status": "blocked" if ignored_tracked or exposed_local else "healthy",
+        "ignored_tracked_document_paths": ignored_tracked,
         "exposed_local_paths": exposed_local,
         "details": details,
         "authority": False,
@@ -267,12 +315,12 @@ def git_tracking_status(project_root: Path | str) -> dict[str, Any]:
 
 def _policy_record(plan: Mapping[str, Any]) -> dict[str, Any]:
     identity = {
-        "record_type": "PortableCommitPolicy",
+        "record_type": "TrackedDocumentationCommitPolicy",
         "project_id": plan.get("project_id"),
         "plan_digest": plan.get("plan_digest"),
-        "mode": "compact-portable-handoff",
+        "mode": "minimal-tracked-documentation",
         "tracked": [
-            ".promin/portable/**", "AGENTS.md", "CLAUDE.md", ".cursor/rules/promin.mdc",
+            ".promin/docs/**", "AGENTS.md", "CLAUDE.md", ".cursor/rules/promin.mdc",
             ".agents/skills/promin/**", ".claude/skills/promin/**",
         ],
         "local_rebuildable": [
@@ -280,9 +328,11 @@ def _policy_record(plan: Mapping[str, Any]) -> dict[str, Any]:
             ".promin/standard/**", ".promin/generated/**", ".promin/cache/**",
             ".promin/state/**", ".promin/evidence/**", ".promin-host/**",
         ],
-        "operational_history": "local-by-default; rehydrate under the receiving host Activation",
-        "binary_database_policy": "never commit projections; rebuild through the Python context adapter",
-        "large_artifact_policy": "do-not-commit; retain content digest and use explicit artifact storage",
+        "artifact_mode": "minimal",
+        "tracked_document_budget": DEFAULT_ARTIFACT_POLICY.tracked_budget.as_dict(),
+        "operational_history": "host-local; derive current work after the receiving Activation",
+        "binary_database_policy": "never commit or directly edit projections; rebuild through the normative context adapter",
+        "large_artifact_policy": "detailed diagnostics and forensic output are host-local and explicit-mode only",
         "authority": False,
         "pass_credit": False,
     }

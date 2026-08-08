@@ -1,0 +1,181 @@
+{
+  "schema": "promin.selector-shards.v1",
+  "selector_set_id": "standard-alpha4-non-scale-v1",
+  "marker_expression": "not scale",
+  "selectors": [
+    "tests/test_alpha3_ingress_budget.py",
+    "tests/test_alpha3_opus_closure.py",
+    "tests/test_alpha3_plan_headroom.py",
+    "tests/test_alpha3_reconciliation_aliased_temp_tree.py",
+    "tests/test_alpha3_reconciliation_package.py",
+    "tests/test_alpha3_reconciliation_paths.py",
+    "tests/test_alpha3_reconciliation_performance.py",
+    "tests/test_alpha3_reconciliation_static.py",
+    "tests/test_alpha3_reconciliation_windows.py",
+    "tests/test_alpha3_workspace_budget.py",
+    "tests/test_alpha4_artifact_lifecycle.py",
+    "tests/test_alpha4_autonomy_policy.py",
+    "tests/test_alpha4_clean_reinitialization_operation.py",
+    "tests/test_alpha4_cmake_file_api.py",
+    "tests/test_alpha4_compilation_database.py",
+    "tests/test_alpha4_dynamic_handoff.py",
+    "tests/test_alpha4_extensions_clean_init.py",
+    "tests/test_alpha4_final_package_admission.py",
+    "tests/test_alpha4_gate_admission.py",
+    "tests/test_alpha4_genericity.py",
+    "tests/test_alpha4_init_profiles.py",
+    "tests/test_alpha4_language_analysis.py",
+    "tests/test_alpha4_project_package.py",
+    "tests/test_alpha4_provider_envelopes.py",
+    "tests/test_alpha4_provider_receipts.py",
+    "tests/test_alpha4_recovery_locks.py",
+    "tests/test_alpha4_selector_shard_runner.py",
+    "tests/test_alpha4_selector_shards.py",
+    "tests/test_alpha4_semantic_scope_gates.py",
+    "tests/test_alpha4_static_admission.py",
+    "tests/test_alpha4_windows_publication.py",
+    "tests/test_alpha_audit.py",
+    "tests/test_alpha_context_index.py",
+    "tests/test_alpha_deployable.py",
+    "tests/test_alpha_experience.py",
+    "tests/test_alpha_host_pickup.py",
+    "tests/test_alpha_incremental_layer.py",
+    "tests/test_alpha_monorepo_context.py",
+    "tests/test_alpha_portability.py",
+    "tests/test_alpha_promin_docs_shell.py",
+    "tests/test_alpha_skills.py",
+    "tests/test_alpha_skills_checklist.py",
+    "tests/test_authority_domain.py",
+    "tests/test_bootstrap_mutation_verification.py",
+    "tests/test_canonical_init.py",
+    "tests/test_concurrency_crash.py",
+    "tests/test_contract_mutations.py",
+    "tests/test_events_projection.py",
+    "tests/test_installed_distribution.py",
+    "tests/test_package_validation.py",
+    "tests/test_platform_paths_hotpath.py",
+    "tests/test_scale_orchestration.py",
+    "tests/test_search_scale.py",
+    "tests/test_service_cli.py",
+    "tests/test_service_mutation_cache.py"
+  ],
+  "selector_count": 55,
+  "per_process": {
+    "timeout_seconds": 600,
+    "memory_bytes": 1073741824
+  },
+  "aggregate": {
+    "timeout_seconds": 3600
+  },
+  "shards": [
+    {
+      "id": "core-state",
+      "selectors": [
+        "tests/test_alpha_audit.py",
+        "tests/test_alpha_context_index.py",
+        "tests/test_alpha_deployable.py",
+        "tests/test_authority_domain.py",
+        "tests/test_canonical_init.py",
+        "tests/test_concurrency_crash.py",
+        "tests/test_contract_mutations.py",
+        "tests/test_events_projection.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "experience-portability",
+      "selectors": [
+        "tests/test_alpha3_ingress_budget.py",
+        "tests/test_alpha3_opus_closure.py",
+        "tests/test_alpha3_plan_headroom.py",
+        "tests/test_alpha3_workspace_budget.py",
+        "tests/test_alpha_experience.py",
+        "tests/test_alpha_host_pickup.py",
+        "tests/test_alpha_incremental_layer.py",
+        "tests/test_alpha_monorepo_context.py",
+        "tests/test_alpha_portability.py",
+        "tests/test_alpha_promin_docs_shell.py",
+        "tests/test_alpha_skills.py",
+        "tests/test_alpha_skills_checklist.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "reconciliation-paths",
+      "selectors": [
+        "tests/test_alpha3_reconciliation_aliased_temp_tree.py",
+        "tests/test_alpha3_reconciliation_package.py",
+        "tests/test_alpha3_reconciliation_paths.py",
+        "tests/test_alpha3_reconciliation_performance.py",
+        "tests/test_alpha3_reconciliation_static.py",
+        "tests/test_alpha3_reconciliation_windows.py",
+        "tests/test_platform_paths_hotpath.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "alpha4-policies",
+      "selectors": [
+        "tests/test_alpha4_artifact_lifecycle.py",
+        "tests/test_alpha4_autonomy_policy.py",
+        "tests/test_alpha4_clean_reinitialization_operation.py",
+        "tests/test_alpha4_cmake_file_api.py",
+        "tests/test_alpha4_compilation_database.py",
+        "tests/test_alpha4_dynamic_handoff.py",
+        "tests/test_alpha4_extensions_clean_init.py",
+        "tests/test_alpha4_final_package_admission.py",
+        "tests/test_alpha4_gate_admission.py",
+        "tests/test_alpha4_genericity.py",
+        "tests/test_alpha4_init_profiles.py",
+        "tests/test_alpha4_language_analysis.py",
+        "tests/test_alpha4_project_package.py",
+        "tests/test_alpha4_provider_envelopes.py",
+        "tests/test_alpha4_provider_receipts.py",
+        "tests/test_alpha4_recovery_locks.py",
+        "tests/test_alpha4_selector_shard_runner.py",
+        "tests/test_alpha4_selector_shards.py",
+        "tests/test_alpha4_semantic_scope_gates.py",
+        "tests/test_alpha4_static_admission.py",
+        "tests/test_alpha4_windows_publication.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "service-distribution",
+      "selectors": [
+        "tests/test_bootstrap_mutation_verification.py",
+        "tests/test_installed_distribution.py",
+        "tests/test_package_validation.py",
+        "tests/test_service_cli.py",
+        "tests/test_service_mutation_cache.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "scale-search",
+      "selectors": [
+        "tests/test_scale_orchestration.py",
+        "tests/test_search_scale.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    }
+  ]
+}

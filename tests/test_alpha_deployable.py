@@ -63,7 +63,7 @@ def test_adg0_shadow_deployment_flow(tmp_path: Path) -> None:
     created = apply_plan(tmp_path, plan)
     assert created["status"] == "created"
     assert created["product_tree_scans_before_plan"] == 0
-    assert created["first_work_card"]["record_type"] == "WorkCard"
+    assert created["first_work_card"] is None
 
     repeated = apply_plan(tmp_path, plan)
     assert repeated["status"] == "idempotent"
@@ -74,8 +74,7 @@ def test_adg0_shadow_deployment_flow(tmp_path: Path) -> None:
     assert doctor["host_specific_provider_path_count"] >= 1
 
     next_result = next_proposal(tmp_path)
-    assert next_result["status"] == "ready"
-    assert next_result["work_card"]["orchestration_required"] is True
+    assert next_result["status"] == "PENDING_PACKAGE_DEFINED_WORK_CARD"
 
     audit = audit_project(tmp_path, build_plan=True, max_files=1000)
     assert audit["pass_credit"] is False

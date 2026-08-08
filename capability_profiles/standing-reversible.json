@@ -1,0 +1,20 @@
+{
+  "authority_effect": "none",
+  "owner_only_action_classes": [
+    "remote-publication",
+    "external-dependency-change",
+    "license-or-trust-root-change",
+    "credential-or-payment",
+    "unbacked-user-data-overwrite"
+  ],
+  "owner_only_decision": "explicit-owner-decision-required",
+  "policy_id": "standing-reversible",
+  "require_current_authorization": true,
+  "schema": "promin.standing-autonomy-policy.v1",
+  "standing_action_classes": [
+    "read-only",
+    "project-mutation",
+    "host-local-operation",
+    "local-validation"
+  ]
+}

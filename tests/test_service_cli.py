@@ -53,7 +53,7 @@ from promin.mutation_suite import MutationFixture
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+PRESET = PACKAGE_ROOT / "presets" / "semantic-standard.json"
 
 
 def _at(offset: int = 0) -> str:
@@ -139,7 +139,7 @@ def _documented_package_counts(text: str) -> dict[str, int]:
         if len(cells) != 2 or not cells[1].isdigit():
             continue
         location = cells[0].strip("`")
-        if location in {"package root", ".github/", "core/", "docs/", "examples/", "human/", "presets/", "profiles/", "promin/", "prompts/", "skills/", "tests/", "tools/"}:
+        if location in {"package root", ".github/", "capability_profiles/", "core/", "docs/", "examples/", "human/", "language_profiles/", "presets/", "profiles/", "promin/", "prompts/", "skills/", "tests/", "tools/"}:
             counts[location] = int(cells[1])
     return counts
 
@@ -150,34 +150,36 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     version = load_json_strict(PACKAGE_ROOT / "VERSION.json")
     preset = load_json_strict(PRESET)
     assert version["canonical_name"] == "promin"
-    assert version["version"] == "1.0.0-alpha.3"
-    assert "Version 1.0.0-alpha.3" in readme
-    assert "Standard version: `1.0.0-alpha.3`" in machine
+    assert version["version"] == "1.0.0-alpha.4"
+    assert "Version 1.0.0-alpha.4" in readme
+    assert "Standard version: `1.0.0-alpha.4`" in machine
 
     for command in BASE_COMMANDS:
         assert f"promin {command}" in readme
-    assert '["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]' in machine
+    assert '["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"]' in machine
     assert tuple(preset["base_user_commands"]) == BASE_COMMANDS
 
     expected_counts = {
         "package root": 14,
         ".github/": 1,
+        "capability_profiles/": 2,
         "core/": 6,
-        "docs/": 11,
+        "docs/": 19,
         "examples/": 1,
         "human/": 4,
+        "language_profiles/": 1,
         "presets/": 1,
-        "profiles/": 13,
-        "promin/": 31,
+        "profiles/": 12,
+        "promin/": 51,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 34,
+        "tests/": 56,
         "tools/": 13,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 133
+    assert len(manifest["files"]) == 185
     actual_counts = {key: 0 for key in expected_counts}
     actual_counts["package root"] = 2  # MANIFEST.json and SHA256SUMS.txt
     for item in manifest["files"]:
@@ -185,7 +187,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         location = path.split("/", 1)[0] + "/" if "/" in path else "package root"
         actual_counts[location] += 1
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 135
+    assert sum(expected_counts.values()) == 187
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:
@@ -524,7 +526,7 @@ def _bind_mutation(command: dict, card: dict, holder: dict) -> dict:
 
 
 def _initialized_service(
-    tmp_path: Path, *, operating_profile: str = "morok-local"
+    tmp_path: Path, *, operating_profile: str = "baseline"
 ) -> tuple[ProminService, dict, dict]:
     harness = MutationFixture(tmp_path, PACKAGE_ROOT)
     project, request, paths = harness.init_request()
@@ -749,7 +751,7 @@ if __name__ == "__main__" and sys.argv[1:] != ["--health"]:
 
 
 def _leased_service(
-    tmp_path: Path, *, operating_profile: str = "morok-local"
+    tmp_path: Path, *, operating_profile: str = "baseline"
 ) -> tuple[ProminService, dict[str, dict], dict, dict, str]:
     service, authority, initialized = _initialized_service(
         tmp_path, operating_profile=operating_profile
@@ -2179,6 +2181,7 @@ def test_service_resolves_distinct_transition_and_holder_grants(tmp_path: Path) 
         "artifact_record_digest": digest_value(finalized_artifact),
     }
 
+    finding_time = _at()
     finding = {
         "record_type": "Finding",
         "finding_id": "finding:mutation-evidence",
@@ -2189,7 +2192,7 @@ def test_service_resolves_distinct_transition_and_holder_grants(tmp_path: Path) 
         "activation_digest": task["activation_digest"],
         "candidate_digest": task["candidate_digest"],
         "evidence_artifacts": [artifact_reference],
-        "created_at": _at(),
+        "created_at": finding_time,
     }
     finding_card = _mutation_card(service, task, lease, grants["holder"], grants["reader"], "finding.record")
     finding_command = _bind_mutation(
@@ -2199,7 +2202,7 @@ def test_service_resolves_distinct_transition_and_holder_grants(tmp_path: Path) 
             command_kind="finding.record",
             payload=finding,
             expected_head=head,
-            issued_at=_at(),
+            issued_at=finding_time,
             authorization=_grant_authorization(grants["finder"]),
             effect_scope=[{"kind": "finding", "value": finding["finding_id"]}],
         ),

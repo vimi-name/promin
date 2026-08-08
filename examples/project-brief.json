@@ -8,7 +8,7 @@
     "backlog": null
   },
   "preferences": {
-    "autonomy": "safe-auto",
+    "autonomy": "ask",
     "language": "auto",
     "profile_overrides": []
   }

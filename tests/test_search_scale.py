@@ -134,12 +134,12 @@ _POLICY_SET = json.loads(
     (PACKAGE_ROOT / "core" / "policy-set.json").read_text(encoding="utf-8")
 )
 _PRESET = json.loads(
-    (PACKAGE_ROOT / "presets" / "semantic-morok-tower.json").read_text(
+    (PACKAGE_ROOT / "presets" / "semantic-standard.json").read_text(
         encoding="utf-8"
     )
 )
 _CONTINUATION_OWNER = _AUTHORITY_MODEL["continuation_access_rule"]
-_SELECTED_PROFILE_ID = "tower-strong"
+_SELECTED_PROFILE_ID = "extended"
 _SELECTED_PROFILE = _PRESET["profiles"][_SELECTED_PROFILE_ID]
 _PROJECTION_OWNER = {
     "record_type": "ProjectionLimits",

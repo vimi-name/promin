@@ -58,7 +58,7 @@ rl_config.useA85 = 1
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "core"
-PRESET_PATH = ROOT / "presets" / "semantic-morok-tower.json"
+PRESET_PATH = ROOT / "presets" / "semantic-standard.json"
 OUTPUT = ROOT / "human"
 PAGE_WIDTH, PAGE_HEIGHT = A4
 README_PATH = ROOT / "README.md"
@@ -97,9 +97,9 @@ DOCUMENT_REQUIRED_TOKENS = (
     "product_acceptance_pass",
     "not_approved",
     "public_release_approved",
-    "morok-local",
-    "tower-capable",
-    "tower-strong",
+    "baseline",
+    "balanced",
+    "extended",
 )
 
 FONT_FACES = {
@@ -126,12 +126,12 @@ OWNER = {
     "policy": "core/policy-set.json",
     "conformance": "core/conformance.json",
     "schema": "core/contracts.schema.json",
-    "preset": "presets/semantic-morok-tower.json",
+    "preset": "presets/semantic-standard.json",
 }
 
 CURRENT_LANGUAGE = "en"
 
-PUBLIC_COMMANDS = ("init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills")
+PUBLIC_COMMANDS = ("init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills")
 
 STANDARD_CANDIDATE_FIELDS = (
     "record_type",
@@ -386,7 +386,7 @@ UA_PROSE = {
     "Represent one schedulable unit with one acceptance predicate and bounded mutation scope.": "Представляти одну плановану одиницю з одним acceptance predicate та обмеженою mutation scope.",
     "Resolve Findings with evidence.": "Вирішувати Findings за допомогою evidence.",
     "Root command authorization signs one command intent and may issue the first authority.manage Grant only; it cannot execute ordinary project commands.": "Root command authorization підписує один command intent і може видати лише перший Grant authority.manage; вона не може виконувати звичайні команди проєкту.",
-    "Select Semantic Programming plus Morok/Tower decomposition, retrieval, and parallelism budgets without granting action authority.": "Вибирати Semantic Programming і бюджети декомпозиції, retrieval та parallelism Morok/Tower без надання повноважень на дії.",
+    "Select Semantic Programming plus generic decomposition, retrieval, and parallelism budgets without granting action authority.": "Вибирати Semantic Programming і загальні бюджети декомпозиції, retrieval та parallelism без надання повноважень на дії.",
     "Sign or verify activation, Grant, and Decision digests for team trust mode.": "Підписувати або перевіряти digests Activation, Grant і Decision для team trust mode.",
     "single-machine owner-controlled root authority": "root authority однієї машини під контролем власника",
     "Status, next, and WorkCard generation reject a projection whose source head or activation differs.": "Генерація status, next і WorkCard відхиляє проєкцію, source HEAD або Activation якої відрізняється.",
@@ -618,9 +618,9 @@ def verify_sources(data: dict[str, dict[str, Any]]) -> None:
 
     profiles = data["preset"].get("profiles")
     if not isinstance(profiles, Mapping) or set(profiles) != {
-        "morok-local",
-        "tower-capable",
-        "tower-strong",
+        "baseline",
+        "balanced",
+        "extended",
     }:
         raise ValueError("selected preset must preserve the three canonical model profiles")
 
@@ -885,7 +885,7 @@ class ProminDocTemplate(BaseDocTemplate):
             topMargin=17 * mm,
             bottomMargin=17 * mm,
             title=title,
-            author="MOROK TOWER",
+            author="PROMIN STANDARD",
             subject=title,
             creator="promin/tools/generate_human.py",
         )
@@ -1006,7 +1006,7 @@ def cover(story: list[Flowable], st: dict[str, ParagraphStyle]) -> None:
     story.extend(
         [
             Spacer(1, 32 * mm),
-            para("MOROK TOWER", st["cover_small"]),
+            para("PROMIN STANDARD", st["cover_small"]),
             Spacer(1, 30 * mm),
             para("promin", st["cover_brand"]),
             PageBreak(),

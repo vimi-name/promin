@@ -1,0 +1,279 @@
+{
+  "schema": "promin.language-capability-profile.v1",
+  "profileId": "c-family-semantic",
+  "languages": [
+    "c",
+    "cpp"
+  ],
+  "sourceExtensions": [
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hxx",
+    ".ixx"
+  ],
+  "documentation": {
+    "recommended": true,
+    "userChoice": "ask",
+    "primary": [
+      "compact-module-contract-index",
+      "doxygen-html-xml"
+    ],
+    "optional": [
+      "clang-doc"
+    ]
+  },
+  "verification": {
+    "cheapRequired": [
+      "module-owner-import-graph",
+      "implementation-unit-binding",
+      "compiler-boundary-patterns"
+    ],
+    "recommended": [
+      "canonical-compilation-database",
+      "clangd",
+      "clang-tidy"
+    ],
+    "optional": [
+      "clang-check",
+      "include-what-you-use",
+      "cppcheck"
+    ]
+  },
+  "artifactPolicy": {
+    "defaultMode": "minimal",
+    "trackedSummary": true,
+    "diagnosticRoot": "builds/analysis",
+    "forensicRoot": ".promin/logs"
+  },
+  "valueCategories": {
+    "by-value": {
+      "unknownClassification": "REVIEW",
+      "observablePostconditions": [
+        "explicit-empty",
+        "explicit-reset",
+        "transactional-exchange"
+      ],
+      "allowedDestinations": [
+        "owned-value",
+        "member",
+        "result",
+        "external-owner"
+      ]
+    },
+    "rvalue-reference": {
+      "unknownClassification": "REVIEW",
+      "observablePostconditions": [
+        "explicit-empty",
+        "explicit-reset",
+        "transactional-exchange"
+      ],
+      "allowedDestinations": [
+        "owned-value",
+        "member",
+        "result",
+        "external-owner"
+      ]
+    },
+    "borrowed-reference": {
+      "unknownClassification": "REVIEW",
+      "observablePostconditions": [
+        "explicit-reset"
+      ],
+      "allowedDestinations": [
+        "owned-value",
+        "member",
+        "result",
+        "external-owner"
+      ]
+    },
+    "member": {
+      "unknownClassification": "REVIEW",
+      "observablePostconditions": [
+        "explicit-empty",
+        "explicit-reset",
+        "transactional-exchange"
+      ],
+      "allowedDestinations": [
+        "owned-value",
+        "member",
+        "result",
+        "external-owner"
+      ]
+    },
+    "result-extraction": {
+      "unknownClassification": "REVIEW",
+      "observablePostconditions": [
+        "explicit-empty",
+        "explicit-reset",
+        "transactional-exchange"
+      ],
+      "allowedDestinations": [
+        "owned-value",
+        "member",
+        "result",
+        "external-owner"
+      ]
+    }
+  },
+  "binaryBoundary": {
+    "explicitConstCorrectConversion": true,
+    "exactSizeRequired": true,
+    "ownershipPreservationRequired": true,
+    "forbidCompatibilityHelper": true,
+    "allowedSourceRepresentations": [
+      "byte-storage"
+    ],
+    "allowedDestinationRepresentations": [
+      "const-unsigned-byte-view"
+    ]
+  },
+  "directVisibility": {
+    "uniqueOwnerRequired": true,
+    "routes": [
+      "direct-import",
+      "explicit-export-import-closure",
+      "same-named-module"
+    ],
+    "maskedRegions": [
+      "comments",
+      "preprocessor",
+      "ordinary-strings",
+      "raw-strings",
+      "character-literals",
+      "embedded-language-payloads"
+    ],
+    "excludedSymbols": [
+      "template-parameters",
+      "local-declarations",
+      "member-access",
+      "qualified-namespace-components"
+    ]
+  },
+  "compilerFailureProfiles": [
+    {
+      "id": "missing-direct-import",
+      "classification": "REVIEW",
+      "expression": "(?i)direct import",
+      "message": "A source candidate may require direct visibility review.",
+      "toolchainPredicate": null,
+      "requiresCompilerDiagnostic": false
+    },
+    {
+      "id": "compiler-invalid-visibility",
+      "classification": "PROVEN",
+      "expression": "(?i)(not declared|unknown type)",
+      "message": "A compiler diagnostic reports an invalid visibility boundary.",
+      "toolchainPredicate": null,
+      "requiresCompilerDiagnostic": true
+    }
+  ],
+  "semanticRoles": {
+    "roles": {
+      "COMMAND": {
+        "effect": "mutation",
+        "allowedResults": [
+          "command-result",
+          "explicit-status"
+        ]
+      },
+      "QUERY": {
+        "effect": "read",
+        "allowedResults": [
+          "query-result",
+          "value"
+        ]
+      },
+      "VALUE_QUERY": {
+        "effect": "read",
+        "allowedResults": [
+          "value"
+        ]
+      }
+    },
+    "classificationSources": [
+      "annotation",
+      "project-mapping",
+      "configurable-naming-rule"
+    ],
+    "forbidden": [
+      "command-returning-query-result",
+      "query-returning-command-result"
+    ]
+  },
+  "documentationQuality": {
+    "priorities": [
+      "high-fanout",
+      "ownership",
+      "lifetime",
+      "failure-semantics",
+      "transaction",
+      "configuration-boundary"
+    ],
+    "meaningfulFields": [
+      "purpose",
+      "ownership",
+      "lifetime",
+      "failure",
+      "configuration"
+    ],
+    "forbiddenCredit": [
+      "empty-comment",
+      "filename-only-comment",
+      "generated-boilerplate",
+      "host-local-html-presence"
+    ],
+    "generatedDetail": "host-local",
+    "initModes": [
+      "off",
+      "minimal",
+      "standard",
+      "diagnostic"
+    ],
+    "userOverrideRequired": true
+  },
+  "interfaceWeight": {
+    "classification": "REVIEW_ONLY",
+    "metrics": [
+      "line-count",
+      "export-count",
+      "import-count",
+      "function-body-count",
+      "branch-count",
+      "loop-count",
+      "allocation-token-count",
+      "return-count"
+    ],
+    "automaticDefect": false,
+    "automaticDecomposition": false,
+    "generatedDetailRoot": "host-local",
+    "thresholdsAreProfileOverrides": true,
+    "truncationMustBeExplicit": true
+  },
+  "gateAdmission": {
+    "ordering": "cheapest-sufficient-first",
+    "gitHeadAloneInvalidates": false,
+    "invalidationClasses": [
+      "BODY_ONLY",
+      "IMPORT_SURFACE",
+      "CMAKE_TOPOLOGY",
+      "TOOLING_ONLY"
+    ],
+    "requiredReceiptFields": [
+      "elapsed-seconds",
+      "input-digest",
+      "scope-count",
+      "status",
+      "credit"
+    ]
+  },
+  "claims": {
+    "acceptancePass": false,
+    "passCredit": false,
+    "productAcceptancePass": false,
+    "releaseApproved": false
+  }
+}

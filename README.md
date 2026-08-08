@@ -1,8 +1,8 @@
 # promin
 
-MOROK TOWER
+PROMIN STANDARD
 
-Version 1.0.0-alpha.3
+Version 1.0.0-alpha.4
 
 `promin` is a portable operational layer for reliable agent-assisted work. It
 turns a goal, backlog, or repository into one visible resolved plan, bounded
@@ -12,7 +12,7 @@ configurable.
 
 > **Humans define meaning. Agents clarify and implement.**
 
-`1.0.0-alpha.3` provides the current portable standard surface for Windows/init,
+`1.0.0-alpha.4` provides the current portable standard surface for Windows/init,
 portability, detection, read-only operation, self-check, and bounded cost controls.
 Its scope and deferred capabilities are defined in `docs/ALPHA_SCOPE_UA.md`.
 
@@ -78,17 +78,17 @@ The six files in `core/` are the complete Core:
 | `contracts.schema.json` | compiled Draft 2020-12 structural projection |
 
 The schema is generated from the other owners and is not a second semantic or
-policy owner. `presets/semantic-morok-tower.json` selects one operating profile
+policy owner. `presets/semantic-standard.json` selects one operating profile
 outside Core identity and cannot grant authority.
 
-The selected preset preserves Semantic Programming and Morok/Tower
+The selected preset preserves Semantic Programming and generic
 decomposition as bounded configuration:
 
 | Profile | Model tier | Parallel Tasks | Dependency depth | Context bytes | Entities | Relations | Top-k |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `morok-local` | `weak-local` | 1 | 2 | 8192 | 16 | 24 | 8 |
-| `tower-capable` | `capable` | 3 | 4 | 12288 | 24 | 36 | 10 |
-| `tower-strong` | `strong` | 6 | 6 | 16384 | 32 | 48 | 12 |
+| `baseline` | `weak-local` | 1 | 2 | 8192 | 16 | 24 | 8 |
+| `balanced` | `capable` | 3 | 4 | 12288 | 24 | 36 | 10 |
+| `extended` | `strong` | 6 | 6 | 16384 | 32 | 48 | 12 |
 
 These profiles alter analysis depth, decomposition, retrieval, and parallelism
 budgets only. They do not change capabilities, Grants, acceptance predicates,
@@ -96,7 +96,7 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 135 regular files under 14 declared
+The canonical alpha tree contains exactly 187 regular files under 16 declared
 directories, including the nested `skills/example` package. `MANIFEST.json`
 enumerates all payload files; `SHA256SUMS.txt` closes those payloads together
 with the manifest.
@@ -105,16 +105,18 @@ with the manifest.
 |---|---:|
 | package root | 14 |
 | `.github/` | 1 |
+| `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 11 |
+| `docs/` | 19 |
 | `examples/` | 1 |
 | `human/` | 4 |
+| `language_profiles/` | 1 |
 | `presets/` | 1 |
-| `profiles/` | 13 |
-| `promin/` | 31 |
+| `profiles/` | 12 |
+| `promin/` | 51 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 34 |
+| `tests/` | 56 |
 | `tools/` | 13 |
 
 The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
@@ -123,15 +125,15 @@ The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`,
 `VERSION.json`. License, governance, dependency, and notice closure are part of
 the package identity.
 
-Canonical directories are `.github`, `.github/workflows`, `core`, `docs`, `examples`, `human`, `presets`,
-`profiles`, `promin`, `prompts`, `skills`, `skills/example`, `tests`, and
+Canonical directories are `.github`, `.github/workflows`, `capability_profiles`, `core`, `docs`, `examples`,
+`human`, `language_profiles`, `presets`, `profiles`, `promin`, `prompts`, `skills`, `skills/example`, `tests`, and
 `tools`. Missing or additional paths reject. Project evidence, decisions,
 operational state, reports, caches, databases, wheelhouses, and secrets stay
 outside the distribution tree.
 
 ## Commands
 
-The public alpha command surface contains exactly ten commands:
+The public alpha command surface contains exactly eleven commands:
 
 ```text
 promin init
@@ -139,6 +141,7 @@ promin doctor
 promin status
 promin next
 promin validate
+promin static-admission
 promin continue
 promin audit
 promin refresh
@@ -602,7 +605,7 @@ credit, and `saturation-audit.json` is published only after three consecutive
 full zero-new iterations.
 
 The four PDFs in `human/` present the same standard. Their visible cover
-identity is limited to MOROK TOWER, `promin`, and the footer `версія 1` or
+identity is limited to PROMIN STANDARD, `promin`, and the footer `версія 1` or
 `version 1`. PDF verification records each document digest, page count,
 extraction diagnostics, deterministic rebuild identity, and the explicit scope
 of visual review.

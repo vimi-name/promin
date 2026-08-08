@@ -5,7 +5,7 @@
 Канонічний project skill:
 
 ```text
-.promin/portable/skills/<skill-id>/
+.promin/docs/skills/<skill-id>/
 ├── SKILL.md
 ├── promin.skill.json
 ├── scripts/       # optional

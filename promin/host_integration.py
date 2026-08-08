@@ -24,7 +24,7 @@ _CLAUDE_END = "<!-- promin:claude:end -->"
 _CURSOR_MARKER = "promin-generated-cursor-rule-v2"
 _SKILL_MARKER = "promin-generated-agent-skill-v4"
 _PROJECT_SKILL_MARKER = "promin-generated-project-skill-wrapper-v1"
-_STATE_PATH = Path(".promin/portable/host-surfaces.json")
+_STATE_PATH = Path(".promin/docs/host-surfaces.json")
 _STARTUP_TOKEN_BUDGET = 1400
 _SKILL_METADATA_TOKEN_BUDGET = 2000
 
@@ -70,8 +70,8 @@ def _agents_block(language: str) -> str:
 - Почни з `promin doctor`; отримуй роботу через `promin next`.
 - Для деталей викликай `promin context <запит> [--unit <id>]`; не завантажуй весь repository.
 - Дотримуйся Task, Candidate, allowed paths, active profile та authority. Незареєстрований результат є proposal-only.
-- Один верхньорівневий promin root координує всі web/mobile/backend units із `.promin/portable/workspace-map.json`.
-- Після clone або зміни host виконай `promin doctor --repair`; portable team state є proposal-only handoff.
+- Один верхньорівневий promin root координує всі web/mobile/backend units із `.promin/docs/workspace-map.json`.
+- Після clone або зміни host виконай `promin doctor --repair`; team seed не є operational state.
 - `promin refresh` оновлює hash-bound документацію й локальний index; `promin audit` діагностує проблеми.
 - Skills переглядай через `promin skills list`; повний skill завантажуй лише коли він релевантний.
 - Generated docs, telemetry та projections не є source of truth і не дають pass credit.
@@ -82,8 +82,8 @@ def _agents_block(language: str) -> str:
 - Start with `promin doctor`; obtain work through `promin next`.
 - Retrieve details with `promin context <query> [--unit <id>]`; do not load the whole repository.
 - Respect the Task, Candidate, allowed paths, active profile, and authority. Unregistered results are proposal-only.
-- One top-level promin root coordinates all web/mobile/backend units in `.promin/portable/workspace-map.json`.
-- After clone or a host change run `promin doctor --repair`; portable team state is a proposal-only handoff.
+- One top-level promin root coordinates all web/mobile/backend units in `.promin/docs/workspace-map.json`.
+- After clone or a host change run `promin doctor --repair`; the team seed is not operational state.
 - `promin refresh` updates hash-bound documentation and the local index; `promin audit` diagnoses problems.
 - Inspect skills with `promin skills list`; load a full skill only when it is relevant.
 - Generated docs, telemetry, and projections are not a source of truth and never grant pass credit.
@@ -120,7 +120,7 @@ def _core_skill(language: str, host: str) -> str:
     if language == "uk":
         description = "Керуй роботою через promin: bounded work, context, refresh, repair, skills і self-audit."
         body = """1. Виконай `promin doctor`.
-2. Прочитай `.promin/portable/AGENT_ENTRY.md`.
+2. Прочитай `.promin/docs/AGENT_ENTRY.md`.
 3. Отримай Task через `promin next`.
 4. Для деталей викликай `promin context <запит>`.
 5. Перевір `promin skills list` і завантаж релевантний skill лише за потреби.
@@ -130,7 +130,7 @@ def _core_skill(language: str, host: str) -> str:
     else:
         description = "Operate through promin: bounded work, context, refresh, repair, skills, and self-audit."
         body = """1. Run `promin doctor`.
-2. Read `.promin/portable/AGENT_ENTRY.md`.
+2. Read `.promin/docs/AGENT_ENTRY.md`.
 3. Obtain the Task with `promin next`.
 4. Retrieve details with `promin context <query>`.
 5. Inspect `promin skills list` and load a relevant skill only when needed.
@@ -155,7 +155,7 @@ Detailed context is loaded on demand to minimize tokens.
 
 def _project_skill_wrapper(skill: Mapping[str, Any], host: str) -> str:
     wrapper_name = f"promin-{skill['skill_id']}"
-    canonical = f".promin/portable/skills/{skill['skill_id']}"
+    canonical = f".promin/docs/skills/{skill['skill_id']}"
     description = str(skill["description"])
     if len(description) > 860:
         description = description[:857] + "..."
@@ -163,7 +163,7 @@ def _project_skill_wrapper(skill: Mapping[str, Any], host: str) -> str:
 name: {wrapper_name}
 description: {description}
 license: {skill['license']}
-compatibility: Generated {host} wrapper for a portable promin Agent Skill.
+compatibility: Generated {host} wrapper for a tracked promin Agent Skill.
 metadata:
   promin-skill-id: {skill['skill_id']}
   promin-content-digest: {skill['content_digest']}
@@ -208,7 +208,7 @@ def _base_expected(language: str) -> dict[str, str]:
 
 def _project_skill_expected(root: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
     try:
-        skills = [item for item in discover_skills(root) if item.get("catalog_source") == "project-portable"]
+        skills = [item for item in discover_skills(root) if item.get("catalog_source") == "project-docs"]
     except SkillError as exc:
         raise HostIntegrationError(str(exc)) from exc
     expected: dict[str, str] = {}
@@ -344,7 +344,7 @@ def sync_host_surfaces(project_root: Path | str, *, language: str = "en", apply:
             "codex": "AGENTS.md and .agents/skills; progressive skill disclosure",
             "claude": "CLAUDE.md imports AGENTS.md and .claude/skills; progressive skill disclosure",
             "cursor": ".cursor/rules plus .cursor/skills and AGENTS.md",
-            "generic": ".promin/portable/AGENT_ENTRY.md and open Agent Skills packages",
+            "generic": ".promin/docs/AGENT_ENTRY.md and open Agent Skills packages",
         },
         "enforcement_boundary": "Host instructions and skills guide discovery; Promin authority is enforced only by Promin operations.",
         "authority": False,

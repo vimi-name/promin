@@ -72,10 +72,18 @@ from promin.experience import (
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 CORE = PACKAGE_ROOT / "core"
-PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+PRESET = PACKAGE_ROOT / "presets" / "semantic-standard.json"
 
 
 def _provider_executable() -> Path:
+    # A copied CPython launcher on Windows loses its adjacent DLL runtime and
+    # therefore cannot truthfully serve as a materialized provider receipt.
+    # Use a real system executable whose byte-exact copy remains runnable; the
+    # fixture tests provider identity, not a Python-specific implementation.
+    if os.name == "nt":
+        candidate = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "curl.exe"
+        if candidate.is_file():
+            return candidate.resolve()
     return Path(getattr(sys, "_base_executable", sys.executable)).resolve()
 
 
@@ -213,8 +221,8 @@ def _plans(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
             "collision_policy": "reject-nfc-and-casefold-collisions",
             "product_identity_excludes_control_state": True,
         },
-        "preset_id": "semantic-morok-tower",
-        "operating_profile": "morok-local",
+        "preset_id": "semantic-standard",
+        "operating_profile": "baseline",
     }
     standards_plan = {"record_type": "StandardsInit", "bindings": []}
     license_value = {
@@ -320,7 +328,7 @@ def test_emit_review_and_dry_run_are_non_mutating(tmp_path: Path) -> None:
         preset_path=PRESET,
         **_explicit_plan_objects(paths),
     )
-    assert emitted["standard_version"] == "1.0.0-alpha.3"
+    assert emitted["standard_version"] == "1.0.0-alpha.4"
     assert emitted["product_tree_scans"] == 0
     assert emitted["project_mutations"] == 0
     assert not (project / ".promin").exists()
@@ -686,7 +694,10 @@ def test_v1_core_and_preset_verify() -> None:
     bundle = load_contract_bundle(PACKAGE_ROOT, PRESET)
     assert bundle.bundle_digest == manifest["bundle_digest"]
     assert str(bundle.preset["version"]).startswith("1.0.0")
-    expected_commands = ("init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills")
+    expected_commands = (
+        "init", "doctor", "status", "next", "validate", "static-admission",
+        "continue", "audit", "refresh", "context", "skills",
+    )
     assert tuple(bundle.preset["base_user_commands"]) == expected_commands
     workflows = next(
         action for action in command_parser()._actions if action.dest == "workflow"
@@ -1159,7 +1170,7 @@ def test_init_tool_is_a_zero_policy_thin_delegation() -> None:
     source = (PACKAGE_ROOT / "tools" / "promin_init.py").read_text(encoding="utf-8")
     assert "local-owner" not in source
     assert "all:*" not in source
-    assert "semantic-morok-tower.json" not in source
+    assert "semantic-standard.json" not in source
     assert "def make_plan" not in source
     assert "def apply_plan" not in source
 
@@ -1785,7 +1796,7 @@ def test_signature_provider_declared_timeout_and_ceiling_are_enforced(
         init_runtime.verify_provider_preflight({"bindings": [binding]}, project)
 
 
-def test_short_signature_healthcheck_executes_bound_python_cross_platform(
+def test_short_signature_healthcheck_executes_bound_runtime_cross_platform(
     tmp_path: Path,
 ) -> None:
     project, _ = _plans(tmp_path)

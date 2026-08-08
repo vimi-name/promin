@@ -15,7 +15,7 @@ from typing import Any, Iterable
 
 VERSION: str | None = None
 SCHEMA_ID = "urn:promin:contracts:1"
-SCHEMA_DEFINITION_COUNT = 127
+SCHEMA_DEFINITION_COUNT = 141
 CORE_COMPONENTS = (
     "semantic-model.json",
     "authority-model.json",
@@ -598,6 +598,7 @@ def _verify_semantic_inheritance_owner(semantic: dict[str, Any]) -> None:
     design = _require_exact_keys(
         semantic.get("design_rules"),
         {
+            "alpha4_standard_authority",
             "artifact_subtypes",
             "candidate_consistency",
             "granularities_are_independent",
@@ -609,6 +610,23 @@ def _verify_semantic_inheritance_owner(semantic: dict[str, Any]) -> None:
         },
         "semantic design rules",
     )
+    alpha4_authority = _require_exact_keys(
+        design.get("alpha4_standard_authority"),
+        {
+            "canonical_policy_owner",
+            "derived_outputs",
+            "project_specific_defaults",
+            "standard_only",
+        },
+        "alpha4 standard authority",
+    )
+    if alpha4_authority != {
+        "canonical_policy_owner": "policy-set.json.alpha4_standard_contracts",
+        "derived_outputs": "non-authoritative",
+        "project_specific_defaults": "reject",
+        "standard_only": True,
+    }:
+        raise CompileError("alpha4 standard authority owner is incomplete")
     for label, values in (
         ("independent semantic granularities", design.get("granularities_are_independent")),
         ("semantic promotion rules", design.get("promotion_test")),
@@ -1434,6 +1452,55 @@ def _verify_authority_owner(authority: dict[str, Any]) -> None:
 
 
 def _verify_policy_protocol_owners(policies: dict[str, Any], authority: dict[str, Any]) -> None:
+    alpha4 = _require_exact_keys(
+        policies.get("alpha4_standard_contracts"),
+        {
+            "artifact_policy",
+            "authority",
+            "claims",
+            "documentation_boundary",
+            "dynamic_handoff",
+            "gate_invalidation",
+            "init_profiles",
+            "language_analysis",
+            "project_package",
+            "provider_receipts",
+            "schema",
+            "static_admission",
+            "test_sharding",
+            "writer_publication",
+        },
+        "alpha4 standard contracts",
+    )
+    if (
+        alpha4["schema"] != "promin.alpha4-standard-contracts.v1"
+        or alpha4["authority"]
+        != {
+            "dual_authority": "reject",
+            "legacy_compatibility": "reject",
+            "owner": "core/policy-set.json",
+            "project_specific_defaults": "reject",
+        }
+        or alpha4["claims"]
+        != {
+            "acceptance_pass": False,
+            "pass_credit": False,
+            "product_acceptance_pass": False,
+            "release_eligible": False,
+            "runtime_validated": False,
+        }
+        or alpha4["documentation_boundary"].get("extension_root")
+        != ".promin/docs/extensions"
+        or alpha4["artifact_policy"].get("tracked_boundary") != ".promin/docs"
+        or alpha4["provider_receipts"].get("metadata_only_reuse") != "forbidden"
+        or alpha4["static_admission"].get("forbidden_side_effects")
+        != ["provider", "configure", "build", "runtime", "sqlite", "projection"]
+        or alpha4["dynamic_handoff"].get("required_status") != "PENDING_DYNAMIC"
+        or alpha4["test_sharding"].get("aggregate_coverage") != "exact-once"
+        or alpha4["writer_publication"].get("preflight_before_reservation") is not True
+        or alpha4["writer_publication"].get("post_reservation_revalidation") is not True
+    ):
+        raise CompileError("alpha4 standard policy owner is incomplete")
     research = _require_exact_keys(
         policies.get("research_draft_sanitation"),
         {
@@ -1942,6 +2009,156 @@ def _compile_projection(
         raise CompileError("Core SemVer was not resolved before schema compilation")
     schema = deepcopy(schema_source)
     definitions = schema.get("$defs")
+    # Alpha.4 adds portable, non-authoritative Standard records.  They are
+    # intentionally separate from live event/projection records: static or
+    # unavailable analysis can never imply a runtime/product/release result.
+    definitions["ToolOutcome"] = {
+        "additionalProperties": False,
+        "properties": {
+            "availability": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+            "status": {"enum": ["PASS", "FAIL", "SKIPPED", "UNAVAILABLE", "TIMEOUT"]},
+            "pass_credit": {"const": False},
+            "acceptance_pass": {"const": False},
+        },
+        "required": ["availability", "status", "pass_credit", "acceptance_pass"],
+        "type": "object",
+    }
+    definitions["FindingClassification"] = {"enum": ["PROVEN", "REVIEW", "SAFE"]}
+    definitions["TrackedDocumentationBoundary"] = {
+        "additionalProperties": False,
+        "properties": {
+            "record_type": {"const": "TrackedDocumentationBoundary"},
+            "root": {"const": ".promin/docs"},
+            "manifest_digest": {"$ref": "#/$defs/Sha256"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["record_type", "root", "manifest_digest", "pass_credit"],
+        "type": "object",
+    }
+    definitions["TrackedExtensionSet"] = {
+        "additionalProperties": False,
+        "properties": {
+            "root": {"const": ".promin/docs/extensions"},
+            "members": {"items": {"$ref": "#/$defs/Sha256"}, "type": "array", "uniqueItems": True},
+            "byte_exact": {"const": True},
+        },
+        "required": ["root", "members", "byte_exact"],
+        "type": "object",
+    }
+    definitions["ProjectPackageManifest"] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema": {"const": "promin.project-package.v1"},
+            "package_id": {"$ref": "#/$defs/Id"},
+            "tree_digest": {"$ref": "#/$defs/Sha256"},
+            "members": {"minItems": 1, "type": "array"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["schema", "package_id", "tree_digest", "members", "pass_credit"],
+        "type": "object",
+    }
+    definitions["ReactivationIntent"] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema": {"const": "promin.reactivation-intent.v1"},
+            "intent_digest": {"$ref": "#/$defs/Sha256"},
+            "owner_confirmed": {"const": True},
+            "rollback": {"const": "whole-root-only"},
+        },
+        "required": ["schema", "intent_digest", "owner_confirmed", "rollback"],
+        "type": "object",
+    }
+    definitions["WriterIdentity"] = {
+        "additionalProperties": False,
+        "properties": {
+            "pid": {"minimum": 1, "type": "integer"},
+            "process_start_identity": {"$ref": "#/$defs/Sha256"},
+            "lease_digest": {"$ref": "#/$defs/Sha256"},
+            "state": {"enum": ["LIVE", "DEAD", "EXPIRED", "UNVERIFIABLE"]},
+        },
+        "required": ["pid", "process_start_identity", "lease_digest", "state"],
+        "type": "object",
+    }
+    definitions["ProviderReceiptEnvelope"] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema": {"const": "promin.provider-receipt-envelope.v1"},
+            "mode": {"enum": ["FullScan", "Reuse"]},
+            "merkle_root": {"$ref": "#/$defs/Sha256"},
+            "coverage_digest": {"$ref": "#/$defs/Sha256"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["schema", "mode", "merkle_root", "coverage_digest", "pass_credit"],
+        "type": "object",
+    }
+    definitions["LanguageCapabilityProfile"] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema": {"const": "promin.language-capability-profile.v1"},
+            "profileId": {"$ref": "#/$defs/Id"},
+            "languages": {"minItems": 1, "type": "array", "uniqueItems": True},
+            "authority_effect": {"const": "none"},
+        },
+        "required": ["schema", "profileId", "languages", "authority_effect"],
+        "type": "object",
+    }
+    definitions["CanonicalCompilationDatabase"] = {
+        "additionalProperties": False,
+        "properties": {
+            "status": {"enum": ["PASS", "FAIL", "UNAVAILABLE"]},
+            "digest": {"anyOf": [{"$ref": "#/$defs/Sha256"}, {"type": "null"}]},
+            "command_count": {"minimum": 0, "type": "integer"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["status", "digest", "command_count", "pass_credit"],
+        "type": "object",
+    }
+    definitions["AffectedSemanticScope"] = {
+        "additionalProperties": False,
+        "properties": {
+            "invalidation_class": {"enum": ["BODY_ONLY", "IMPORT_SURFACE", "CMAKE_TOPOLOGY", "TOOLING_ONLY"]},
+            "input_digest": {"$ref": "#/$defs/Sha256"},
+            "truncated": {"type": "boolean"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["invalidation_class", "input_digest", "truncated", "pass_credit"],
+        "type": "object",
+    }
+    definitions["FinalStaticAdmission"] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema": {"const": "promin.final-static-admission.v1"},
+            "checks": {"minItems": 1, "type": "array"},
+            "acceptance_pass": {"const": False},
+            "pass_credit": {"const": False},
+            "runtime_validated": {"const": False},
+        },
+        "required": ["schema", "checks", "acceptance_pass", "pass_credit", "runtime_validated"],
+        "type": "object",
+    }
+    definitions["DynamicValidationHandoff"] = {
+        "additionalProperties": False,
+        "properties": {
+            "status": {"const": "PENDING_DYNAMIC"},
+            "allowed_write_scope": {"minItems": 1, "type": "array"},
+            "forbidden": {"minItems": 1, "type": "array"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["status", "allowed_write_scope", "forbidden", "pass_credit"],
+        "type": "object",
+    }
+    definitions["SelectorShardAggregate"] = {
+        "additionalProperties": False,
+        "properties": {
+            "status": {"enum": ["PASS", "FAIL", "TIMEOUT", "UNAVAILABLE", "INVALID_HARNESS"]},
+            "selector_digest": {"$ref": "#/$defs/Sha256"},
+            "terminal_receipt": {"type": "boolean"},
+            "pass_credit": {"const": False},
+        },
+        "required": ["status", "selector_digest", "terminal_receipt", "pass_credit"],
+        "type": "object",
+    }
+
     if not isinstance(definitions, dict):
         raise CompileError("schema structural blueprint must contain definitions")
 
@@ -1991,7 +2208,7 @@ def _compile_projection(
             "references": deepcopy(bounded_string_list),
             "work_sources": deepcopy(bounded_string_list),
             "reporting_language": {"enum": ["uk", "en"]},
-            "autonomy": {"enum": ["ask", "safe-auto", "unsafe-auto"]},
+            "autonomy": {"enum": ["ask", "standing-reversible"]},
         },
         "required": [
             "project_mode",
@@ -2079,6 +2296,22 @@ def _compile_projection(
                 "minItems": 1,
                 "type": "array",
             },
+            "init_capability_selection": {
+                "additionalProperties": False,
+                "properties": {
+                    "status": {"enum": ["AVAILABLE", "PENDING_OWNER_SELECTION", "UNAVAILABLE"]},
+                    "selection_source": {"enum": ["default", "host-profile", "project-package", "cli", "interactive-user"]},
+                    "profile_digest": {"$ref": "#/$defs/Digest"},
+                    "selection_digest": {"$ref": "#/$defs/Digest"},
+                    "documentation_choice": {"enum": ["accept", "decline", "custom", "ask"]},
+                    "verification_choice": {"enum": ["accept", "decline", "custom", "ask"]},
+                    "authority_granted": {"const": False},
+                    "pass_credit": {"const": False},
+                    "acceptance_pass": {"const": False},
+                },
+                "required": ["status", "selection_source", "authority_granted", "pass_credit", "acceptance_pass"],
+                "type": "object",
+            },
             "authority_effect": {"const": "none"},
             "profile_digest": {"$ref": "#/$defs/Digest"},
         },
@@ -2088,6 +2321,7 @@ def _compile_projection(
             "detected_technologies",
             "operation_profiles",
             "resolution",
+            "init_capability_selection",
             "authority_effect",
             "profile_digest",
         ],
@@ -6371,6 +6605,7 @@ def _compile_projection(
 
     policy_definition = definitions["PolicySet"]
     for field in (
+        "alpha4_standard_contracts",
         "derived_result_contracts",
         "gate_run_definition_contract",
         "research_draft_sanitation",
@@ -6382,6 +6617,11 @@ def _compile_projection(
             policy_definition["required"].append(field)
 
     conformance_definition = definitions["Conformance"]
+    conformance_definition["properties"]["alpha4_no_credit_rules"] = {
+        "const": deepcopy(conformance["alpha4_no_credit_rules"])
+    }
+    if "alpha4_no_credit_rules" not in conformance_definition["required"]:
+        conformance_definition["required"].append("alpha4_no_credit_rules")
     conformance_definition["properties"]["scale_contracts"] = {
         "const": deepcopy(conformance["scale_contracts"])
     }
@@ -6573,7 +6813,7 @@ def _compile_projection(
     }
     preset_definition["required"] = preset_fields
     preset_definition["properties"]["base_user_commands"] = {
-        "const": ["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"],
+        "const": ["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"],
         "type": "array",
     }
     preset_definition["properties"]["version"] = {"const": VERSION}
@@ -7744,6 +7984,16 @@ def _compile_projection(
     budgets = conformance.get("structural_budgets")
     if not isinstance(budgets, dict):
         raise CompileError("structural_budgets owner is missing")
+    alpha4_no_credit = conformance.get("alpha4_no_credit_rules")
+    if alpha4_no_credit != {
+        "acceptance_pass": False,
+        "diagnostic_or_static_only_pass_credit": False,
+        "dynamic_handoff_pass_credit": False,
+        "product_acceptance_pass": False,
+        "release_eligible": False,
+        "unavailable_is_pass": False,
+    }:
+        raise CompileError("alpha4 no-credit conformance owner is incomplete")
     _property(schema, "SemanticModel", "persistent_entities")["maxItems"] = budgets[
         "persistent_entity_kinds_max"
     ]
@@ -7823,7 +8073,7 @@ def _verify_selected_preset(
         raise CompileError("Core SemVer was not resolved before preset verification")
     preset_dir = root / "presets"
     files = [path for path in preset_dir.iterdir() if path.is_file()]
-    if len(files) != 1 or files[0].name != "semantic-morok-tower.json":
+    if len(files) != 1 or files[0].name != "semantic-standard.json":
         raise CompileError("exactly one selected preset is required")
     preset = _load_json(files[0])
     if preset.get("record_type") != "Preset" or preset.get("version") != VERSION:
@@ -7836,13 +8086,14 @@ def _verify_selected_preset(
         "status",
         "next",
         "validate",
+        "static-admission",
         "continue",
         "audit",
         "refresh",
         "context",
         "skills",
     ]:
-        raise CompileError("selected preset must expose exactly ten alpha commands")
+        raise CompileError("selected preset must expose the exact alpha command surface")
     expected_preset_fields = {
         "record_type",
         "schema_ref",
@@ -7862,9 +8113,9 @@ def _verify_selected_preset(
         raise CompileError("selected preset fields differ from the v1 command surface")
     profiles = preset.get("profiles")
     if not isinstance(profiles, dict) or set(profiles) != {
-        "morok-local",
-        "tower-capable",
-        "tower-strong",
+        "baseline",
+        "balanced",
+        "extended",
     }:
         raise CompileError("selected preset must preserve all three operating profiles")
     for name, profile in profiles.items():

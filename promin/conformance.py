@@ -1976,7 +1976,7 @@ def _verified_inventory_result_provenance(
 def _supported_command_surface(
     value: Mapping[str, Any], bundle: "ContractBundle", context: Mapping[str, Any]
 ) -> None:
-    expected = ["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]
+    expected = ["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"]
     preset = bundle.preset
     if (
         preset.get("base_user_commands") != expected

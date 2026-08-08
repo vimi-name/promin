@@ -6,17 +6,15 @@ from promin.experience import apply_plan, resolve_plan
 from promin import service as service_module
 
 
-def test_bootstrap_reuses_one_authoritative_mutation_verification(
+def test_guided_init_does_not_create_or_verify_a_legacy_generic_bootstrap(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The dependent bootstrap commands share one verified service boundary.
+    """Alpha.4 stops after minimal init until package tasks are imported.
 
-    Bootstrap commands intentionally remain individually journaled: every
-    command binds the preceding HEAD and must therefore preserve its event
-    ordering and recovery semantics.  The service cache may only remove
-    redundant byte verification while the Activation-bound filesystem inputs
-    remain unchanged.
+    No generic bootstrap Task, Grant sequence, projection rebuild, or service
+    mutation verification is allowed as an implicit side effect of guided init.
+    Package-defined task import is a later explicit normative operation.
     """
 
     original_verify = service_module.verify_before_mutation
@@ -33,4 +31,11 @@ def test_bootstrap_reuses_one_authoritative_mutation_verification(
     result = apply_plan(tmp_path, plan)
 
     assert result["status"] == "created"
-    assert calls == 1
+    assert calls == 0
+    assert result["first_work_card"] is None
+    assert result["minimal_postcheck"] == {
+        "activation_present": True,
+        "replay_performed": False,
+        "first_work_card": "PENDING_PACKAGE_DEFINED_WORK_CARD",
+    }
+    assert not (tmp_path / ".promin" / "generated" / "bootstrap-state.json").exists()

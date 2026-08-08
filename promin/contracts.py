@@ -38,7 +38,7 @@ CORE_FILES = (
 )
 PLAN_FILES = ("project.json", "standards.json", "technologies.json", "authority.json")
 INIT_FILES = PLAN_FILES + ("activation.json",)
-BASE_USER_COMMANDS = ("init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills")
+BASE_USER_COMMANDS = ("init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills")
 OBSERVATIONAL_CONSISTENCY = "observational-best-effort"
 IMMUTABLE_SNAPSHOT_CONSISTENCY = frozenset({"immutable-vcs-tree"})
 SNAPSHOT_CONSISTENCY_MODES = frozenset(
@@ -483,7 +483,7 @@ def verify_preset(preset_path: str | Path, core: Mapping[str, Any]) -> dict[str,
     if "optional_user_commands" in preset or "admin_commands" in preset:
         raise ContractError("preset contains removed v1 command catalogues")
     if tuple(preset["base_user_commands"]) != BASE_USER_COMMANDS:
-        raise ContractError("preset must expose exactly the ten alpha base commands")
+        raise ContractError("preset must expose the exact alpha base command surface")
     _casefold_unique(preset["base_user_commands"], "preset base user command")
     known = {item["id"] for item in core["semantic-model.json"]["technology_capabilities"]}
     selected = preset["required_provider_capabilities"] + preset["optional_provider_capabilities"]
@@ -662,12 +662,12 @@ def _default_project_intent(project: Mapping[str, Any]) -> dict[str, Any]:
         "references": [],
         "work_sources": [],
         "reporting_language": "en",
-        "autonomy": "safe-auto",
+        "autonomy": "ask",
     }
 
 
 def _default_resolved_profile(project: Mapping[str, Any]) -> dict[str, Any]:
-    preset_id = str(project.get("preset_id") or "semantic-morok-tower")
+    preset_id = str(project.get("preset_id") or "semantic-standard")
     profile = {
         "revision": 1,
         "layers": [preset_id],
@@ -691,6 +691,13 @@ def _default_resolved_profile(project: Mapping[str, Any]) -> dict[str, Any]:
                 "confidence": 1.0,
             }
         ],
+        "init_capability_selection": {
+            "status": "PENDING_OWNER_SELECTION",
+            "selection_source": "default",
+            "authority_granted": False,
+            "pass_credit": False,
+            "acceptance_pass": False,
+        },
         "authority_effect": "none",
     }
     return {**profile, "profile_digest": digest_value(profile)}

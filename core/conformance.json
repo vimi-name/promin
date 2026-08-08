@@ -1,4 +1,12 @@
 {
+  "alpha4_no_credit_rules": {
+    "acceptance_pass": false,
+    "diagnostic_or_static_only_pass_credit": false,
+    "dynamic_handoff_pass_credit": false,
+    "product_acceptance_pass": false,
+    "release_eligible": false,
+    "unavailable_is_pass": false
+  },
   "acceptance_proof_class_counts": {
     "direct-semantic": 35,
     "human-decision": 9,
@@ -444,7 +452,7 @@
   "schema_ref": "urn:promin:contracts:1#/$defs/Conformance",
   "structural_budgets": {
     "authority_bearing_init_records": 5,
-    "base_user_commands_max": 10,
+    "base_user_commands_max": 11,
     "core_normative_artifacts": 6,
     "persistent_entity_kinds_max": 9,
     "relation_kinds_max": 6,
@@ -452,7 +460,7 @@
     "selected_presets": 1,
     "resolved_plan_source_samples_max": 64
   },
-  "version": "1.0.0-alpha.3",
+  "version": "1.0.0-alpha.4",
   "workcard_hard_ceiling": {
     "max_bytes": 16384,
     "max_entities": 32,

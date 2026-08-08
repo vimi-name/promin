@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from .artifact_policy import ArtifactPolicyError, validate_artifact_mode
 from .context_index import context_cost_model, sync_context_index
 from .documentation import sync_documentation
 from .gitpolicy import ensure_git_policy, sync_commit_surface
@@ -23,17 +24,25 @@ def refresh_project(
     deep_context: bool = False,
     apply: bool = True,
     reset_derived: bool = False,
+    artifact_mode: str = "minimal",
 ) -> dict[str, Any]:
-    """Refresh all derived/portable surfaces from one hash inventory.
+    """Refresh derived local surfaces and bounded tracked docs from one inventory.
 
     ``deep_context`` is reserved for future language-aware source adapters. Alpha
     always indexes bounded project documentation/manifests and workspace summaries.
     """
 
     root = Path(project_root).resolve()
+    try:
+        selected_artifact_mode = validate_artifact_mode(artifact_mode)
+    except ArtifactPolicyError as exc:
+        raise RefreshError(str(exc)) from exc
     reset_paths: list[str] = []
     if reset_derived and apply:
-        for relative in (Path(".promin/state/projection"), Path(".promin/cache"), Path(".promin/generated/context")):
+        # A refresh may discard only its local cache/context products.  It
+        # never deletes or edits a projection/database directly; recovery and
+        # reactivation own authoritative projection transitions.
+        for relative in (Path(".promin/cache"), Path(".promin/generated/context")):
             target = root / relative
             if target.is_dir() and not target.is_symlink():
                 shutil.rmtree(target)
@@ -52,7 +61,12 @@ def refresh_project(
     # before the hash-driven documentation snapshot so refresh cannot make its
     # own snapshot stale by writing .gitignore afterwards.
     git_policy = ensure_git_policy(root, apply=apply)
-    documentation = sync_documentation(root, plan, apply=apply)
+    documentation = sync_documentation(
+        root,
+        plan,
+        apply=apply,
+        artifact_mode=selected_artifact_mode,
+    )
     references = documentation.pop("reference_records", [])
     context = sync_context_index(root, plan, reference_records=references, apply=apply)
     hosts = sync_host_surfaces(root, language=str(plan.get("reporting_language") or "en"), apply=apply)
@@ -79,6 +93,7 @@ def refresh_project(
 
     result = {
         "record_type": "ProminRefreshResult",
+        "artifact_mode": selected_artifact_mode,
         "reset_derived": reset_derived,
         "reset_paths": reset_paths,
         "status": "blocked" if blocked else "updated" if changed else "current" if apply else "planned",
@@ -104,7 +119,7 @@ def refresh_project(
             details={
                 "changed_operations": changed,
                 "changed_units": len(documentation.get("changed_units", [])),
-                "portable_documentation_bytes": documentation.get("portable_documentation_bytes", 0),
+                "tracked_documentation_bytes": documentation.get("tracked_documentation_bytes", 0),
                 "context_index_bytes": context.get("bytes", 0),
                 "context_record_count": context.get("record_count", 0),
                 "startup_instruction_tokens": (

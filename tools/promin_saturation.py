@@ -841,8 +841,8 @@ def _saturation_project_plan() -> dict[str, Any]:
             "snapshot_consistency": "immutable-vcs-tree",
             "snapshot_provider_id": _SATURATION_PROVIDER_ID,
         },
-        "preset_id": "semantic-morok-tower",
-        "operating_profile": "morok-local",
+        "preset_id": "semantic-standard",
+        "operating_profile": "baseline",
     }
 
 
@@ -853,7 +853,7 @@ def _canonical_saturation_project_plan() -> dict[str, Any]:
         from promin.contracts import compile_project_init, load_contract_bundle
     except ImportError as exc:  # pragma: no cover - distribution fault path
         raise SaturationError(f"production project compiler is unavailable: {exc}") from exc
-    preset_path = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+    preset_path = PACKAGE_ROOT / "presets" / "semantic-standard.json"
     bundle = load_contract_bundle(PACKAGE_ROOT, preset_path)
     return compile_project_init(_saturation_project_plan(), bundle)
 
@@ -902,7 +902,7 @@ def _make_saturation_init_plan(workspace: Path) -> dict[str, Any]:
     if not git_version_line.startswith("git version "):
         raise SaturationError("filesystem-inventory provider is not git-compatible")
 
-    preset_path = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+    preset_path = PACKAGE_ROOT / "presets" / "semantic-standard.json"
     bundle = load_contract_bundle(PACKAGE_ROOT, preset_path)
     runtime_path = Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True)
     runtime_license = {

@@ -29,7 +29,7 @@ from promin.context_index import query_context
 from promin.experience import apply_plan, next_proposal, resolve_plan
 from promin.gitpolicy import commit_footprint, git_tracking_status
 from promin.host_integration import host_surface_status
-from promin.portability import doctor_with_portability, repair_project
+from promin.portability import doctor_with_portability
 from promin.refresh import refresh_project
 from promin.skills import create_skill, skill_catalog
 from promin.version import standard_version
@@ -342,50 +342,21 @@ def run_checklist(*, skip_clone: bool = False) -> dict[str, Any]:
 
         _record(records, check_id="ADG-080", category="safety", description="Shadow initialization does not mutate product files", required=True, action=check_product_unchanged)
 
-        if skip_clone:
-            records.append(
-                {
-                    "check_id": "ADG-090",
-                    "category": "portability",
-                    "description": "Clone rehydration and derived-state rebuild",
-                    "required": True,
-                    "status": "deferred",
-                    "duration_ms": 0.0,
-                    "reason": "explicitly skipped by --skip-clone",
-                    "evidence": {"acceptance_credit": False},
-                }
-            )
-        else:
-            def check_clone() -> dict[str, Any]:
-                _git(source, "add", ".")
-                _git(source, "commit", "-qm", "promin portable handoff")
-                subprocess.run(
-                    ["git", "clone", "-q", "--no-hardlinks", str(source), str(clone)],
-                    timeout=30,
-                    check=True,
-                )
-                started = time.perf_counter()
-                repair = repair_project(clone, apply=True)
-                elapsed = time.perf_counter() - started
-                if repair.get("status") not in {"applied", "healthy"}:
-                    raise CheckFailure(f"clone repair returned {repair.get('status')}")
-                if elapsed > 90:
-                    raise CheckFailure(f"clone repair exceeded 90 seconds: {elapsed:.3f}")
-                required = [
-                    clone / ".promin/init/activation.json",
-                    clone / ".promin/state/projection/context.sqlite3",
-                    clone / ".promin/generated/team-import-proposal.json",
-                ]
-                if not all(path.is_file() for path in required):
-                    raise CheckFailure("clone repair did not rebuild required local state")
-                return {
-                    "status": repair.get("status"),
-                    "elapsed_seconds": round(elapsed, 3),
-                    "performed": repair.get("performed"),
-                    "team_state_authoritative_import": False,
-                }
-
-            _record(records, check_id="ADG-090", category="portability", description="Clone rehydrates local state within a bounded subprocess", required=True, action=check_clone)
+        records.append(
+            {
+                "check_id": "ADG-090",
+                "category": "portability",
+                "description": "Owner-confirmed clean reinitialization is deliberately outside the diagnostic checklist",
+                "required": False,
+                "status": "deferred",
+                "duration_ms": 0.0,
+                "reason": (
+                    "alpha.4 forbids clone rehydration/replay; clean reinitialization "
+                    "requires a separately verified project package and owner confirmation"
+                ),
+                "evidence": {"acceptance_credit": False, "pass_credit": False},
+            }
+        )
 
         def check_hosts() -> dict[str, Any]:
             status = host_surface_status(source, language="en")

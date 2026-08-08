@@ -80,7 +80,7 @@ from promin.mutation_suite import (
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 CORE = PACKAGE_ROOT / "core"
-PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+PRESET = PACKAGE_ROOT / "presets" / "semantic-standard.json"
 ZERO = "0" * 64
 ONE = "1" * 64
 NOW = "2026-07-17T12:00:00Z"
@@ -737,8 +737,8 @@ class MutationHarness:
                     "collision_policy": "reject-nfc-and-casefold-collisions",
                     "product_identity_excludes_control_state": True,
                 },
-                "preset_id": "semantic-morok-tower",
-                "operating_profile": "morok-local",
+                "preset_id": "semantic-standard",
+                "operating_profile": "baseline",
             },
             "standards_plan": {"record_type": "StandardsInit", "bindings": []},
             "technologies_plan": {"record_type": "TechnologiesInit", "bindings": bindings},

@@ -210,15 +210,32 @@ def test_windows_alias_83_deep_root_public_init_route(
     assert runtime.selected_temp.resolve() == runtime.physical_temp.resolve()
     root = _deep_root(tmp_path / "project")
 
-    initialized = _run_cli(runtime, root, "init", "--goal", "Windows reconciliation route", "--yes")
+    initialized = _run_cli(
+        runtime,
+        root,
+        "init",
+        "--goal",
+        "Windows reconciliation route",
+        "--documentation",
+        "decline",
+        "--verification",
+        "decline",
+        "--yes",
+    )
     assert initialized.get("record_type") in {"InitializationResult", "InitResult"}
 
     doctor = _run_cli(runtime, root, "doctor", "--checklist")
-    assert doctor.get("status") == "pass"
+    # Both optional tooling surfaces were explicitly declined above.  A real
+    # Windows init and core health must still work, but the checklist must not
+    # claim their documentation/context credit as a full pass.
+    assert doctor.get("status") == "degraded"
+    assert doctor.get("fail_count") == 0
     status = _run_cli(runtime, root, "status")
     assert status.get("status") in {"ready", "ready-for-inventory"}
     next_result = _run_cli(runtime, root, "next")
-    assert next_result.get("record_type") == "NextResult"
+    assert next_result.get("record_type") == "SuggestedWorkCard"
+    assert next_result.get("pass_credit") is False
+    assert next_result.get("product_acceptance_pass") is False
     validated = _run_cli(runtime, root, "validate")
     assert validated.get("status") == "pass"
 
@@ -243,10 +260,23 @@ def test_windows_non_c_non_ascii_root_public_init_route(
     root = non_c_non_ascii_root
     root.mkdir()
 
-    initialized = _run_cli(runtime, root, "init", "--goal", "Windows non-C Unicode route", "--yes")
+    initialized = _run_cli(
+        runtime,
+        root,
+        "init",
+        "--goal",
+        "Windows non-C Unicode route",
+        "--documentation",
+        "decline",
+        "--verification",
+        "decline",
+        "--yes",
+    )
     assert initialized.get("record_type") in {"InitializationResult", "InitResult"}
     assert (root / ".promin").is_dir()
-    assert _run_cli(runtime, root, "doctor", "--checklist").get("status") == "pass"
+    doctor = _run_cli(runtime, root, "doctor", "--checklist")
+    assert doctor.get("status") == "degraded"
+    assert doctor.get("fail_count") == 0
     assert _run_cli(runtime, root, "validate").get("status") == "pass"
 
     # ``LOCALAPPDATA`` is redirected in the subprocess fixture.  Its physical

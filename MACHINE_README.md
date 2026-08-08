@@ -2,7 +2,7 @@
 
 Canonical name: `promin`
 
-Standard version: `1.0.0-alpha.3`
+Standard version: `1.0.0-alpha.4`
 
 ## Installed runtime bootstrap
 
@@ -44,23 +44,25 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 135 regular files under 14 declared
+The canonical alpha tree contains exactly 187 regular files under 16 declared
 directories, including the nested `skills/example` directory:
 
 | Location | Regular files |
 |---|---:|
 | package root | 14 |
 | `.github/` | 1 |
+| `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 11 |
+| `docs/` | 19 |
 | `examples/` | 1 |
 | `human/` | 4 |
+| `language_profiles/` | 1 |
 | `presets/` | 1 |
-| `profiles/` | 13 |
-| `promin/` | 31 |
+| `profiles/` | 12 |
+| `promin/` | 51 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 34 |
+| `tests/` | 56 |
 | `tools/` | 13 |
 
 Root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
@@ -75,15 +77,15 @@ additional, linked, special, or transient paths reject.
 
 ## Selected preset
 
-`presets/semantic-morok-tower.json` is outside Core identity. It selects bounded
-Semantic Programming, Morok/Tower decomposition, retrieval, and parallelism
+`presets/semantic-standard.json` is outside Core identity. It selects bounded
+Semantic Programming, generic decomposition, retrieval, and parallelism
 budgets only:
 
 | Profile | Tier | Parallel | Depth | Context bytes | Entities | Relations | Top-k |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `morok-local` | `weak-local` | 1 | 2 | 8192 | 16 | 24 | 8 |
-| `tower-capable` | `capable` | 3 | 4 | 12288 | 24 | 36 | 10 |
-| `tower-strong` | `strong` | 6 | 6 | 16384 | 32 | 48 | 12 |
+| `baseline` | `weak-local` | 1 | 2 | 8192 | 16 | 24 | 8 |
+| `balanced` | `capable` | 3 | 4 | 12288 | 24 | 36 | 10 |
+| `extended` | `strong` | 6 | 6 | 16384 | 32 | 48 | 12 |
 
 The preset cannot grant authority or relax acceptance, evidence, provider, or
 ingress rules.
@@ -93,7 +95,7 @@ ingress rules.
 The public alpha surface is exactly:
 
 ```json
-["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]
+["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"]
 ```
 
 The last four commands are non-authoritative operational support. They may
@@ -730,6 +732,6 @@ deterministic rebuild identity, and a rendered PNG for every page. Its visual
 review record binds every rendered-page digest and clipping result. A PDF header,
 first-page sample, or non-empty byte count alone receives no credit.
 
-The document cover identity is limited to MOROK TOWER, `promin`, and the footer
+The document cover identity is limited to PROMIN STANDARD, `promin`, and the footer
 `version 1` or `версія 1`. Operational evidence, decisions, and generated
 diagnostics remain outside the canonical package.

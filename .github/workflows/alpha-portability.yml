@@ -1,22 +1,24 @@
-name: alpha-portability
+name: alpha4-standard-validation
 
-# Alpha.3 has a Windows-verified deployment scope. Ubuntu and macOS jobs below
-# are non-normative declared compatibility signals: a green run is not
-# installability, deployment, acceptance, or pass-credit evidence until its
-# host-specific artifacts are independently presented.
+# Windows is the only locally verified alpha.4 runtime/deployment surface.
+# Ubuntu and macOS execute static package/authority checks only.  They do not
+# initialize a project, install a candidate for acceptance, or grant any
+# deployment, installability, acceptance, or pass-credit claim.
 
 on:
   push:
-    branches: [alpha, beta, main]
+    branches: [alpha, alpha-1.0.0-alpha.4, beta, main]
   pull_request:
 
 jobs:
-  non-normative-portability-regression:
+  declared-platform-static-validation:
+    # Linux/macOS are intentionally static-only until host-specific evidence
+    # is captured and reviewed.  This lane must never be read as deployment.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.12', '3.13']
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.13']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,25 +26,19 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - name: Install
+      - name: Install test dependencies for static checks
         run: python -m pip install -e ".[test]"
-      - name: Non-normative portability regression guards
+      - name: Static standard/package checks only
         env:
           PROMIN_NO_TELEMETRY: '1'
-        run: python -m pytest -q tests/test_alpha3_reconciliation_static.py tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_aliased_temp_tree.py tests/test_alpha3_reconciliation_performance.py tests/test_alpha3_reconciliation_package.py
-      - name: Non-normative portability closure regression
-        env:
-          PROMIN_NO_TELEMETRY: '1'
-        run: python -m pytest -q tests/test_alpha3_opus_closure.py
-      - name: Non-normative portability non-scale corpus
-        env:
-          PROMIN_NO_TELEMETRY: '1'
-        run: python -m pytest -q -m "not scale"
+        run: |
+          python tools/promin_validate.py . --install-mode none
+          python -m pytest -q tests/test_alpha4_genericity.py tests/test_alpha4_static_admission.py tests/test_alpha4_selector_shards.py tests/test_alpha3_reconciliation_static.py
 
   windows-aliased-paths:
-    # Windows is the current verified alpha.3 deployment scope. This CI route
-    # remains regression evidence; deployment/installability credit still
-    # requires a separately preserved and reviewed artifact.
+    # Windows is the current alpha.4 runtime verification priority.  Even this
+    # regression lane cannot award installability, product acceptance, release,
+    # or pass credit without a separately reviewed candidate artifact.
     strategy:
       fail-fast: false
       matrix:
@@ -73,15 +69,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $physicalTemp,$physicalCache | Out-Null
           cmd /c "mklink /J `"$aliasTemp`" `"$physicalTemp`"" | Out-Null
           cmd /c "mklink /J `"$aliasCache`" `"$physicalCache`"" | Out-Null
-
-          # Prefer a real 8.3 spelling when the runner exposes one; otherwise the
-          # junction alias still exercises lexical-path != physical-identity.
           $shortTemp = (cmd /c "for %I in (`"$physicalTemp`") do @echo %~sI").Trim()
           $selectedTemp = if ($shortTemp -and ($shortTemp -ne $physicalTemp)) { $shortTemp } else { $aliasTemp }
-
           "PROMIN_ALIAS_TEMP=$selectedTemp" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PROMIN_ALIAS_CACHE=$aliasCache" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Run alias, deep-root, init and post-init acceptance
+      - name: Run Windows native publication and identity checks
         shell: pwsh
         env:
           PROMIN_NO_TELEMETRY: '1'
@@ -90,51 +82,10 @@ jobs:
           $env:TMP = $env:PROMIN_ALIAS_TEMP
           $env:LOCALAPPDATA = $env:PROMIN_ALIAS_CACHE
           Remove-Item Env:PROMIN_PROVIDER_STORE -ErrorAction SilentlyContinue
-
-          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_reconciliation_windows.py tests/test_alpha3_reconciliation_aliased_temp_tree.py
-          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha3_opus_closure.py
-
-          $project = Join-Path $env:RUNNER_TEMP "promin-deep-root"
-          foreach ($index in 1..4) {
-            $project = Join-Path $project ("segment-$index-" + ("x" * 48))
-          }
-          New-Item -ItemType Directory -Force -Path $project | Out-Null
-
-          & $env:PROMIN_TEST_EXE --root $project init --goal "Windows aliased path regression" --yes
-          & $env:PROMIN_TEST_EXE --root $project doctor --checklist
-          & $env:PROMIN_TEST_EXE --root $project status
-          & $env:PROMIN_TEST_EXE --root $project next
-          & $env:PROMIN_TEST_EXE --root $project validate
-
-  macos-aliased-paths:
-    # Non-normative declared compatibility lane. It must not be read as macOS
-    # deployment, installability, acceptance, or pass-credit evidence.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install
-        run: python -m pip install -e ".[test]"
-      - name: Run symlinked temp/cache regression
+          & $env:PROMIN_TEST_PYTHON -m pytest -q tests/test_alpha4_windows_publication.py tests/test_alpha4_recovery_locks.py tests/test_alpha4_extensions_clean_init.py tests/test_alpha3_reconciliation_windows.py tests/test_alpha3_reconciliation_aliased_temp_tree.py
+      - name: Validate the static package without installability credit
+        shell: pwsh
         env:
           PROMIN_NO_TELEMETRY: '1'
         run: |
-          physical_temp="$RUNNER_TEMP/promin-physical-temp"
-          alias_temp="$RUNNER_TEMP/promin-temp-alias"
-          physical_cache="$RUNNER_TEMP/promin-physical-cache"
-          alias_cache="$RUNNER_TEMP/promin-cache-alias"
-          mkdir -p "$physical_temp" "$physical_cache"
-          ln -s "$physical_temp" "$alias_temp"
-          ln -s "$physical_cache" "$alias_cache"
-          export TMPDIR="$alias_temp"
-          export XDG_CACHE_HOME="$alias_cache"
-          unset PROMIN_PROVIDER_STORE
-          python -m pytest -q tests/test_alpha3_reconciliation_paths.py tests/test_alpha3_reconciliation_aliased_temp_tree.py tests/test_alpha3_opus_closure.py
-          project="$RUNNER_TEMP/promin-macos-alias-project"
-          mkdir -p "$project"
-          promin --root "$project" init --goal "macOS aliased path regression" --yes
-          promin --root "$project" doctor --checklist
-          promin --root "$project" status
-          promin --root "$project" next
+          & $env:PROMIN_TEST_PYTHON tools/promin_validate.py . --install-mode none

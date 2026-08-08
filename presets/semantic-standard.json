@@ -5,13 +5,14 @@
     "status",
     "next",
     "validate",
+    "static-admission",
     "continue",
     "audit",
     "refresh",
     "context",
     "skills"
   ],
-  "default_profile": "morok-local",
+  "default_profile": "baseline",
   "document": "promin.preset",
   "forbidden_implicit_behavior": [
     "full-scan-on-init",
@@ -20,16 +21,16 @@
     "unbounded-context-expansion",
     "search-ranking-as-acceptance-proof"
   ],
-  "function": "Select Semantic Programming plus Morok/Tower decomposition, retrieval, and parallelism budgets without granting action authority.",
+  "function": "Select bounded semantic planning, retrieval, and parallelism budgets without granting action authority.",
   "optional_provider_capabilities": [
     "filesystem-inventory",
     "export-scan",
     "signature",
     "build-dependency"
   ],
-  "preset_id": "semantic-morok-tower",
+  "preset_id": "semantic-standard",
   "profiles": {
-    "morok-local": {
+    "baseline": {
       "default_dependency_depth": 2,
       "max_context_bytes": 8192,
       "max_entities": 16,
@@ -39,7 +40,7 @@
       "model_tier": "weak-local",
       "top_k": 8
     },
-    "tower-capable": {
+    "balanced": {
       "default_dependency_depth": 4,
       "max_context_bytes": 12288,
       "max_entities": 24,
@@ -49,7 +50,7 @@
       "model_tier": "capable",
       "top_k": 10
     },
-    "tower-strong": {
+    "extended": {
       "default_dependency_depth": 6,
       "max_context_bytes": 16384,
       "max_entities": 32,
@@ -88,5 +89,5 @@
       "publish-evidence"
     ]
   },
-  "version": "1.0.0-alpha.3"
+  "version": "1.0.0-alpha.4"
 }

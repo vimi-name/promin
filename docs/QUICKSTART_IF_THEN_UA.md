@@ -9,9 +9,9 @@
 - Якщо це web/React/Supabase → система додає Web preset.
 - Якщо це Android/Gradle/Kotlin → система додає Android preset.
 - Якщо це Windows-native → система додає Windows Development preset.
-- Якщо це проєкт студії → підтвердьте Morok Tower Studio.
+- Якщо це проєкт студії → підтвердьте Promin Standard Studio.
 - Якщо код хаотичний або дубльований → додається Vibe Recovery.
-- Якщо не хочете підтверджень → використайте `unsafe-auto`.
+- Якщо потрібні зворотні local-дії в межах чинної Core authority → використайте `standing-reversible`.
 - Якщо перенесли папку на іншу ОС → `promin doctor --repair`.
 - Якщо потрібний стан → `promin status`.
 - Якщо потрібна наступна робота → `promin next`.
@@ -19,4 +19,3 @@
 - Якщо promin ще не встановлено → створіть окремий Python 3.12/3.13/3.14 venv і виконайте `python -m pip install <шлях-до-розпакованого-promin>`.
 - Якщо потрібне offline-встановлення → використайте перевірений wheelhouse через `--no-index --find-links`.
 - Якщо потрібно перевірити весь шар → `promin doctor --checklist`.
-

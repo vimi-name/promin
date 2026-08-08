@@ -408,7 +408,7 @@ def sign_standard_decision(
 
 def sync_version(root: Path) -> None:
     manifest = load_json(root / "core" / "promin.manifest.json")
-    preset_path = root / "presets" / "semantic-morok-tower.json"
+    preset_path = root / "presets" / "semantic-standard.json"
     distribution = distribution_identity(root)
     version = {
         "canonical_name": "promin",
@@ -420,7 +420,7 @@ def sync_version(root: Path) -> None:
         },
         "record_type": "StandardVersion",
         "selected_preset": {
-            "path": "presets/semantic-morok-tower.json",
+            "path": "presets/semantic-standard.json",
             "sha256": sha256_file(preset_path),
         },
         "version": distribution["version"],

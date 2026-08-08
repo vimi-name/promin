@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promin"
-version = "1.0.0a3"
-description = "Morok Tower operational standard"
+version = "1.0.0a4"
+description = "Promin Standard operational standard"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = { file = "LICENSE" }
@@ -35,6 +35,8 @@ include = ["promin*"]
 "share/promin/core" = ["core/*.json"]
 "share/promin/presets" = ["presets/*.json"]
 "share/promin/profiles" = ["profiles/*.json", "profiles/README.md"]
+"share/promin/capability_profiles" = ["capability_profiles/*.json"]
+"share/promin/language_profiles" = ["language_profiles/*.json"]
 "share/promin/skills" = ["skills/README.md", "skills/skill.schema.json"]
 "share/promin/skills/example" = ["skills/example/SKILL.md", "skills/example/promin.skill.json"]
 "share/promin/prompts" = ["prompts/*.txt"]

@@ -7,9 +7,9 @@ Resolution is explicit and deterministic:
 2. the source/distribution root adjacent to the Python package;
 3. ``<sys.prefix>/share/promin`` for installed data-file layouts.
 
-A candidate is accepted only when the canonical Core manifest and bundled preset
-are both present.  The function returns a resolved real directory and caches only
-that validated path for the lifetime of the process.
+    A candidate is accepted only when the canonical Core manifest and the one
+selected generic preset are both present.  The function returns a resolved real
+directory and caches only that validated path for the lifetime of the process.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def _is_bundle_root(path: Path) -> bool:
         return False
     return (
         (resolved / "core" / "promin.manifest.json").is_file()
-        and (resolved / "presets" / "semantic-morok-tower.json").is_file()
+        and (resolved / "presets" / "semantic-standard.json").is_file()
     )
 
 

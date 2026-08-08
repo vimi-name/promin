@@ -2,13 +2,13 @@
   "authority_effect": "none",
   "category": "autonomy",
   "defaults": {
-    "autonomy": "safe-auto"
+    "autonomy": "standing-reversible"
   },
   "detect": [],
   "dynamic_composition": true,
   "license": "Apache-2.0",
-  "profile_id": "safe-auto",
-  "purpose": "Run reversible routine work automatically and escalate material risk",
+  "profile_id": "standing-reversible",
+  "purpose": "Classify only reversible local actions while requiring current Core authorization",
   "record_type": "ExperienceProfile",
   "schema_version": 1,
   "trusted_by_default": true

@@ -22,7 +22,7 @@ def test_project_skill_lifecycle_is_portable_bounded_and_non_authoritative(tmp_p
     catalog = skill_catalog(tmp_path)
     project_skills = [
         item for item in catalog["skills"]
-        if item["catalog_source"] == "project-portable"
+        if item["catalog_source"] == "project-docs"
     ]
     assert [item["skill_id"] for item in project_skills] == ["security-review"]
     request = request_skill(tmp_path, requirement="security review")
@@ -32,4 +32,4 @@ def test_project_skill_lifecycle_is_portable_bounded_and_non_authoritative(tmp_p
     removed = remove_skill(tmp_path, name="security-review", portable=True)
     assert removed["status"] == "removed"
     remaining = skill_catalog(tmp_path)["skills"]
-    assert not any(item["catalog_source"] == "project-portable" for item in remaining)
+    assert not any(item["catalog_source"] == "project-docs" for item in remaining)

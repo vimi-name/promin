@@ -23,6 +23,12 @@
     "Report"
   ],
   "design_rules": {
+    "alpha4_standard_authority": {
+      "canonical_policy_owner": "policy-set.json.alpha4_standard_contracts",
+      "derived_outputs": "non-authoritative",
+      "project_specific_defaults": "reject",
+      "standard_only": true
+    },
     "artifact_subtypes": {
       "candidate-delta": "An Artifact with kind diff binds one base Candidate, one new Candidate, one WorkCard, and the complete normalized changed-path set.",
       "evidence": "An evidence Artifact binds exact Candidate, policy, tool, inputs, and every invoked provider adapter; Finding disposition evidence additionally binds the canonical Finding digest."
@@ -930,5 +936,5 @@
     "StateCheckpoint": "A disposable self-digested state or journal index bound to an exact authoritative HEAD; it cannot grant authority or acceptance.",
     "WorkCard": "A bounded generated context package for one Task that separately binds the projection.read query Grant claim and the task.execute holder Grant; neither binding implies acceptance."
   },
-  "version": "1.0.0-alpha.3"
+  "version": "1.0.0-alpha.4"
 }

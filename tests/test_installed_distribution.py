@@ -76,6 +76,8 @@ def test_distribution_declares_portable_runtime_bundle_data() -> None:
         "share/promin/core": {"core/*.json"},
         "share/promin/presets": {"presets/*.json"},
         "share/promin/profiles": {"profiles/*.json", "profiles/README.md"},
+        "share/promin/capability_profiles": {"capability_profiles/*.json"},
+        "share/promin/language_profiles": {"language_profiles/*.json"},
         "share/promin/skills": {"skills/README.md", "skills/skill.schema.json"},
         "share/promin/skills/example": {
             "skills/example/SKILL.md",

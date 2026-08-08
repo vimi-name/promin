@@ -17,7 +17,7 @@ from promin.contracts import (
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-PRESET = PACKAGE_ROOT / "presets" / "semantic-morok-tower.json"
+PRESET = PACKAGE_ROOT / "presets" / "semantic-standard.json"
 
 
 def _project_init() -> tuple[object, dict[str, object]]:
@@ -36,8 +36,8 @@ def _project_init() -> tuple[object, dict[str, object]]:
                 "collision_policy": "reject-nfc-and-casefold-collisions",
                 "product_identity_excludes_control_state": True,
             },
-            "preset_id": "semantic-morok-tower",
-            "operating_profile": "morok-local",
+            "preset_id": "semantic-standard",
+            "operating_profile": "baseline",
         },
         bundle,
     )

@@ -11,12 +11,12 @@ Build one concise resolved plan with the goal, mode, workspace units, detected
 stack, profile composition, standards/sources, autonomy, language, material
 rights, planned scans/external actions, first operations, and material unknowns.
 
-Use Morok Tower Studio and safe reversible defaults when evidence is
+Use Promin Standard Studio and safe reversible defaults when evidence is
 insufficient. Ask only about material ambiguity that affects authority,
 architecture, or an irreversible result and has no safe default.
 
-Show the plan. In `ask` and `safe-auto`, wait for confirmation or natural-language
-clarification. In `unsafe-auto`, record the plan and continue inside current
-authority. After init report status, profile revision, next action, whether a
+Show the plan. `ask` requires confirmation. `standing-reversible` still
+requires current Core authority and applies only reversible local actions.
+After init report status, profile revision, next action, whether a
 human decision is needed, and the `promin doctor`, `promin refresh`, and
 `promin audit` commands.
