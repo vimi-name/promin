@@ -12,12 +12,12 @@ import tempfile
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .authority import AuthorityEngine
 from .canonical import (
@@ -84,6 +84,79 @@ def _thaw_frozen(value: Any) -> Any:
     return value
 _INVENTORY_SEARCH_TEXT_MAX_BYTES = 4_096
 _INVENTORY_JSONL_ROW_MAX_BYTES = 16_384
+_IMMUTABLE_VCS_RECEIPT_FIELDS = frozenset(
+    {
+        "adapter_id",
+        "authoritative",
+        "capability_id",
+        "completed_at",
+        "dependency_receipt_digest",
+        "exit_code",
+        "identity_digest",
+        "identity_kind",
+        "implementation_closure_digest",
+        "input_digest",
+        "invocation_kind",
+        "invocation_receipt_digest",
+        "invocation_request_digest",
+        "invoked",
+        "operation",
+        "operation_contract_digest",
+        "outcome",
+        "output_digest",
+        "output_size_bytes",
+        "output_size_ceiling_bytes",
+        "pass_credit",
+        "protocol_id",
+        "provider_id",
+        "started_at",
+        "stderr_capture_digest",
+        "stderr_capture_size_bytes",
+        "stderr_capture_truncated",
+        "stdout_capture_digest",
+        "stdout_capture_size_bytes",
+        "stdout_capture_truncated",
+    }
+)
+_IMMUTABLE_VCS_SHARED_RECEIPT_FIELDS = (
+    "capability_id",
+    "provider_id",
+    "invocation_kind",
+    "identity_kind",
+    "identity_digest",
+    "adapter_id",
+    "protocol_id",
+    "dependency_receipt_digest",
+    "implementation_closure_digest",
+)
+_IMMUTABLE_VCS_RECEIPT_DIGEST_FIELDS = (
+    "identity_digest",
+    "operation_contract_digest",
+    "dependency_receipt_digest",
+    "implementation_closure_digest",
+    "input_digest",
+    "invocation_request_digest",
+    "output_digest",
+    "stdout_capture_digest",
+    "stderr_capture_digest",
+    "invocation_receipt_digest",
+)
+_IMMUTABLE_VCS_SNAPSHOT_SCHEMA = "promin.immutable-vcs-tree-inventory.v1"
+_IMMUTABLE_VCS_SNAPSHOT_BINDING_FIELDS = frozenset(
+    {
+        "record_type",
+        "schema",
+        "repository_tree_object",
+        "tree_object_completion_receipt",
+        "tree_stream_completion_receipt",
+        "candidate_recipe_digest",
+        "source_roots",
+        "inventory_digest",
+        "inventory_stream_digest",
+        "inventory_stream_bytes",
+        "inventory_entry_count",
+    }
+)
 
 
 class ServiceError(RuntimeError):
@@ -110,6 +183,7 @@ class _RuntimeCheckpointCursor:
     head_sequence: int
     head_batch_id: str | None
     head_digest: str | None
+    state_binding_digest: str
     checkpoint_count: int
     tail_batches: int
     tail_bytes: int
@@ -188,28 +262,134 @@ class _DecisionBindings:
         return restored
 
 
+_RELATION_IDENTITY_OVERLAY_COMPACTION_DEPTH = 64
+_RUNTIME_ROWS_VERSION = 1
+_RUNTIME_ROWS_INDEX_WIDTH = 12
+_RUNTIME_ROWS_RELATION_BATCH = 128
+_AUTHORITY_CHECKPOINT_COLLECTIONS = tuple(
+    sorted(("grants", "revocations", "nonces", "candidate_actions", "finding_actions"))
+)
+_DOMAIN_CHECKPOINT_COLLECTIONS = tuple(
+    sorted(
+        (
+            "tasks",
+            "candidates",
+            "leases",
+            "findings",
+            "gate_results",
+            "gate_runs",
+            "decisions",
+            "candidate_ids_by_digest",
+            "task_lease_generations",
+            "task_fences",
+            "gate_result_order",
+            "decision_order",
+        )
+    )
+)
+
+
+@dataclass(frozen=True)
+class _RelationIdentityIndex:
+    """Persistent exact membership for append-only Relation identities."""
+
+    parent: "_RelationIdentityIndex | None" = None
+    additions: frozenset[str] = frozenset()
+    depth: int = 0
+
+    def contains(self, relation_id: str) -> bool:
+        cursor: _RelationIdentityIndex | None = self
+        while cursor is not None:
+            if relation_id in cursor.additions:
+                return True
+            cursor = cursor.parent
+        return False
+
+    def extend(self, relation_ids: Iterable[str]) -> "_RelationIdentityIndex":
+        additions = frozenset(relation_ids)
+        if not additions:
+            return self
+        base = self
+        if base.depth >= _RELATION_IDENTITY_OVERLAY_COMPACTION_DEPTH:
+            base = base.compacted()
+        return _RelationIdentityIndex(base, additions, base.depth + 1)
+
+    def compacted(self) -> "_RelationIdentityIndex":
+        identities: set[str] = set()
+        cursor: _RelationIdentityIndex | None = self
+        while cursor is not None:
+            identities.update(cursor.additions)
+            cursor = cursor.parent
+        return _RelationIdentityIndex(None, frozenset(identities), 1)
+
+
 @dataclass(frozen=True)
 class _RelationLedger:
     parent: "_RelationLedger | None" = None
     additions: tuple[Mapping[str, Any], ...] = ()
+    identity_index: _RelationIdentityIndex = field(
+        default_factory=_RelationIdentityIndex
+    )
 
     def extend(self, values: Iterable[Mapping[str, Any]]) -> "_RelationLedger":
         additions = tuple(
             MappingProxyType(deepcopy(dict(value))) for value in values
         )
-        return self if not additions else _RelationLedger(self, additions)
+        if not additions:
+            return self
+        relation_ids = tuple(value.get("relation_id") for value in additions)
+        if any(not isinstance(relation_id, str) or not relation_id for relation_id in relation_ids):
+            raise ServiceError("Relation ledger record lacks a canonical identity")
+        if len(relation_ids) != len(set(relation_ids)) or any(
+            self.identity_index.contains(relation_id) for relation_id in relation_ids
+        ):
+            raise ServiceError("Relation ledger identity is duplicated")
+        return _RelationLedger(
+            self,
+            additions,
+            self.identity_index.extend(relation_ids),
+        )
 
-    def materialize(self) -> tuple[dict[str, Any], ...]:
+    def contains_relation_id(self, relation_id: str) -> bool:
+        if not isinstance(relation_id, str) or not relation_id:
+            raise ServiceError("Relation identity lookup is invalid")
+        return self.identity_index.contains(relation_id)
+
+    def addition_batches(self) -> Iterator[tuple[dict[str, Any], ...]]:
         chain: list[_RelationLedger] = []
         cursor: _RelationLedger | None = self
         while cursor is not None:
             chain.append(cursor)
             cursor = cursor.parent
-        return tuple(
-            deepcopy(dict(value))
-            for node in reversed(chain)
-            for value in node.additions
-        )
+        for node in reversed(chain):
+            if node.additions:
+                yield tuple(deepcopy(dict(value)) for value in node.additions)
+
+    def values(self) -> Iterator[dict[str, Any]]:
+        for additions in self.addition_batches():
+            yield from additions
+
+    def materialize(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self.values())
+
+    def count(self) -> int:
+        count = 0
+        cursor: _RelationIdentityIndex | None = self.identity_index
+        while cursor is not None:
+            count += len(cursor.additions)
+            cursor = cursor.parent
+        return count
+
+    def state_binding_commitments(
+        self,
+        policy: EventStorePolicy,
+    ) -> Iterator[dict[str, str]]:
+        for value in self.values():
+            yield {
+                "leaf_type": "Relation",
+                "leaf_id": state_binding_leaf_id(policy, "Relation", value),
+                "value_digest": digest_value(value),
+            }
 
     @classmethod
     def restore(cls, values: Any) -> "_RelationLedger":
@@ -331,6 +511,310 @@ class _RuntimeSnapshot:
     artifacts: _ArtifactBindings
 
 
+def _runtime_rows_section(component: str, field_name: str) -> str:
+    prefixes = {
+        "authority": "10.authority",
+        "domain": "20.domain",
+        "decisions": "30.decisions",
+        "relations": "40.relations",
+        "runs": "50.runs",
+        "artifacts": "60.artifacts",
+    }
+    prefix = prefixes.get(component)
+    if prefix is None:
+        raise ServiceError("runtime row component is unknown")
+    return f"{prefix}.{field_name}"
+
+
+def _split_runtime_checkpoint_component(
+    component: str,
+    checkpoint: Mapping[str, Any],
+    collection_fields: Sequence[str],
+) -> tuple[dict[str, Any], dict[str, list[Any]]]:
+    value = dict(checkpoint)
+    missing = [field_name for field_name in collection_fields if field_name not in value]
+    if missing:
+        raise ServiceError(
+            f"runtime {component} checkpoint lacks collection fields"
+        )
+    collections: dict[str, list[Any]] = {}
+    for field_name in collection_fields:
+        items = value.pop(field_name)
+        if not isinstance(items, list):
+            raise ServiceError(
+                f"runtime {component} checkpoint collection is not an array"
+            )
+        collections[field_name] = items
+    return deepcopy(value), collections
+
+
+def _runtime_checkpoint_rows(
+    context: ActivationContext,
+    snapshot: _RuntimeSnapshot,
+    *,
+    head: Mapping[str, Any],
+    state_binding_digest: str,
+    compaction: Mapping[str, Any],
+) -> Iterator[dict[str, Any]]:
+    """Build one deterministic normalized runtime checkpoint row stream.
+
+    Each physical row retains EventStore's per-record canonical JSON bound while
+    the complete checkpoint may contain hundreds of thousands of semantic
+    records.  The row count is fixed before publication and checked again while
+    streaming so a changing or partial iterator cannot produce a usable cache.
+    """
+
+    authority_header, authority_collections = _split_runtime_checkpoint_component(
+        "authority",
+        snapshot.authority.checkpoint(),
+        _AUTHORITY_CHECKPOINT_COLLECTIONS,
+    )
+    domain_header, domain_collections = _split_runtime_checkpoint_component(
+        "domain",
+        snapshot.domain.checkpoint(
+            head_sequence=head["sequence"],
+            head_digest=head["batch_digest"],
+            state_binding_digest=state_binding_digest,
+            runtime_policy=_lease_parallelism_policy(context),
+        ),
+        _DOMAIN_CHECKPOINT_COLLECTIONS,
+    )
+    decisions = list(snapshot.decisions.materialize())
+    runs = list(snapshot.runs.materialize())
+    artifacts = list(snapshot.artifacts.materialize())
+
+    sections: dict[str, tuple[int, Iterable[Any]]] = {}
+    for field_name in _AUTHORITY_CHECKPOINT_COLLECTIONS:
+        values = authority_collections[field_name]
+        sections[_runtime_rows_section("authority", field_name)] = (
+            len(values),
+            values,
+        )
+    for field_name in _DOMAIN_CHECKPOINT_COLLECTIONS:
+        values = domain_collections[field_name]
+        sections[_runtime_rows_section("domain", field_name)] = (
+            len(values),
+            values,
+        )
+    sections[_runtime_rows_section("decisions", "records")] = (
+        len(decisions),
+        decisions,
+    )
+    sections[_runtime_rows_section("relations", "records")] = (
+        snapshot.relations.count(),
+        snapshot.relations.values(),
+    )
+    sections[_runtime_rows_section("runs", "records")] = (len(runs), runs)
+    sections[_runtime_rows_section("artifacts", "records")] = (
+        len(artifacts),
+        artifacts,
+    )
+    section_counts = [
+        {"section": section, "count": sections[section][0]}
+        for section in sorted(sections)
+    ]
+    if any(
+        item["count"] >= 10**_RUNTIME_ROWS_INDEX_WIDTH for item in section_counts
+    ):
+        raise ServiceError("runtime checkpoint row count exceeds its fixed identity width")
+    header = {
+        "record_type": "RuntimeRowsState",
+        "version": _RUNTIME_ROWS_VERSION,
+        "head": deepcopy(dict(head)),
+        "authority_state_binding_digest": state_binding_digest,
+        "compaction": deepcopy(dict(compaction)),
+        "authority_header": authority_header,
+        "domain_header": domain_header,
+        "section_counts": section_counts,
+    }
+
+    def rows() -> Iterator[dict[str, Any]]:
+        yield {"section": "00.runtime", "key": "header", "value": header}
+        for section in sorted(sections):
+            expected_count, values = sections[section]
+            observed_count = 0
+            for index, value in enumerate(values):
+                if index >= expected_count:
+                    raise ServiceError(
+                        "runtime checkpoint row iterator exceeds its bound count"
+                    )
+                yield {
+                    "section": section,
+                    "key": f"{index:0{_RUNTIME_ROWS_INDEX_WIDTH}d}",
+                    "value": deepcopy(value),
+                }
+                observed_count += 1
+            if observed_count != expected_count:
+                raise ServiceError(
+                    "runtime checkpoint row iterator ended before its bound count"
+                )
+
+    return rows()
+
+
+class _RuntimeRowsAccumulator:
+    """Strictly reconstruct one normalized runtime checkpoint in one pass."""
+
+    def __init__(self) -> None:
+        self.header: dict[str, Any] | None = None
+        self._expected: dict[str, int] = {}
+        self._observed: dict[str, int] = {}
+        self._values: dict[str, list[Any]] = {}
+        self._relations = _RelationLedger()
+        self._relation_buffer: list[Mapping[str, Any]] = []
+
+    @staticmethod
+    def _valid_digest(value: Any) -> bool:
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+    def _bind_header(self, value: Any) -> None:
+        fields = {
+            "record_type",
+            "version",
+            "head",
+            "authority_state_binding_digest",
+            "compaction",
+            "authority_header",
+            "domain_header",
+            "section_counts",
+        }
+        if (
+            self.header is not None
+            or not isinstance(value, Mapping)
+            or set(value) != fields
+            or value.get("record_type") != "RuntimeRowsState"
+            or value.get("version") != _RUNTIME_ROWS_VERSION
+            or not isinstance(value.get("head"), Mapping)
+            or not self._valid_digest(value.get("authority_state_binding_digest"))
+            or not isinstance(value.get("compaction"), Mapping)
+            or not isinstance(value.get("authority_header"), Mapping)
+            or not isinstance(value.get("domain_header"), Mapping)
+            or not isinstance(value.get("section_counts"), list)
+        ):
+            raise ServiceError("runtime row checkpoint header is invalid")
+        compaction = value["compaction"]
+        compaction_fields = {
+            "checkpoint_count",
+            "tail_batches_compacted",
+            "tail_bytes_compacted",
+            "batch_threshold",
+            "byte_threshold",
+        }
+        if set(compaction) != compaction_fields or any(
+            not isinstance(compaction[field_name], int)
+            or isinstance(compaction[field_name], bool)
+            or compaction[field_name] < (1 if field_name in {"checkpoint_count", "batch_threshold", "byte_threshold"} else 0)
+            for field_name in compaction_fields
+        ):
+            raise ServiceError("runtime row checkpoint compaction is invalid")
+
+        required_sections = {
+            *(
+                _runtime_rows_section("authority", field_name)
+                for field_name in _AUTHORITY_CHECKPOINT_COLLECTIONS
+            ),
+            *(
+                _runtime_rows_section("domain", field_name)
+                for field_name in _DOMAIN_CHECKPOINT_COLLECTIONS
+            ),
+            _runtime_rows_section("decisions", "records"),
+            _runtime_rows_section("relations", "records"),
+            _runtime_rows_section("runs", "records"),
+            _runtime_rows_section("artifacts", "records"),
+        }
+        section_counts: dict[str, int] = {}
+        previous: str | None = None
+        for item in value["section_counts"]:
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != {"section", "count"}
+                or not isinstance(item.get("section"), str)
+                or not isinstance(item.get("count"), int)
+                or isinstance(item.get("count"), bool)
+                or item["count"] < 0
+                or item["count"] >= 10**_RUNTIME_ROWS_INDEX_WIDTH
+                or (previous is not None and item["section"] <= previous)
+            ):
+                raise ServiceError("runtime row checkpoint section count is invalid")
+            previous = item["section"]
+            section_counts[item["section"]] = item["count"]
+        if set(section_counts) != required_sections:
+            raise ServiceError("runtime row checkpoint sections are incomplete")
+        self.header = deepcopy(dict(value))
+        self._expected = section_counts
+        self._observed = {section: 0 for section in section_counts}
+        self._values = {
+            section: []
+            for section in section_counts
+            if section != _runtime_rows_section("relations", "records")
+        }
+
+    def _flush_relations(self) -> None:
+        if self._relation_buffer:
+            self._relations = self._relations.extend(self._relation_buffer)
+            self._relation_buffer = []
+
+    def consume(self, row: dict[str, Any]) -> None:
+        section = row.get("section")
+        key = row.get("key")
+        if section == "00.runtime":
+            if key != "header":
+                raise ServiceError("runtime row checkpoint header identity is invalid")
+            self._bind_header(row.get("value"))
+            return
+        if self.header is None:
+            raise ServiceError("runtime row checkpoint data precedes its header")
+        if not isinstance(section, str) or section not in self._expected:
+            raise ServiceError("runtime row checkpoint contains an unknown section")
+        index = self._observed[section]
+        if key != f"{index:0{_RUNTIME_ROWS_INDEX_WIDTH}d}":
+            raise ServiceError("runtime row checkpoint key sequence is invalid")
+        if index >= self._expected[section]:
+            raise ServiceError("runtime row checkpoint exceeds a section count")
+        value = deepcopy(row.get("value"))
+        if section == _runtime_rows_section("relations", "records"):
+            if not isinstance(value, Mapping):
+                raise ServiceError("runtime row Relation is not an object")
+            self._relation_buffer.append(value)
+            if len(self._relation_buffer) >= _RUNTIME_ROWS_RELATION_BATCH:
+                self._flush_relations()
+        else:
+            self._values[section].append(value)
+        self._observed[section] = index + 1
+
+    def finish(self) -> dict[str, Any]:
+        if self.header is None or self._observed != self._expected:
+            raise ServiceError("runtime row checkpoint is incomplete")
+        self._flush_relations()
+        authority = deepcopy(dict(self.header["authority_header"]))
+        for field_name in _AUTHORITY_CHECKPOINT_COLLECTIONS:
+            authority[field_name] = deepcopy(
+                self._values[_runtime_rows_section("authority", field_name)]
+            )
+        domain = deepcopy(dict(self.header["domain_header"]))
+        for field_name in _DOMAIN_CHECKPOINT_COLLECTIONS:
+            domain[field_name] = deepcopy(
+                self._values[_runtime_rows_section("domain", field_name)]
+            )
+        return {
+            "head": deepcopy(dict(self.header["head"])),
+            "authority_state_binding_digest": self.header[
+                "authority_state_binding_digest"
+            ],
+            "compaction": deepcopy(dict(self.header["compaction"])),
+            "authority": authority,
+            "domain": domain,
+            "decisions": deepcopy(
+                self._values[_runtime_rows_section("decisions", "records")]
+            ),
+            "relations": self._relations,
+            "runs": deepcopy(self._values[_runtime_rows_section("runs", "records")]),
+            "artifacts": deepcopy(
+                self._values[_runtime_rows_section("artifacts", "records")]
+            ),
+        }
+
+
 @dataclass
 class _PreparedRuntime:
     command_id: str
@@ -358,6 +842,7 @@ class InventoryResult:
     stream_digest: str | None = None
     stream_bytes: int | None = None
     manifest_digest: str | None = None
+    immutable_vcs_binding: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1184,6 +1669,48 @@ def _runtime_state_binding_leaves(
     )
 
 
+def _runtime_state_binding_commitments(
+    policy: EventStorePolicy,
+    snapshot: _RuntimeSnapshot,
+) -> tuple[dict[str, str], ...]:
+    """Return the exact semantic leaf commitments without one giant JSON list."""
+
+    commitments: list[dict[str, str]] = []
+
+    def append(
+        leaf_type: str,
+        value: Mapping[str, Any],
+        *,
+        identity_owner: Mapping[str, Any] | None = None,
+    ) -> None:
+        owner = value if identity_owner is None else identity_owner
+        commitments.append(
+            {
+                "leaf_type": leaf_type,
+                "leaf_id": state_binding_leaf_id(policy, leaf_type, owner),
+                "value_digest": digest_value(value),
+            }
+        )
+
+    for item in snapshot.domain.persistent_records():
+        append(str(item["leaf_type"]), item["value"])
+    revocations = snapshot.authority.revocations
+    for grant_id, grant in snapshot.authority.grants.items():
+        value = {
+            "record_type": "GrantAuthorityState",
+            "grant": grant,
+            "revocation": revocations.get(grant_id),
+        }
+        append("Grant", value, identity_owner=grant)
+    commitments.extend(snapshot.relations.state_binding_commitments(policy))
+    for value in snapshot.runs.materialize():
+        append("Run", value)
+    for value in snapshot.artifacts.materialize():
+        append("Artifact", value)
+    commitments.sort(key=lambda item: (item["leaf_type"], item["leaf_id"]))
+    return tuple(commitments)
+
+
 
 def _fast_implementation_stat_fingerprint(
     context: ActivationContext,
@@ -1326,6 +1853,7 @@ class ProminService:
             self._query_runtime_value = None
             self._prepared_runtime = None
             self._runtime_checkpoint_cursor = None
+            stores = (self._mutation_store, self._read_store)
             self._mutation_store_key = None
             self._mutation_store = None
             self._read_store_key = None
@@ -1334,6 +1862,22 @@ class ProminService:
             self._verified_mutation_fingerprint = None
             self._verified_mutation_bindings = None
             self._ranked_candidate_cache.clear()
+            closed: set[int] = set()
+            for store in stores:
+                if store is not None and id(store) not in closed:
+                    closed.add(id(store))
+                    store.close()
+
+    def close(self) -> None:
+        """Release cached EventStore resources without changing durable state."""
+
+        self._clear_query_runtime()
+
+    def __enter__(self) -> "ProminService":
+        return self
+
+    def __exit__(self, *_unused: object) -> None:
+        self.close()
 
     def _bind_query_runtime(
         self,
@@ -1359,16 +1903,20 @@ class ProminService:
         context: ActivationContext,
         head: Mapping[str, Any],
         *,
+        state_binding_digest: str,
         checkpoint_count: int,
         tail_batches: int,
         tail_bytes: int,
     ) -> _RuntimeCheckpointCursor:
+        if re.fullmatch(r"[0-9a-f]{64}", state_binding_digest) is None:
+            raise ServiceError("runtime checkpoint cursor state binding is invalid")
         cursor = _RuntimeCheckpointCursor(
             activation_digest=_activation(context)["activation_digest"],
             implementation_closure_digest=_implementation_closure_digest(context),
             head_sequence=int(head["sequence"]),
             head_batch_id=head["batch_id"],
             head_digest=head["batch_digest"],
+            state_binding_digest=state_binding_digest,
             checkpoint_count=checkpoint_count,
             tail_batches=tail_batches,
             tail_bytes=tail_bytes,
@@ -1600,7 +2148,8 @@ class ProminService:
             command,
             relations_input,
             domain=domain,
-            current_relations=snapshot.relations.materialize(),
+            current_relations=snapshot.relations.materialize,
+            current_relation_ids=snapshot.relations.contains_relation_id,
             operation="command",
         )
         policy = _event_store_policy(expected)
@@ -1688,7 +2237,8 @@ class ProminService:
             key = (activation_digest, implementation_digest)
             with self._query_runtime_lock:
                 if self._read_store_key != key or self._read_store is None:
-                    self._read_store = EventStore(
+                    previous_store = self._read_store
+                    store = EventStore(
                         _events_root(self.root),
                         activation_digest,
                         activation_record_digest=digest_value(_activation(context)),
@@ -1703,8 +2253,14 @@ class ProminService:
                         ),
                         derived_state_validator=self._validate_derived_runtime_state,
                     )
+                    self._read_store = store
                     self._read_store_key = key
-                    return self._read_store
+                    if (
+                        previous_store is not None
+                        and previous_store is not self._mutation_store
+                    ):
+                        previous_store.close()
+                    return store
                 store = self._read_store
             store.refresh()
             return store
@@ -1738,9 +2294,10 @@ class ProminService:
         )
         with self._query_runtime_lock:
             if self._mutation_store_key != key or self._mutation_store is None:
+                previous_store = self._mutation_store
                 policy = _event_store_policy(context)
                 validators = _event_store_validators(context)
-                self._mutation_store = EventStore(
+                store = EventStore(
                     _events_root(self.root),
                     key[0],
                     activation_record_digest=digest_value(_activation(context)),
@@ -1755,8 +2312,15 @@ class ProminService:
                     ),
                     derived_state_validator=self._validate_derived_runtime_state,
                 )
+                self._mutation_store = store
                 self._mutation_store_key = key
-            store = self._mutation_store
+                if (
+                    previous_store is not None
+                    and previous_store is not self._read_store
+                ):
+                    previous_store.close()
+            else:
+                store = self._mutation_store
         _recover_evidence_publications(self.root, context, store)
         return store
 
@@ -2124,7 +2688,10 @@ class ProminService:
         )
         prepared = self._prepared_runtime
         committed_envelope = _committed_envelope(
-            store, command, result["batch_digest"]
+            store,
+            command,
+            result["batch_digest"],
+            require_authority=artifact is not None,
         )
         if artifact is not None:
             evidence_store.finalize(
@@ -2205,13 +2772,23 @@ class ProminService:
                 "physical_payload_bytes": 0,
                 "bytes_per_changed_record": 0.0,
             }
-        checkpoint_metrics = self._write_runtime_checkpoint(
-            context,
-            store,
-            snapshot,
-            committed_batch=True,
-            committed_envelope=committed_envelope,
-        )
+        try:
+            checkpoint_metrics = self._write_runtime_checkpoint(
+                context,
+                store,
+                snapshot,
+                committed_batch=True,
+                committed_envelope=committed_envelope,
+            )
+        except Exception as exc:
+            # The EventBatch is already authoritative at this point.  Runtime
+            # checkpoints are disposable acceleration only, so an oversize,
+            # corrupt, or unavailable checkpoint must never turn the durable
+            # mutation into an apparent failure.  A fresh process will replay
+            # the journal and may rebuild the checkpoint later.
+            checkpoint_metrics = self._unavailable_runtime_checkpoint_metrics(
+                store, exc
+            )
         event_metrics = store.last_commit_write_metrics()
         changed_records = event_metrics["changed_records"]
         total_payload_bytes = (
@@ -2885,7 +3462,6 @@ class ProminService:
             parallelism_policy=_lease_parallelism_policy(context),
             run=run,
         )
-        current_relations = relations.materialize()
         added_relations = _validated_auxiliary_relations(
             bundle,
             context,
@@ -2893,7 +3469,8 @@ class ProminService:
             _relations_from_envelope(envelope),
             operation="replay",
             domain=domain,
-            current_relations=current_relations,
+            current_relations=relations.materialize,
+            current_relation_ids=relations.contains_relation_id,
         )
         policy = _event_store_policy(context)
         expected_delta = _state_binding_delta(
@@ -2954,19 +3531,21 @@ class ProminService:
             )
         )
         head = store.head()
-        checkpoint = store.read_derived_state("runtime")
-        if checkpoint is not None:
-            try:
+        try:
+            accumulator = _RuntimeRowsAccumulator()
+            checkpoint = store.consume_derived_rows("runtime", accumulator.consume)
+            if checkpoint is not None:
                 snapshot, checkpoint_count, tail_batches, tail_bytes = (
-                    self._runtime_from_checkpoint(
+                    self._runtime_from_rows_checkpoint(
                         verified,
                         store,
                         checkpoint,
+                        accumulator.finish(),
                         expected_head=head,
                     )
                 )
-                binding = store.validate_state_binding_leaves(
-                    _runtime_state_binding_leaves(store.policy, snapshot),
+                binding = store.validate_state_binding_commitments(
+                    _runtime_state_binding_commitments(store.policy, snapshot),
                     expected_head=head,
                 )
                 if binding != snapshot.state_binding_digest:
@@ -2976,6 +3555,7 @@ class ProminService:
                 self._bind_runtime_checkpoint_cursor(
                     verified,
                     head,
+                    state_binding_digest=binding,
                     checkpoint_count=checkpoint_count,
                     tail_batches=tail_batches,
                     tail_bytes=tail_bytes,
@@ -2983,10 +3563,11 @@ class ProminService:
                 if store.head() != head:
                     raise ServiceError("event HEAD changed during checkpoint-tail replay")
                 return snapshot
-            except Exception:
-                # A derived checkpoint has no authority. Any shape, binding, or
-                # tail-replay failure discards it and rebuilds from the journal.
-                head = store.head()
+        except Exception:
+            # A normalized checkpoint has no authority. Any shape, binding,
+            # transcript, semantic restore, or tail-replay failure discards it
+            # and rebuilds from the journal.
+            head = store.head()
         tail_envelopes = list(store.iter_envelopes(validate=True))
         tail_bytes = sum(len(canonical_bytes(value)) for value in tail_envelopes)
         snapshot = self._runtime_from_envelopes(
@@ -2996,8 +3577,8 @@ class ProminService:
             head_digest=head["batch_digest"],
             state_binding_digest=None,
         )
-        binding = store.validate_state_binding_leaves(
-            _runtime_state_binding_leaves(store.policy, snapshot),
+        binding = store.validate_state_binding_commitments(
+            _runtime_state_binding_commitments(store.policy, snapshot),
             expected_head=head,
         )
         if snapshot.state_binding_digest not in {None, binding}:
@@ -3020,6 +3601,7 @@ class ProminService:
         self._bind_runtime_checkpoint_cursor(
             verified,
             head,
+            state_binding_digest=binding,
             checkpoint_count=0,
             tail_batches=len(tail_envelopes),
             tail_bytes=tail_bytes,
@@ -3028,21 +3610,23 @@ class ProminService:
             raise ServiceError("event HEAD changed during runtime replay")
         return snapshot
 
-    def _runtime_from_checkpoint(
+    def _runtime_from_rows_checkpoint(
         self,
         context: ActivationContext,
         store: EventStore,
         checkpoint: Mapping[str, Any],
+        state: Mapping[str, Any],
         *,
         expected_head: Mapping[str, Any],
     ) -> tuple[_RuntimeSnapshot, int, int, int]:
         checkpoint_head = checkpoint.get("head")
-        state = checkpoint.get("state")
         binding = checkpoint.get("authority_state_binding_digest")
         if (
             not isinstance(checkpoint_head, Mapping)
             or not isinstance(state, Mapping)
             or not isinstance(binding, str)
+            or state.get("head") != checkpoint_head
+            or state.get("authority_state_binding_digest") != binding
         ):
             raise ServiceError("runtime checkpoint binding is incomplete")
         compaction = state.get("compaction")
@@ -3055,6 +3639,7 @@ class ProminService:
             not isinstance(checkpoint_count, int)
             or isinstance(checkpoint_count, bool)
             or checkpoint_count < 1
+            or checkpoint.get("checkpoint_count") != checkpoint_count
         ):
             raise ServiceError("runtime checkpoint count is invalid")
         decisions = _DecisionBindings.restore(state.get("decisions"))
@@ -3076,7 +3661,9 @@ class ProminService:
             expected_state_binding_digest=binding,
             parallelism_policy=_lease_parallelism_policy(context),
         )
-        relations = _RelationLedger.restore(state.get("relations"))
+        relations = state.get("relations")
+        if not isinstance(relations, _RelationLedger):
+            raise ServiceError("runtime checkpoint Relation ledger is invalid")
         runs = _RunBindings.restore(state.get("runs"))
         artifacts = _ArtifactBindings.restore(state.get("artifacts"))
         tail_batches = 0
@@ -3134,6 +3721,27 @@ class ProminService:
     def _domain_state(self, context: ActivationContext, store: EventStore) -> DomainState:
         return self._query_runtime_state(context, store).domain
 
+    def _unavailable_runtime_checkpoint_metrics(
+        self,
+        store: EventStore,
+        error: Exception,
+    ) -> dict[str, Any]:
+        cursor = self._runtime_checkpoint_cursor
+        self._runtime_checkpoint_cursor = None
+        return {
+            "written": False,
+            "status": "unavailable",
+            "authoritative": False,
+            "checkpoint_count": 0 if cursor is None else cursor.checkpoint_count,
+            "checkpoint_bytes": 0,
+            "tail_batches": 0 if cursor is None else cursor.tail_batches,
+            "tail_bytes": 0 if cursor is None else cursor.tail_bytes,
+            "batch_threshold": store.policy.derived_tail_batch_threshold,
+            "byte_threshold": store.policy.derived_tail_byte_threshold,
+            "issue": "derived-checkpoint-unavailable",
+            "error_type": type(error).__name__,
+        }
+
     def _write_runtime_checkpoint(
         self,
         context: ActivationContext,
@@ -3166,6 +3774,34 @@ class ProminService:
             and batch.get("batch_id") == head["batch_id"]
             and digest_value(batch) == head["batch_digest"]
         )
+        cursor_matches_current = (
+            cursor is not None
+            and cursor.activation_digest == _activation(context)["activation_digest"]
+            and cursor.implementation_closure_digest
+            == _implementation_closure_digest(context)
+            and cursor.head_sequence == head["sequence"]
+            and cursor.head_batch_id == head["batch_id"]
+            and cursor.head_digest == head["batch_digest"]
+            and cursor.state_binding_digest == snapshot.state_binding_digest
+        )
+        snapshot_matches_head = (
+            snapshot.head_sequence == head["sequence"]
+            and snapshot.head_digest == head["batch_digest"]
+        )
+        if not snapshot_matches_head:
+            raise ServiceError("runtime checkpoint snapshot is stale")
+        trusted_runtime_binding = cursor_matches_commit or cursor_matches_current
+        state_binding_digest = snapshot.state_binding_digest
+        if (
+            cursor_matches_commit
+            and isinstance(batch, Mapping)
+            and state_binding_digest != batch.get("state_binding_digest")
+        ):
+            raise ServiceError("runtime commit snapshot differs from its exact EventBatch")
+        if not isinstance(state_binding_digest, str) or re.fullmatch(
+            r"[0-9a-f]{64}", state_binding_digest
+        ) is None:
+            trusted_runtime_binding = False
         if cursor_matches_commit:
             envelope_bytes = len(canonical_bytes(committed_envelope))
             tail_batches = cursor.tail_batches + 1
@@ -3187,7 +3823,7 @@ class ProminService:
         else:
             # External writers, process restart, forced replay, or a missing
             # cursor fall back to the lock-stable verified journal route.
-            tail = store.derived_tail_status("runtime")
+            tail = store.derived_rows_tail_status("runtime")
         previous_count = tail.get("checkpoint_count", 0)
         if (
             not isinstance(previous_count, int)
@@ -3205,19 +3841,20 @@ class ProminService:
             "byte_threshold": policy.derived_tail_byte_threshold,
         }
         if head["sequence"] == 0 or (not force and not tail["compaction_due"]):
+            if not trusted_runtime_binding:
+                state_binding_digest = store.validate_state_binding_commitments(
+                    _runtime_state_binding_commitments(store.policy, snapshot),
+                    expected_head=head,
+                )
             self._bind_runtime_checkpoint_cursor(
                 context,
                 head,
+                state_binding_digest=state_binding_digest,
                 checkpoint_count=previous_count,
                 tail_batches=tail["tail_batches"],
                 tail_bytes=tail["tail_bytes"],
             )
             return {"written": False, **common}
-        if (
-            snapshot.head_sequence != head["sequence"]
-            or snapshot.head_digest != head["batch_digest"]
-        ):
-            raise ServiceError("runtime checkpoint snapshot is stale")
         envelope = (
             dict(committed_envelope)
             if cursor_matches_commit and isinstance(committed_envelope, Mapping)
@@ -3225,14 +3862,20 @@ class ProminService:
         )
         if not isinstance(envelope, Mapping):
             raise ServiceError("runtime checkpoint lacks authoritative head envelope")
-        state_binding_digest = envelope["batch"]["state_binding_digest"]
-        restored_binding = store.validate_state_binding_leaves(
-            _runtime_state_binding_leaves(store.policy, snapshot),
-            expected_head=head,
+        authoritative_binding = envelope["batch"]["state_binding_digest"]
+        if state_binding_digest != authoritative_binding:
+            raise ServiceError("runtime checkpoint state differs from journal authority")
+        restored_binding = (
+            state_binding_digest
+            if trusted_runtime_binding
+            else store.validate_state_binding_commitments(
+                _runtime_state_binding_commitments(store.policy, snapshot),
+                expected_head=head,
+            )
         )
         if (
-            restored_binding != state_binding_digest
-            or snapshot.state_binding_digest != state_binding_digest
+            restored_binding != authoritative_binding
+            or snapshot.state_binding_digest != authoritative_binding
         ):
             raise ServiceError("runtime checkpoint state differs from journal authority")
         compaction = {
@@ -3242,26 +3885,22 @@ class ProminService:
             "batch_threshold": policy.derived_tail_batch_threshold,
             "byte_threshold": policy.derived_tail_byte_threshold,
         }
-        state = {
-            "authority": snapshot.authority.checkpoint(),
-            "domain": snapshot.domain.checkpoint(
-                head_sequence=head["sequence"],
-                head_digest=head["batch_digest"],
+        checkpoint = store.write_derived_rows(
+            "runtime",
+            _runtime_checkpoint_rows(
+                context,
+                snapshot,
+                head=head,
                 state_binding_digest=state_binding_digest,
-                runtime_policy=_lease_parallelism_policy(context),
+                compaction=compaction,
             ),
-            "decisions": list(snapshot.decisions.materialize()),
-            "relations": list(snapshot.relations.materialize()),
-            "runs": list(snapshot.runs.materialize()),
-            "artifacts": list(snapshot.artifacts.materialize()),
-            "compaction": compaction,
-        }
-        checkpoint = store.write_derived_state(
-            "runtime", state, expected_head=head
+            expected_head=head,
+            checkpoint_count=compaction["checkpoint_count"],
         )
         self._bind_runtime_checkpoint_cursor(
             context,
             head,
+            state_binding_digest=state_binding_digest,
             checkpoint_count=compaction["checkpoint_count"],
             tail_batches=0,
             tail_bytes=0,
@@ -3270,7 +3909,7 @@ class ProminService:
             "written": True,
             "authoritative": False,
             "checkpoint_count": compaction["checkpoint_count"],
-            "checkpoint_bytes": len(canonical_bytes(checkpoint)),
+            "checkpoint_bytes": store.derived_rows_storage_bytes("runtime"),
             "tail_batches": 0,
             "tail_bytes": 0,
             "compacted_tail_batches": tail["tail_batches"],
@@ -3293,9 +3932,12 @@ class ProminService:
             head_digest=head["batch_digest"],
             state_binding_digest=None,
         )
-        checkpoint = self._write_runtime_checkpoint(
-            verified, store, snapshot
-        )
+        try:
+            checkpoint = self._write_runtime_checkpoint(
+                verified, store, snapshot
+            )
+        except Exception as exc:
+            checkpoint = self._unavailable_runtime_checkpoint_metrics(store, exc)
         return {
             "record_type": "ReplayResult",
             "status": "pass",
@@ -3731,8 +4373,20 @@ def _committed_envelope(
     store: EventStore,
     command: Mapping[str, Any],
     batch_digest: str,
+    *,
+    require_authority: bool = False,
 ) -> dict[str, Any]:
-    envelope = store.read_envelope(batch_digest)
+    # A newly committed command may use the one-use local receipt only for
+    # immediate runtime assembly.  Evidence publication is an authority
+    # surface, so it always performs the public full-prefix verification.
+    envelope = None
+    if not require_authority:
+        envelope = store._consume_non_authoritative_same_commit_receipt(
+            command,
+            batch_digest,
+        )
+    if envelope is None:
+        envelope = store.read_envelope(batch_digest)
     if (
         envelope.get("command") != dict(command)
         or digest_value(envelope.get("batch")) != batch_digest
@@ -3937,7 +4591,11 @@ def _validated_auxiliary_relations(
     *,
     operation: str = "import",
     domain: DomainState | None = None,
-    current_relations: Sequence[Mapping[str, Any]] = (),
+    current_relations: (
+        Sequence[Mapping[str, Any]]
+        | Callable[[], Sequence[Mapping[str, Any]]]
+    ) = (),
+    current_relation_ids: Callable[[str], bool] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if isinstance(values, (str, bytes, Mapping)):
         raise ServiceError("auxiliary Relations must be an array")
@@ -3954,12 +4612,29 @@ def _validated_auxiliary_relations(
     seen: set[str] = set()
     ordered = sorted(relations, key=lambda value: str(value.get("relation_id", "")))
     validation_context = _validation_context(context)
-    if domain is not None:
+    # Only DEPENDS_ON ingress consumes the exact current graph: its registered
+    # semantic validator proves acyclicity against Task and Relation history.
+    # Other typed relations retain their schema/domain/range validation without
+    # copying an ever-growing Relation ledger on every atomic batch.
+    requires_dependency_graph = any(
+        relation.get("kind") == "DEPENDS_ON" for relation in ordered
+    )
+    if domain is not None and requires_dependency_graph:
+        relation_history = (
+            current_relations()
+            if callable(current_relations)
+            else current_relations
+        )
+        if (
+            isinstance(relation_history, (str, bytes, Mapping))
+            or not isinstance(relation_history, Sequence)
+        ):
+            raise ServiceError("current Relation history must be a sequence")
         validation_context.update(
             {
                 "current_tasks": list(domain.tasks.values()),
                 "current_relations": [
-                    *[dict(value) for value in current_relations],
+                    *[dict(value) for value in relation_history],
                     *ordered,
                 ],
                 "current_gate_results": list(domain.gate_results.values()),
@@ -3975,9 +4650,13 @@ def _validated_auxiliary_relations(
             context=validation_context,
         )
         relation_id = relation.get("relation_id")
+        if not isinstance(relation_id, str):
+            raise ServiceError("auxiliary Relation lacks a canonical identity")
         if relation_id in seen:
             raise ServiceError("auxiliary Relation IDs must be unique")
         seen.add(relation_id)
+        if current_relation_ids is not None and current_relation_ids(relation_id):
+            raise ServiceError("auxiliary Relation ID is already committed")
         if relation.get("activation_digest") != activation_digest:
             raise ServiceError("auxiliary Relation Activation is stale")
         if relation.get("source_type") != "Task" or relation.get("source_id") != task_id:
@@ -4385,6 +5064,275 @@ def _path_is_within_roots(path: str, roots: Sequence[str]) -> bool:
     return any(path == root or path.startswith(root + "/") for root in roots)
 
 
+def _immutable_vcs_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ServiceError(f"immutable VCS {label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _immutable_vcs_nonnegative_integer(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ServiceError(f"immutable VCS {label} must be a non-negative integer")
+    return value
+
+
+def _validated_immutable_vcs_completion(
+    value: Mapping[str, Any], *, operation: str
+) -> dict[str, Any]:
+    """Validate one self-sealed Git completion before it enters a Candidate.
+
+    ``ProviderDispatch`` owns plan construction and execution.  This consumer
+    only admits its exact completed evidence shape, verifies its self-seal, and
+    enforces the two immutable-tree operation-specific output invariants.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != _IMMUTABLE_VCS_RECEIPT_FIELDS:
+        raise ServiceError("immutable VCS completion receipt has an inexact keyset")
+    receipt = dict(value)
+    if (
+        receipt["capability_id"] != "filesystem-inventory"
+        or receipt["operation"] != operation
+        or receipt["invocation_kind"] != "executable"
+        or receipt["identity_kind"] != "file-digest"
+        or receipt["adapter_id"] != "git-executable-v1"
+        or receipt["protocol_id"] != "promin.filesystem-inventory.v1"
+        or not isinstance(receipt["provider_id"], str)
+        or not receipt["provider_id"]
+    ):
+        raise ServiceError("immutable VCS completion receipt does not identify the Git provider")
+    if (
+        receipt["invoked"] is not True
+        or receipt["outcome"] != "success"
+        or receipt["exit_code"] != 0
+        or receipt["authoritative"] is not False
+        or receipt["pass_credit"] is not False
+    ):
+        raise ServiceError("immutable VCS completion receipt is not a successful non-crediting observation")
+    for field in _IMMUTABLE_VCS_RECEIPT_DIGEST_FIELDS:
+        _immutable_vcs_digest(receipt[field], f"completion {field}")
+    if receipt["input_digest"] != hashlib.sha256(b"").hexdigest():
+        raise ServiceError("immutable VCS completion receipt has unexpected stdin")
+    try:
+        started_at = parse_utc_second(receipt["started_at"])
+        completed_at = parse_utc_second(receipt["completed_at"])
+    except Exception as exc:
+        raise ServiceError("immutable VCS completion receipt timestamp is invalid") from exc
+    if started_at > completed_at:
+        raise ServiceError("immutable VCS completion receipt timestamps are inverted")
+    output_size = _immutable_vcs_nonnegative_integer(
+        receipt["output_size_bytes"], "completion output_size_bytes"
+    )
+    output_ceiling = _immutable_vcs_nonnegative_integer(
+        receipt["output_size_ceiling_bytes"], "completion output_size_ceiling_bytes"
+    )
+    if output_ceiling < 1 or output_size > output_ceiling:
+        raise ServiceError("immutable VCS completion output exceeds its selected ceiling")
+    stdout_size = _immutable_vcs_nonnegative_integer(
+        receipt["stdout_capture_size_bytes"], "completion stdout_capture_size_bytes"
+    )
+    _immutable_vcs_nonnegative_integer(
+        receipt["stderr_capture_size_bytes"], "completion stderr_capture_size_bytes"
+    )
+    stdout_truncated = receipt["stdout_capture_truncated"]
+    stderr_truncated = receipt["stderr_capture_truncated"]
+    if not isinstance(stdout_truncated, bool) or not isinstance(stderr_truncated, bool):
+        raise ServiceError("immutable VCS completion receipt truncation flags are invalid")
+    if stdout_truncated:
+        if stdout_size >= output_size:
+            raise ServiceError("immutable VCS truncated stdout capture omits no output bytes")
+    elif (
+        stdout_size != output_size
+        or receipt["stdout_capture_digest"] != receipt["output_digest"]
+    ):
+        raise ServiceError("immutable VCS complete stdout capture differs from output")
+    unsigned = {
+        field: receipt[field]
+        for field in _IMMUTABLE_VCS_RECEIPT_FIELDS
+        if field != "invocation_receipt_digest"
+    }
+    if receipt["invocation_receipt_digest"] != digest_value(unsigned):
+        raise ServiceError("immutable VCS completion receipt self-seal is invalid")
+    if operation == "immutable-tree-object":
+        if output_ceiling != 65 or output_size not in {41, 65} or stdout_truncated:
+            raise ServiceError("immutable tree object receipt violates its compact output bounds")
+    elif operation == "immutable-tree-stream":
+        if output_size == 0 or output_size % 512 != 0:
+            raise ServiceError("immutable tree stream receipt violates raw Git tar bounds")
+    else:  # The caller owns the closed operation pair.
+        raise ServiceError("immutable VCS completion operation is not recognized")
+    return receipt
+
+
+def _immutable_vcs_snapshot_binding(
+    *,
+    repository_tree_object: str,
+    provider_invocations: Sequence[Mapping[str, Any]],
+    candidate_recipe_digest: str,
+    source_roots: Sequence[str],
+    inventory_digest: str,
+    inventory_stream_digest: str,
+    inventory_stream_bytes: int,
+    inventory_entry_count: int,
+) -> dict[str, Any]:
+    """Reconstruct the exact immutable VCS input binding for a Candidate.
+
+    The helper is intentionally pure: saturation and persistence verification
+    can recompute the same binding without a second product-tree or tar pass.
+    It validates the existing full-output evidence records; it never upgrades
+    their diagnostic/non-crediting status.
+    """
+
+    if not isinstance(repository_tree_object, str) or re.fullmatch(
+        r"(?:[0-9a-f]{40}|[0-9a-f]{64})", repository_tree_object
+    ) is None:
+        raise ServiceError("immutable VCS repository tree object is invalid")
+    if (
+        isinstance(provider_invocations, (str, bytes))
+        or not isinstance(provider_invocations, Sequence)
+        or len(provider_invocations) != 2
+    ):
+        raise ServiceError("immutable VCS binding requires exactly two completion receipts")
+    if [receipt.get("operation") if isinstance(receipt, Mapping) else None for receipt in provider_invocations] != [
+        "immutable-tree-object",
+        "immutable-tree-stream",
+    ]:
+        raise ServiceError("immutable VCS completion operation order is not canonical")
+    raw_by_operation: dict[str, Mapping[str, Any]] = {}
+    for receipt in provider_invocations:
+        if not isinstance(receipt, Mapping):
+            raise ServiceError("immutable VCS completion receipt must be a mapping")
+        operation = receipt.get("operation")
+        if operation not in {"immutable-tree-object", "immutable-tree-stream"}:
+            raise ServiceError("immutable VCS binding includes an unsupported operation")
+        if operation in raw_by_operation:
+            raise ServiceError("immutable VCS binding duplicates one completion operation")
+        raw_by_operation[operation] = receipt
+    if set(raw_by_operation) != {"immutable-tree-object", "immutable-tree-stream"}:
+        raise ServiceError("immutable VCS binding does not contain the exact operation pair")
+    tree_receipt = _validated_immutable_vcs_completion(
+        raw_by_operation["immutable-tree-object"], operation="immutable-tree-object"
+    )
+    stream_receipt = _validated_immutable_vcs_completion(
+        raw_by_operation["immutable-tree-stream"], operation="immutable-tree-stream"
+    )
+    if any(
+        tree_receipt[field] != stream_receipt[field]
+        for field in _IMMUTABLE_VCS_SHARED_RECEIPT_FIELDS
+    ):
+        raise ServiceError("immutable VCS completion receipts do not share a provider binding")
+    if (
+        tree_receipt["operation_contract_digest"]
+        == stream_receipt["operation_contract_digest"]
+        or tree_receipt["invocation_request_digest"]
+        == stream_receipt["invocation_request_digest"]
+    ):
+        raise ServiceError("immutable VCS operation pair is not independently bound")
+    tree_output = repository_tree_object.encode("ascii") + b"\n"
+    if (
+        tree_receipt["output_digest"] != hashlib.sha256(tree_output).hexdigest()
+        or tree_receipt["output_size_bytes"] != len(tree_output)
+    ):
+        raise ServiceError("immutable tree object receipt does not bind its reported tree object")
+    recipe_digest = _immutable_vcs_digest(candidate_recipe_digest, "candidate recipe")
+    if isinstance(source_roots, (str, bytes)) or not isinstance(source_roots, Sequence):
+        raise ServiceError("immutable VCS source roots must be a sequence")
+    roots = tuple(source_roots)
+    if (
+        not roots
+        or any(not isinstance(root, str) or not root for root in roots)
+        or roots != tuple(sorted(set(roots)))
+    ):
+        raise ServiceError("immutable VCS source roots must be non-empty, unique, and canonical")
+    return {
+        "record_type": "ImmutableVcsTreeInventoryBinding",
+        "schema": _IMMUTABLE_VCS_SNAPSHOT_SCHEMA,
+        "repository_tree_object": repository_tree_object,
+        "tree_object_completion_receipt": tree_receipt,
+        "tree_stream_completion_receipt": stream_receipt,
+        "candidate_recipe_digest": recipe_digest,
+        "source_roots": list(roots),
+        "inventory_digest": _immutable_vcs_digest(inventory_digest, "inventory"),
+        "inventory_stream_digest": _immutable_vcs_digest(
+            inventory_stream_digest, "inventory stream"
+        ),
+        "inventory_stream_bytes": _immutable_vcs_nonnegative_integer(
+            inventory_stream_bytes, "inventory stream bytes"
+        ),
+        "inventory_entry_count": _immutable_vcs_nonnegative_integer(
+            inventory_entry_count, "inventory entry count"
+        ),
+    }
+
+
+def _validated_immutable_vcs_binding_record(
+    value: Any,
+    *,
+    provider_invocations: Sequence[Mapping[str, Any]],
+    candidate_recipe_digest: Any,
+    candidate_snapshot_digest: Any,
+    inventory_digest: Any,
+    inventory_stream_digest: Any,
+    inventory_stream_bytes: Any,
+    inventory_entry_count: Any,
+    configured_source_roots: set[str] | None = None,
+) -> dict[str, Any]:
+    """Reject a persisted binding that cannot be rebuilt from its inputs."""
+
+    if not isinstance(value, Mapping) or set(value) != _IMMUTABLE_VCS_SNAPSHOT_BINDING_FIELDS:
+        raise ServiceError("immutable VCS snapshot binding has an inexact keyset")
+    if (
+        value.get("record_type") != "ImmutableVcsTreeInventoryBinding"
+        or value.get("schema") != _IMMUTABLE_VCS_SNAPSHOT_SCHEMA
+        or not isinstance(value.get("source_roots"), list)
+    ):
+        raise ServiceError("immutable VCS snapshot binding header is invalid")
+    roots = value["source_roots"]
+    if configured_source_roots is not None and any(root not in configured_source_roots for root in roots):
+        raise ServiceError("immutable VCS snapshot binding selects an unconfigured source root")
+    rebuilt = _immutable_vcs_snapshot_binding(
+        repository_tree_object=value["repository_tree_object"],
+        provider_invocations=provider_invocations,
+        candidate_recipe_digest=candidate_recipe_digest,
+        source_roots=roots,
+        inventory_digest=inventory_digest,
+        inventory_stream_digest=inventory_stream_digest,
+        inventory_stream_bytes=inventory_stream_bytes,
+        inventory_entry_count=inventory_entry_count,
+    )
+    if canonical_bytes(value) != canonical_bytes(rebuilt):
+        raise ServiceError("immutable VCS snapshot binding differs from its exact inputs")
+    if candidate_snapshot_digest != digest_value(rebuilt):
+        raise ServiceError("Candidate snapshot digest differs from immutable VCS binding")
+    return rebuilt
+
+
+def _immutable_vcs_snapshot_digest(
+    *,
+    repository_tree_object: str,
+    provider_invocations: Sequence[Mapping[str, Any]],
+    candidate_recipe_digest: str,
+    source_roots: Sequence[str],
+    inventory_digest: str,
+    inventory_stream_digest: str,
+    inventory_stream_bytes: int,
+    inventory_entry_count: int,
+) -> str:
+    """Return the Candidate snapshot digest for one validated immutable binding."""
+
+    return digest_value(
+        _immutable_vcs_snapshot_binding(
+            repository_tree_object=repository_tree_object,
+            provider_invocations=provider_invocations,
+            candidate_recipe_digest=candidate_recipe_digest,
+            source_roots=source_roots,
+            inventory_digest=inventory_digest,
+            inventory_stream_digest=inventory_stream_digest,
+            inventory_stream_bytes=inventory_stream_bytes,
+            inventory_entry_count=inventory_entry_count,
+        )
+    )
+
+
 def _vcs_inventory(
     project_root: Path,
     requested: Sequence[str],
@@ -4424,14 +5372,6 @@ def _vcs_inventory(
         raise ServiceError("snapshot provider returned an invalid VCS tree identity")
 
     provider_invocations = [tree_evidence]
-    snapshot_digest = digest_value(
-        {
-            "provider_invocation": tree_evidence,
-            "repository_tree_object": tree_object,
-            "candidate_recipe_digest": recipe.digest,
-            "source_roots": list(requested),
-        }
-    )
     output_ceiling = dispatch.full_output_bytes_hard_max
     capture_ceiling = dispatch.diagnostic_capture_bytes_max
     plan = dispatch.prepare_invocation(
@@ -4554,7 +5494,10 @@ def _vcs_inventory(
                 )
             )
 
-    return rows(), snapshot_digest, provider_invocations
+    # The stream completion is appended only when this iterator reaches its
+    # natural end.  Its receipt and the staged JSONL identity are therefore
+    # intentionally bound later by ``_immutable_vcs_snapshot_binding``.
+    return rows(), tree_object, provider_invocations
 
 
 def _validate_raw_inventory_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -4666,6 +5609,8 @@ def _persist_inventory(
     staged: Mapping[str, Any],
     activation_digest: str,
     provider_invocations: Sequence[Mapping[str, Any]],
+    *,
+    immutable_vcs_binding: Mapping[str, Any] | None,
 ) -> str:
     directory = _inventory_root(project_root)
     staged_path = staged.get("path")
@@ -4683,6 +5628,20 @@ def _persist_inventory(
         or not isinstance(entry_count, int)
     ):
         raise ServiceError("staged inventory stream descriptor is malformed")
+    immutable_binding_record: dict[str, Any] | None = None
+    if candidate.get("consistency_mode") == "immutable-vcs-tree":
+        immutable_binding_record = _validated_immutable_vcs_binding_record(
+            immutable_vcs_binding,
+            provider_invocations=provider_invocations,
+            candidate_recipe_digest=candidate.get("candidate_recipe_digest"),
+            candidate_snapshot_digest=candidate.get("snapshot_digest"),
+            inventory_digest=candidate.get("inventory_digest"),
+            inventory_stream_digest=stream_digest,
+            inventory_stream_bytes=stream_bytes,
+            inventory_entry_count=entry_count,
+        )
+    elif immutable_vcs_binding is not None:
+        raise ServiceError("observational inventory must not persist an immutable VCS binding")
     stream_path = directory / f"{stream_digest}.jsonl"
     if stream_path.exists():
         actual = hashlib.sha256()
@@ -4725,6 +5684,8 @@ def _persist_inventory(
         "observed_at": observed_at,
         "provider_invocations": [dict(value) for value in provider_invocations],
     }
+    if immutable_binding_record is not None:
+        metadata["immutable_vcs_binding"] = immutable_binding_record
     metadata_path = directory / f"{candidate['candidate_digest']}.json"
     if metadata_path.exists():
         existing = load_json_strict(metadata_path, root=directory)
@@ -4842,6 +5803,24 @@ def _load_current_inventory(
         raise ServiceError("persisted inventory bindings disagree")
     stream_path = directory / f"{pointer['stream_digest']}.jsonl"
     candidate = metadata["candidate"]
+    immutable_binding_record: dict[str, Any] | None = None
+    if candidate.get("consistency_mode") == "immutable-vcs-tree":
+        configured_source_roots = {
+            item["path"] for item in _project_init(context)["roots"]
+        }
+        immutable_binding_record = _validated_immutable_vcs_binding_record(
+            metadata.get("immutable_vcs_binding"),
+            provider_invocations=metadata["provider_invocations"],
+            candidate_recipe_digest=candidate.get("candidate_recipe_digest"),
+            candidate_snapshot_digest=candidate.get("snapshot_digest"),
+            inventory_digest=metadata.get("inventory_digest"),
+            inventory_stream_digest=metadata.get("stream_digest"),
+            inventory_stream_bytes=metadata.get("stream_bytes"),
+            inventory_entry_count=metadata.get("entry_count"),
+            configured_source_roots=configured_source_roots,
+        )
+    elif metadata.get("immutable_vcs_binding") is not None:
+        raise ServiceError("observational inventory persisted an immutable VCS binding")
     validate_candidate_consistency(candidate)
     validate_ingress(
         _bundle(context),
@@ -4876,6 +5855,7 @@ def _load_current_inventory(
         stream_digest=metadata["stream_digest"],
         stream_bytes=metadata["stream_bytes"],
         manifest_digest=pointer["manifest_digest"],
+        immutable_vcs_binding=immutable_binding_record,
     )
 
 
@@ -4897,6 +5877,7 @@ def _verify_inventory_result(
         or supplied.stream_digest != persisted.stream_digest
         or supplied.stream_bytes != persisted.stream_bytes
         or supplied.manifest_digest != persisted.manifest_digest
+        or supplied.immutable_vcs_binding != persisted.immutable_vcs_binding
         or supplied.entries != persisted.entries
     ):
         raise ServiceError("InventoryResult differs from the verified persisted manifest")
@@ -5005,16 +5986,16 @@ def inventory_candidate(
     requested = tuple(sorted(set(source_roots)))
     if not requested or any(value not in configured for value in requested):
         raise ServiceError("inventory roots must be an explicit subset of ProjectInit roots")
+    immutable_tree_object: str | None = None
     if recipe.consistency_mode == "observational-best-effort":
         if snapshot_descriptor is not None:
             raise ServiceError("observational inventory cannot claim a snapshot descriptor")
         raw_entries = _observed_inventory(root, requested, recipe)
-        snapshot_digest = None
         provider_invocations: tuple[dict[str, Any], ...] = ()
     elif recipe.consistency_mode == "immutable-vcs-tree":
         if snapshot_descriptor is None:
             raise ServiceError("immutable VCS inventory requires an explicit snapshot descriptor")
-        raw_entries, snapshot_digest, provider_invocations = _vcs_inventory(
+        raw_entries, immutable_tree_object, provider_invocations = _vcs_inventory(
             root,
             requested,
             recipe,
@@ -5027,6 +6008,22 @@ def inventory_candidate(
         )
 
     staged = _stage_inventory_stream(root, raw_entries)
+    immutable_vcs_binding: dict[str, Any] | None = None
+    snapshot_digest: str | None = None
+    if recipe.consistency_mode == "immutable-vcs-tree":
+        if immutable_tree_object is None:
+            raise ServiceError("immutable VCS inventory omitted its verified tree object")
+        immutable_vcs_binding = _immutable_vcs_snapshot_binding(
+            repository_tree_object=immutable_tree_object,
+            provider_invocations=provider_invocations,
+            candidate_recipe_digest=recipe.digest,
+            source_roots=requested,
+            inventory_digest=staged["inventory_digest"],
+            inventory_stream_digest=staged["stream_digest"],
+            inventory_stream_bytes=staged["stream_bytes"],
+            inventory_entry_count=staged["entry_count"],
+        )
+        snapshot_digest = digest_value(immutable_vcs_binding)
     inventory_digest = staged["inventory_digest"]
     product_root_digest = digest_value(
         {
@@ -5077,6 +6074,7 @@ def inventory_candidate(
             staged,
             activation["activation_digest"],
             provider_invocations,
+            immutable_vcs_binding=immutable_vcs_binding,
         )
     except Exception:
         staged_path = staged.get("path")

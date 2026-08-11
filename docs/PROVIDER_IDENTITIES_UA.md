@@ -35,3 +35,31 @@ lifecycle interval консервативно: start округлюється в
 
 Усі ці записи мають `acceptance_pass=false` і `pass_credit=false`. Вони є
 передумовами дешевих і наступних gate, а не доказом product/release acceptance.
+
+## Великий багатомовний scope
+
+Для великого проєкту `BoundedModuleClosure` обходить точний явний граф
+залежностей у стабільному UTF-8 порядку. Всі dependency nodes мають бути
+декларовані; відсутній node не трактується як leaf. Ліміти `max_modules` і
+`max_edges` повертають лише `UNAVAILABLE` + `truncated=true`, тому частковий
+closure не можна використати як target identity або для provider reuse.
+
+`MultiLanguageDriverSet` окремо фіксує global drivers для C, C++, C#, Java,
+JavaScript і Python. Вибраний module subset не може прибрати driver іншої
+заявленої мови. Кожен `LanguageDriver` повинен посилатися на той самий exact
+`ProviderDriver`, що присутній у base envelope.
+
+`ContributorDigest` прив'язує contributor, його module IDs і physical SHA-256
+seal. `ContributorProvenance` дозволяється лише для повного closure і покриває
+його module IDs точно, без пропусків чи extra modules. Перед runtime reuse
+`verify_contributor_artifacts` перечитує байти всіх contributor artifacts;
+відновлення розміру або mtime не замінює SHA-256 перевірку.
+
+`LargeProjectProviderEnvelope` зв'язує base `FullScan`/`Reuse` envelope,
+complete module closure, contributor provenance та multi-language driver set.
+`Reuse` мусить містити digest відомого parent aggregate. Детермінований
+`ProviderIdentityAggregate` допускає PASS лише коли є FullScan, explicit
+FullScan/Reuse union повністю покриває bounded closure, глобальні drivers
+збігаються, а contributor provenance однакова. Його `ProviderReuseMetrics`
+показує кількість повторно покритих modules/contributors і elapsed time, але
+час не входить у aggregate digest; усі acceptance/pass поля лишаються false.

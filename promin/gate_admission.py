@@ -32,6 +32,23 @@ class InvalidationClass(str, Enum):
     TOOLING_ONLY = "TOOLING_ONLY"
 
 
+class ReceiptInvalidationClass(str, Enum):
+    """Byte/closure causes mapped onto the existing bounded gate policy.
+
+    These classes describe *why* a target receipt changed.  They do not create
+    a second provider or build policy; :func:`gate_plan_for_receipt_invalidation`
+    maps each one to the existing canonical admission classes below.
+    """
+
+    REUSE_VALIDATED = "REUSE_VALIDATED"
+    BYTE_CONTENT_CHANGED = "BYTE_CONTENT_CHANGED"
+    SOURCE_TOPOLOGY_CHANGED = "SOURCE_TOPOLOGY_CHANGED"
+    TRANSIENT_POLICY_CHANGED = "TRANSIENT_POLICY_CHANGED"
+    SELECTION_DRIFT = "SELECTION_DRIFT"
+    DEPENDENCY_CLOSURE_CHANGED = "DEPENDENCY_CLOSURE_CHANGED"
+    PROVIDER_IDENTITY_CHANGED = "PROVIDER_IDENTITY_CHANGED"
+
+
 class VerificationStatus(str, Enum):
     """Availability/result states; none of them imply product acceptance."""
 
@@ -58,6 +75,15 @@ _CHANGE_INPUTS = frozenset(
         "tooling-only",
     }
 )
+_RECEIPT_INVALIDATION_GATE_CLASS: dict[ReceiptInvalidationClass, InvalidationClass] = {
+    ReceiptInvalidationClass.REUSE_VALIDATED: InvalidationClass.BODY_ONLY,
+    ReceiptInvalidationClass.BYTE_CONTENT_CHANGED: InvalidationClass.BODY_ONLY,
+    ReceiptInvalidationClass.SOURCE_TOPOLOGY_CHANGED: InvalidationClass.IMPORT_SURFACE,
+    ReceiptInvalidationClass.TRANSIENT_POLICY_CHANGED: InvalidationClass.IMPORT_SURFACE,
+    ReceiptInvalidationClass.SELECTION_DRIFT: InvalidationClass.IMPORT_SURFACE,
+    ReceiptInvalidationClass.DEPENDENCY_CLOSURE_CHANGED: InvalidationClass.CMAKE_TOPOLOGY,
+    ReceiptInvalidationClass.PROVIDER_IDENTITY_CHANGED: InvalidationClass.CMAKE_TOPOLOGY,
+}
 
 
 def _digest(value: Any, field: str) -> str:
@@ -146,6 +172,36 @@ def classify_invalidation(changed_inputs: Iterable[str]) -> InvalidationClass:
     if values == {"tooling-only"}:
         return InvalidationClass.TOOLING_ONLY
     return InvalidationClass.BODY_ONLY
+
+
+def gate_plan_for_receipt_invalidation(
+    invalidation: ReceiptInvalidationClass | str,
+    *,
+    input_digest: str,
+    scope_count: int,
+    host_budget_seconds: float | None = None,
+) -> GateAdmissionPlan:
+    """Choose the cheapest existing gate plan for one receipt cause.
+
+    A byte-validated reuse and a byte-only edit never broaden into configure or
+    provider refresh.  Contributor/provider identity changes do, because their
+    effect cannot be established from a target leaf cache alone.
+    """
+
+    try:
+        receipt_class = (
+            invalidation
+            if isinstance(invalidation, ReceiptInvalidationClass)
+            else ReceiptInvalidationClass(invalidation)
+        )
+    except ValueError as exc:
+        raise GateAdmissionError("unknown receipt invalidation class") from exc
+    return gate_plan_for_invalidation(
+        _RECEIPT_INVALIDATION_GATE_CLASS[receipt_class],
+        input_digest=input_digest,
+        scope_count=scope_count,
+        host_budget_seconds=host_budget_seconds,
+    )
 
 
 @dataclass(frozen=True)

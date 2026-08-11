@@ -38,18 +38,32 @@ from .canonical import (
     parse_json_strict,
     parse_utc_second,
 )
+from .windows_event_history import (
+    WindowsEventHistoryError,
+    WindowsEventHistorySeal,
+    WindowsEventHistoryViolation,
+)
 
 
 _DERIVED_STATE_LIMITS = ParseLimits(max_bytes=16 * 1024 * 1024)
+_DERIVED_ROWS_MANIFEST_LIMITS = ParseLimits(max_bytes=16 * 1024)
+_DERIVED_ROWS_INDEX_VERSION = 1
+_DERIVED_ROWS_INSERT_BATCH = 512
+_DERIVED_ROWS_TRANSCRIPT_GENESIS = hashlib.sha256(
+    b"promin:derived-rows-v1:genesis"
+).hexdigest()
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_DERIVED_ROW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _INDEX_GENERATION = re.compile(r"^[0-9a-f]{32}$")
 _EVENT_IDENTITY_INDEX_NAME = "event-identities.sqlite3"
 _EVENT_IDENTITY_INDEX_VERSION = 1
 _STATE_BINDING_INDEX_NAME = "state-binding.sqlite3"
-_STATE_BINDING_INDEX_VERSION = 1
+_STATE_BINDING_INDEX_VERSION = 3
 _STATE_BINDING_ALGORITHM = "typed-sparse-merkle-v1"
 _STATE_TREE_DEPTH = 256
+_STATE_BINDING_STORAGE_STRIDE = 8
+_STATE_BINDING_COMMITMENT_LIMITS = ParseLimits(max_bytes=4 * 1024)
 
 _RESERVED_SECRET_FIELDS = {
     "continuation_secret",
@@ -772,12 +786,84 @@ class _ValidatedPreparedCommit:
     state_binding_delta: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class _CommittedEnvelopeWitness:
+    """One-use in-process binding for the envelope just durably committed.
+
+    It is intentionally not a persisted checkpoint and never proves a prior
+    journal prefix.  The next authoritative refresh still re-reads that
+    prefix byte-for-byte.  Its sole purpose is to avoid immediately repeating
+    that scan when the caller asks for the exact envelope returned by the
+    same successful ``commit`` call.
+    """
+
+    root_identity: str
+    activation_digest: str
+    implementation_closure_digest: str
+    index_generation: str
+    authority_generation: str
+    authority_root_digest: str
+    head: dict[str, Any]
+    journal_file: str
+    journal_payload: bytes
+    journal_payload_digest: str
+    command_payload: bytes
+    command_payload_digest: str
+    binding_digest: str
+
+    def bindings(self) -> dict[str, Any]:
+        return {
+            "record_type": "CommittedEnvelopeWitness",
+            "version": 1,
+            "root_identity": self.root_identity,
+            "activation_digest": self.activation_digest,
+            "implementation_closure_digest": self.implementation_closure_digest,
+            "index_generation": self.index_generation,
+            "authority_generation": self.authority_generation,
+            "authority_root_digest": self.authority_root_digest,
+            "head": copy.deepcopy(self.head),
+            "journal_file": self.journal_file,
+            "journal_payload_digest": self.journal_payload_digest,
+            "command_payload_digest": self.command_payload_digest,
+        }
+
+
 def _extend_event_semantic_digest(previous: str, event: Mapping[str, Any]) -> str:
     """Extend a deterministic event transcript without retaining prior bytes."""
 
     if not _DIGEST.fullmatch(previous):
         raise EventStoreError("event semantic digest is invalid")
     return digest_value({"previous_digest": previous, "event": dict(event)})
+
+
+def _extend_derived_rows_transcript(
+    previous: str,
+    *,
+    section: str,
+    key: str,
+    payload_digest: str,
+) -> str:
+    """Extend the ordered disposable-row transcript without retaining rows."""
+
+    if (
+        not isinstance(previous, str)
+        or not _DIGEST.fullmatch(previous)
+        or not isinstance(section, str)
+        or not _DERIVED_ROW_ID.fullmatch(section)
+        or not isinstance(key, str)
+        or not _DERIVED_ROW_ID.fullmatch(key)
+        or not isinstance(payload_digest, str)
+        or not _DIGEST.fullmatch(payload_digest)
+    ):
+        raise DerivedCheckpointError("derived row transcript input is invalid")
+    return digest_value(
+        {
+            "previous_digest": previous,
+            "section": section,
+            "key": key,
+            "payload_digest": payload_digest,
+        }
+    )
 
 
 def _authority_commitment(
@@ -858,6 +944,91 @@ def _state_prefix(key_digest: bytes, depth: int) -> bytes:
     if remainder:
         prefix[-1] &= (0xFF << (8 - remainder)) & 0xFF
     return bytes(prefix)
+
+
+def _state_storage_parent_digest(
+    parent_depth: int,
+    children: Mapping[int, bytes],
+) -> bytes:
+    """Reduce one stored byte edge to the exact binary sparse-tree parent.
+
+    The authority algorithm remains the 256-level typed binary tree.  The
+    derived SQLite index materializes only byte-boundary levels and rebuilds
+    the seven omitted internal levels plus the boundary parent on demand.
+    This is a storage representation only; every internal digest still uses
+    its original absolute binary depth and domain separator.
+    """
+
+    if (
+        parent_depth < 0
+        or parent_depth + _STATE_BINDING_STORAGE_STRIDE > _STATE_TREE_DEPTH
+        or parent_depth % _STATE_BINDING_STORAGE_STRIDE != 0
+    ):
+        raise DerivedCheckpointError("state binding storage depth is invalid")
+    level: dict[int, bytes] = {}
+    for edge, node_digest in children.items():
+        if (
+            not isinstance(edge, int)
+            or isinstance(edge, bool)
+            or not 0 <= edge <= 255
+            or not isinstance(node_digest, bytes)
+            or len(node_digest) != 32
+        ):
+            raise DerivedCheckpointError("state binding storage child is invalid")
+        if node_digest != _STATE_DEFAULT_DIGESTS[
+            parent_depth + _STATE_BINDING_STORAGE_STRIDE
+        ]:
+            level[edge] = node_digest
+    for depth in range(
+        parent_depth + _STATE_BINDING_STORAGE_STRIDE - 1,
+        parent_depth - 1,
+        -1,
+    ):
+        parents: dict[int, bytes] = {}
+        for slot in {edge >> 1 for edge in level}:
+            node_digest = _state_internal_digest(
+                depth,
+                level.get(slot << 1, _STATE_DEFAULT_DIGESTS[depth + 1]),
+                level.get((slot << 1) | 1, _STATE_DEFAULT_DIGESTS[depth + 1]),
+            )
+            if node_digest != _STATE_DEFAULT_DIGESTS[depth]:
+                parents[slot] = node_digest
+        level = parents
+    if not level:
+        return _STATE_DEFAULT_DIGESTS[parent_depth]
+    if set(level) != {0}:
+        raise DerivedCheckpointError("state binding byte subtree did not reduce")
+    return level[0]
+
+
+def _encode_state_storage_children(children: Mapping[int, bytes]) -> bytes:
+    payload = bytearray()
+    for edge, node_digest in sorted(children.items()):
+        if (
+            not isinstance(edge, int)
+            or isinstance(edge, bool)
+            or not 0 <= edge <= 255
+            or not isinstance(node_digest, bytes)
+            or len(node_digest) != 32
+        ):
+            raise DerivedCheckpointError("state binding child payload is invalid")
+        payload.append(edge)
+        payload.extend(node_digest)
+    return bytes(payload)
+
+
+def _decode_state_storage_children(payload: Any) -> dict[int, bytes]:
+    if not isinstance(payload, bytes) or len(payload) % 33 != 0 or len(payload) > 256 * 33:
+        raise DerivedCheckpointError("state binding child payload is malformed")
+    children: dict[int, bytes] = {}
+    previous = -1
+    for offset in range(0, len(payload), 33):
+        edge = payload[offset]
+        if edge <= previous:
+            raise DerivedCheckpointError("state binding child payload order is invalid")
+        previous = edge
+        children[edge] = payload[offset + 1 : offset + 33]
+    return children
 
 
 def _single_state_leaf_tree(
@@ -1647,6 +1818,7 @@ class EventStore:
         ):
             raise EventStoreError("lock_timeout must be a finite positive number")
         self.root = Path(root)
+        self._root_identity = str(self.root.absolute())
         self.journal = self.root / "journal"
         self.pending = self.root / "pending"
         self.head_path = self.root / "HEAD.json"
@@ -1656,6 +1828,7 @@ class EventStore:
         self.implementation_binding_path = self.root / "implementation-closure.json"
         self.index_root = self.root / "derived-index"
         self.derived_state_root = self.root / "derived-state"
+        self.derived_rows_root = self.root / "derived-rows"
         self.lock_path = self.root / "writer.lock"
         self.active_activation_digest = active_activation_digest
         self.activation_record_digest = activation_record_digest
@@ -1671,6 +1844,17 @@ class EventStore:
         self.max_events_per_batch = resolved_batch_ceiling
         self.lock_timeout = lock_timeout
         self._head = self._empty_head()
+        self._committed_envelope_witness: _CommittedEnvelopeWitness | None = None
+        # Optional and strictly Windows-only.  The normal byte-for-byte prefix
+        # verifier remains the authority fallback on every uncertain result.
+        self._windows_event_history: WindowsEventHistorySeal | None = None
+        self._verified_windows_history_control: dict[str, Any] | None = None
+        # A live seal that reaches its bounded native-handle capacity is
+        # deliberately retired for this EventStore instance.  Recreating it
+        # after the append would defeat the capacity fallback and can make a
+        # narrow test cap look like healthy authority.  A fresh EventStore
+        # instance may attempt normal admission again.
+        self._windows_history_capacity_exhausted = False
         self._command_ids: dict[str, tuple[str, dict[str, Any]]] = {}
         self._idempotency: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
         self._batch_ids: set[str] = set()
@@ -1696,6 +1880,7 @@ class EventStore:
         self._open_mode = "unopened"
         self._fallback_reason: str | None = None
         self._derived_state_issues: dict[str, str | None] = {}
+        self._derived_rows_issues: dict[str, str | None] = {}
         self._last_commit_write_metrics = self._empty_commit_write_metrics()
         os.makedirs(_native_os_path(self.root), exist_ok=True)
         os.makedirs(_native_os_path(self.journal), exist_ok=True)
@@ -1703,6 +1888,7 @@ class EventStore:
         os.makedirs(_native_os_path(self.authority_root), exist_ok=True)
         os.makedirs(_native_os_path(self.index_root), exist_ok=True)
         os.makedirs(_native_os_path(self.derived_state_root), exist_ok=True)
+        os.makedirs(_native_os_path(self.derived_rows_root), exist_ok=True)
         self._verify_or_create_implementation_binding()
         self._open_or_recover()
 
@@ -1714,6 +1900,298 @@ class EventStore:
         """O(1) lookup of the last durably committed batch identity."""
 
         return copy.deepcopy(self._head)
+
+    def _clear_committed_envelope_witness(self) -> None:
+        """Discard the one-use post-commit continuation, if any."""
+
+        self._committed_envelope_witness = None
+
+    def _record_committed_envelope_witness(
+        self,
+        *,
+        envelope: Mapping[str, Any],
+        payload: bytes,
+        journal_path: Path,
+        head: Mapping[str, Any],
+        authority_root: Mapping[str, Any],
+    ) -> None:
+        """Record one exact durable envelope without making it authority.
+
+        A failed witness construction must never turn a completed journal
+        append into a failed command result.  The regular read route remains
+        available and will fully verify the prefix.
+        """
+
+        self._clear_committed_envelope_witness()
+        index_generation = self._index_generation
+        authority_generation = self._authority_generation
+        checked_head = self._validate_head_value(dict(head))
+        authority_root_digest = authority_root.get("root_digest")
+        if (
+            index_generation is None
+            or authority_generation is None
+            or not isinstance(authority_root_digest, str)
+            or not _DIGEST.fullmatch(authority_root_digest)
+            or authority_root.get("generation") != authority_generation
+            or checked_head["sequence"] < 1
+            or not isinstance(checked_head["batch_id"], str)
+            or not isinstance(checked_head["batch_digest"], str)
+            or journal_path.parent != self.journal
+            or Path(journal_path.name).name != journal_path.name
+        ):
+            return
+        expected_file_id = hashlib.sha256(
+            checked_head["batch_id"].encode("utf-8")
+        ).hexdigest()
+        expected_name = f"{checked_head['sequence']:020d}-{expected_file_id}.json"
+        if journal_path.name != expected_name:
+            return
+        expected_payload_digest = hashlib.sha256(payload).hexdigest()
+        try:
+            canonical_envelope = canonical_bytes(
+                dict(envelope),
+                limits=ParseLimits(max_bytes=self.policy.max_envelope_bytes),
+            )
+            command = envelope.get("command")
+            if not isinstance(command, Mapping):
+                return
+            command_payload = canonical_bytes(
+                dict(command),
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+        except (CanonicalError, TypeError, ValueError):
+            return
+        if canonical_envelope != payload:
+            return
+        command_payload_digest = hashlib.sha256(command_payload).hexdigest()
+        bindings = {
+            "record_type": "CommittedEnvelopeWitness",
+            "version": 1,
+            "root_identity": self._root_identity,
+            "activation_digest": self.active_activation_digest,
+            "implementation_closure_digest": self.implementation_closure_digest,
+            "index_generation": index_generation,
+            "authority_generation": authority_generation,
+            "authority_root_digest": authority_root_digest,
+            "head": checked_head,
+            "journal_file": journal_path.name,
+            "journal_payload_digest": expected_payload_digest,
+            "command_payload_digest": command_payload_digest,
+        }
+        self._committed_envelope_witness = _CommittedEnvelopeWitness(
+            root_identity=self._root_identity,
+            activation_digest=self.active_activation_digest,
+            implementation_closure_digest=self.implementation_closure_digest,
+            index_generation=index_generation,
+            authority_generation=authority_generation,
+            authority_root_digest=authority_root_digest,
+            head=checked_head,
+            journal_file=journal_path.name,
+            journal_payload=payload,
+            journal_payload_digest=expected_payload_digest,
+            command_payload=command_payload,
+            command_payload_digest=command_payload_digest,
+            binding_digest=digest_value(bindings),
+        )
+
+    def _witness_authority_root_matches_locked(
+        self, witness: _CommittedEnvelopeWitness
+    ) -> bool:
+        try:
+            value = self._read_canonical_object(
+                self.authority_head_path,
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+        except (CanonicalError, DerivedCheckpointError, OSError):
+            return False
+        required = {
+            "record_type", "version", "authoritative", "activation_digest",
+            "implementation_closure_digest", "generation", "head", "segment_count",
+            "event_count", "event_semantic_digest", "authority_prefix_digest",
+            "state_binding_update_count", "state_binding_digest", "root_digest",
+        }
+        if set(value) != required:
+            return False
+        supplied_digest = value.pop("root_digest")
+        if (
+            not isinstance(supplied_digest, str)
+            or not _DIGEST.fullmatch(supplied_digest)
+            or digest_value(value) != supplied_digest
+        ):
+            return False
+        return (
+            value.get("record_type") == "JournalPrefixRoot"
+            and value.get("version") == 1
+            and value.get("authoritative") is False
+            and value.get("activation_digest") == witness.activation_digest
+            and value.get("implementation_closure_digest")
+            == witness.implementation_closure_digest
+            and value.get("generation") == witness.authority_generation
+            and value.get("head") == witness.head
+            and value.get("segment_count") == witness.head["sequence"]
+            and supplied_digest == witness.authority_root_digest
+        )
+
+    def _witness_checkpoint_matches_locked(
+        self, witness: _CommittedEnvelopeWitness
+    ) -> bool:
+        try:
+            value = self._read_canonical_object(
+                self.checkpoint_path,
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+        except (CanonicalError, DerivedCheckpointError, OSError):
+            return False
+        required = {
+            "record_type", "version", "authoritative", "activation_digest", "head",
+            "batch_count", "event_count", "semantic_digest", "index_generation",
+            "last_journal_file", "last_journal_file_digest", "implementation_closure_digest",
+            "authority_generation", "authority_prefix_digest", "authority_root_digest",
+            "state_binding_update_count", "state_binding_digest", "checkpoint_digest",
+        }
+        if set(value) != required:
+            return False
+        supplied_digest = value.pop("checkpoint_digest")
+        if (
+            not isinstance(supplied_digest, str)
+            or not _DIGEST.fullmatch(supplied_digest)
+            or digest_value(value) != supplied_digest
+        ):
+            return False
+        return (
+            value.get("record_type") == "DerivedJournalCheckpoint"
+            and value.get("version") == 3
+            and value.get("authoritative") is False
+            and value.get("activation_digest") == witness.activation_digest
+            and value.get("implementation_closure_digest")
+            == witness.implementation_closure_digest
+            and value.get("head") == witness.head
+            and value.get("batch_count") == witness.head["sequence"]
+            and value.get("index_generation") == witness.index_generation
+            and value.get("authority_generation") == witness.authority_generation
+            and value.get("authority_root_digest") == witness.authority_root_digest
+            and value.get("last_journal_file") == witness.journal_file
+            and value.get("last_journal_file_digest")
+            == witness.journal_payload_digest
+        )
+
+    def _consume_committed_envelope_witness_locked(
+        self,
+        batch_digest: str,
+        command_payload: bytes,
+    ) -> dict[str, Any] | None:
+        """Return the sole post-commit continuation or require a normal refresh.
+
+        This crosses exactly one writer-lock release.  It checks the current
+        HEAD, journal tail, authority root, and checkpoint by bytes, then is
+        consumed.  Older-prefix changes remain the responsibility of the next
+        regular authority refresh, which this opaque own-envelope continuation
+        never replaces.  In particular, it is not a general proof of the
+        older prefix after the writer lock has been released.
+        """
+
+        witness = self._committed_envelope_witness
+        self._clear_committed_envelope_witness()
+        if (
+            witness is None
+            or batch_digest != witness.head["batch_digest"]
+            or command_payload != witness.command_payload
+            or hashlib.sha256(command_payload).hexdigest()
+            != witness.command_payload_digest
+        ):
+            return None
+        if (
+            witness.root_identity != self._root_identity
+            or witness.activation_digest != self.active_activation_digest
+            or witness.implementation_closure_digest
+            != self.implementation_closure_digest
+            or witness.index_generation != self._index_generation
+            or witness.authority_generation != self._authority_generation
+            or witness.head != self._head
+            or digest_value(witness.bindings()) != witness.binding_digest
+        ):
+            return None
+        try:
+            if self._read_disk_head() != witness.head:
+                return None
+            if not self._witness_authority_root_matches_locked(witness):
+                return None
+            if not self._witness_checkpoint_matches_locked(witness):
+                return None
+            expected_file_id = hashlib.sha256(
+                witness.head["batch_id"].encode("utf-8")
+            ).hexdigest()
+            expected_name = (
+                f"{witness.head['sequence']:020d}-{expected_file_id}.json"
+            )
+            if witness.journal_file != expected_name:
+                return None
+            raw = _read_bytes(self.journal / witness.journal_file)
+            if (
+                raw != witness.journal_payload
+                or hashlib.sha256(raw).hexdigest()
+                != witness.journal_payload_digest
+            ):
+                return None
+            limits = ParseLimits(max_bytes=self.policy.max_envelope_bytes)
+            envelope = parse_json_strict(raw, limits=limits)
+            if canonical_bytes(envelope, limits=limits) != raw or not isinstance(
+                envelope, dict
+            ):
+                return None
+            _reject_reserved_secret_fields(
+                envelope,
+                surface="journal envelope",
+                error_type=JournalCorruption,
+            )
+            batch = envelope.get("batch")
+            if not isinstance(batch, dict):
+                return None
+            actual = self._validate_envelope(
+                envelope,
+                expected_sequence=witness.head["sequence"],
+                expected_previous_digest=batch.get("previous_digest"),
+                validate_runtime=False,
+            )
+            if actual != batch_digest:
+                return None
+            return copy.deepcopy(envelope)
+        except (CanonicalError, EventStoreError, OSError, TypeError, ValueError):
+            return None
+
+    def _consume_non_authoritative_same_commit_receipt(
+        self,
+        command: Mapping[str, Any],
+        batch_digest: str,
+    ) -> dict[str, Any] | None:
+        """Return one opaque same-commit receipt, never a public authority read.
+
+        This internal continuation exists solely so the command service can
+        bind its immediate result assembly to the exact bytes it has just
+        committed.  It intentionally cannot establish integrity of older
+        journal bytes after the lock release.  Callers that need authority,
+        evidence promotion, cache/idempotency, or authorization must use the
+        public ``read_envelope``/refresh route instead.
+        """
+
+        if (
+            not isinstance(command, Mapping)
+            or not isinstance(batch_digest, str)
+            or not _DIGEST.fullmatch(batch_digest)
+        ):
+            return None
+        try:
+            command_payload = canonical_bytes(
+                dict(command),
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+        except (CanonicalError, TypeError, ValueError):
+            return None
+        with _WriterLock(self.lock_path, self.lock_timeout):
+            return self._consume_committed_envelope_witness_locked(
+                batch_digest,
+                command_payload,
+            )
 
     def refresh(self) -> dict[str, Any]:
         """Refresh cached derived state from the authoritative HEAD under the writer lock."""
@@ -1774,6 +2252,7 @@ class EventStore:
                 _has_entries(self.pending),
                 _has_entries(self.index_root),
                 _has_entries(self.derived_state_root),
+                _has_entries(self.derived_rows_root),
             )
         )
 
@@ -1862,16 +2341,44 @@ class EventStore:
             )
 
     def _open_or_recover(self) -> None:
+        self._clear_committed_envelope_witness()
         with _WriterLock(self.lock_path, self.lock_timeout):
-            try:
-                self._load_journal_checkpoint_locked()
-            except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-                self._fallback_reason = f"{type(exc).__name__}: {exc}"
+            # A durable pending record means this open must replay/reconcile
+            # the journal rather than first fully load a checkpoint that is
+            # known to reject the same pending record.  Recovery itself
+            # performs the exact replay and, on supported Windows hosts,
+            # admits its rebuilt prefix under one held-handle verifier.
+            # Pending is never trusted here; it merely selects the stricter
+            # recovery path.
+            if _matching_paths(self.pending, "*.json"):
+                self._fallback_reason = (
+                    "DerivedCheckpointError: pending transaction requires recovery"
+                )
                 self._recover_locked()
                 self._open_mode = "full-replay-fallback"
-            else:
-                self._fallback_reason = None
-                self._open_mode = "verified-checkpoint"
+                return
+            provisional_history = self._try_hold_windows_event_history_locked()
+            try:
+                try:
+                    self._load_journal_checkpoint_locked()
+                except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+                    self._fallback_reason = f"{type(exc).__name__}: {exc}"
+                    self._recover_locked()
+                    self._open_mode = "full-replay-fallback"
+                else:
+                    self._bind_windows_event_history_locked(provisional_history)
+                    self._fallback_reason = None
+                    self._open_mode = "verified-checkpoint"
+            finally:
+                # Ownership transfers only when `_bind...` stores this exact
+                # object.  Validation exceptions outside the fallback tuple
+                # (notably implementation closure mismatch) must not leak
+                # native no-write handles.
+                if (
+                    provisional_history is not None
+                    and self._windows_event_history is not provisional_history
+                ):
+                    provisional_history.close()
 
     def recover(self) -> dict[str, Any]:
         """Validate the full chain, repair HEAD, and remove resolved pending data."""
@@ -1882,8 +2389,330 @@ class EventStore:
             self._fallback_reason = None
             return result
 
+    def _close_windows_event_history(self) -> None:
+        """Forget all physical fast-path state before replay/reopen/fallback."""
+
+        history = self._windows_event_history
+        self._windows_event_history = None
+        if history is not None:
+            history.close()
+
+    def close(self) -> None:
+        """Release optional held Windows history handles explicitly."""
+
+        self._clear_committed_envelope_witness()
+        self._close_windows_event_history()
+
+    def _try_hold_windows_event_history_locked(
+        self,
+    ) -> WindowsEventHistorySeal | None:
+        """Take provisional no-write holds *before* a full prefix verifier.
+
+        The authority root is intentionally used only to locate a candidate
+        generation.  It is not trusted until `_load_journal_checkpoint_locked`
+        or the recovery verifier succeeds while the returned handles are held.
+        Any inability to establish the optional seal leaves the normal full
+        byte-prefix path unchanged.
+        """
+
+        if (
+            self._windows_history_capacity_exhausted
+            or os.name != "nt"
+            or not _path_exists(self.head_path)
+            or not _path_exists(self.authority_head_path)
+            or not _path_exists(self.checkpoint_path)
+        ):
+            return None
+        try:
+            candidate_root = self._read_canonical_object(
+                self.authority_head_path,
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+            generation = candidate_root.get("generation")
+            if not isinstance(generation, str) or not _INDEX_GENERATION.fullmatch(
+                generation
+            ):
+                return None
+            generation_root = self._authority_generation_root(generation)
+            if not _is_directory(generation_root):
+                return None
+            return WindowsEventHistorySeal.try_hold_existing(
+                root=self.root,
+                journal_directory=self.journal,
+                authority_directory=generation_root,
+                journal_files=sorted(_matching_paths(self.journal, "*.json")),
+                authority_files=sorted(_matching_paths(generation_root, "*.json")),
+                max_file_bytes=max(
+                    self.policy.max_command_bytes,
+                    self.policy.max_envelope_bytes,
+                ),
+            )
+        except (
+            CanonicalError,
+            DerivedCheckpointError,
+            OSError,
+            WindowsEventHistoryError,
+        ):
+            return None
+
+    def _reserve_windows_history_append_capacity_locked(self) -> None:
+        """Retire a full seal before an append cannot seal its exact pair.
+
+        A physical history seal has to retain both immutable artifacts of a
+        batch: the journal envelope and its authority segment.  Checking one
+        file only after publishing the journal would leave a valid durable
+        append looking like corruption at the cap boundary.  When the pair
+        does not fit, re-run the existing exact prefix verifier while the
+        current immutable handles still prevent byte/topology substitution,
+        then close the optional seal and complete the normal durable commit.
+        """
+
+        history = self._windows_event_history
+        if history is None:
+            return
+        try:
+            if history.has_capacity_for(2):
+                return
+            # Read the durable HEAD again before the full verifier so this
+            # retirement path cannot continue an append from a stale control
+            # state merely because the fast path was healthy at method entry.
+            if self._read_disk_head() != self._head:
+                raise JournalCorruption(
+                    "durable HEAD changed before Windows history cap fallback"
+                )
+            authority_root = self._verify_authority_prefix_locked(self._head)
+        except (
+            CanonicalError,
+            DerivedCheckpointError,
+            JournalCorruption,
+            OSError,
+            WindowsEventHistoryError,
+        ) as exc:
+            self._windows_history_capacity_exhausted = True
+            self._close_windows_event_history()
+            raise JournalCorruption(
+                "Windows physical history cap fallback could not verify the current prefix"
+            ) from exc
+
+        # The verifier above is the same byte-for-byte prefix authority route
+        # used without a seal.  Preserve its current control facts, then drop
+        # all held handles before any pending/journal file is written.
+        self._authority_generation = authority_root["generation"]
+        self._authority_prefix_digest = authority_root["authority_prefix_digest"]
+        self._state_binding_digest = authority_root["state_binding_digest"]
+        self._state_binding_update_count = authority_root[
+            "state_binding_update_count"
+        ]
+        self._verified_windows_history_control = None
+        self._windows_history_capacity_exhausted = True
+        self._close_windows_event_history()
+
+    def _bind_windows_event_history_locked(
+        self, provisional: WindowsEventHistorySeal | None
+    ) -> None:
+        """Bind a provisional physical hold to bytes just fully verified."""
+
+        self._close_windows_event_history()
+        if provisional is None:
+            return
+        control = self._verified_windows_history_control
+        try:
+            if (
+                not isinstance(control, dict)
+                or not isinstance(control.get("authority_generation"), str)
+                or provisional.authority_generation is not None
+            ):
+                raise WindowsEventHistoryViolation(
+                    "Windows history provisional control is unavailable"
+                )
+            provisional.bind_verified_control(
+                head=self._head,
+                authority_generation=control["authority_generation"],
+                head_payload=control["head_payload"],
+                authority_root_payload=control["authority_root_payload"],
+                checkpoint_payload=control["checkpoint_payload"],
+            )
+        except (
+            KeyError,
+            TypeError,
+            WindowsEventHistoryError,
+        ):
+            provisional.close()
+            return
+        self._windows_event_history = provisional
+
+    def _seal_recovered_windows_history_locked(
+        self,
+        *,
+        authority_root: Mapping[str, Any],
+        journal_checkpoint: Mapping[str, Any],
+    ) -> None:
+        """Seal a recovered prefix, then verify it while held before use."""
+
+        provisional = self._try_hold_windows_event_history_locked()
+        if provisional is None:
+            return
+        try:
+            verified_root = self._verify_authority_prefix_locked(self._head)
+            head_payload = canonical_bytes(self._head)
+            authority_root_payload = canonical_bytes(authority_root)
+            checkpoint_payload = canonical_bytes(journal_checkpoint)
+            if (
+                _read_bytes(self.head_path) != head_payload
+                or _read_bytes(self.authority_head_path) != authority_root_payload
+                or _read_bytes(self.checkpoint_path) != checkpoint_payload
+                or canonical_bytes(verified_root) != authority_root_payload
+            ):
+                raise JournalCorruption(
+                    "history controls changed while recovery seal was acquired"
+                )
+            self._verified_windows_history_control = {
+                "authority_generation": authority_root["generation"],
+                "head_payload": head_payload,
+                "authority_root_payload": authority_root_payload,
+                "checkpoint_payload": checkpoint_payload,
+            }
+            self._bind_windows_event_history_locked(provisional)
+        except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+            provisional.close()
+            raise JournalCorruption(
+                "recovered history changed before physical seal admission"
+            ) from exc
+
+    def _hold_new_windows_history_file_locked(
+        self,
+        *,
+        kind: str,
+        path: Path,
+        payload: bytes,
+    ) -> None:
+        """Admit one just-atomically-published immutable file before HEAD.
+
+        The normal durable temp+replace protocol stays unchanged.  If the
+        physical post-publication hold cannot confirm the exact bytes, this
+        command stops before durable HEAD; recovery will inspect the pending
+        transaction instead of silently accepting an unsealed append.
+        """
+
+        history = self._windows_event_history
+        if history is None:
+            return
+        try:
+            actual = history.hold_new_existing(
+                kind=kind,
+                path=path,
+                payload=payload,
+                max_file_bytes=max(
+                    self.policy.max_command_bytes,
+                    self.policy.max_envelope_bytes,
+                ),
+            )
+            expected = hashlib.sha256(payload).hexdigest()
+            if actual != expected:
+                raise WindowsEventHistoryViolation(
+                    "held immutable history payload digest differs"
+                )
+        except WindowsEventHistoryError as exc:
+            self._close_windows_event_history()
+            raise JournalCorruption(
+                "new immutable history file could not be physically sealed"
+            ) from exc
+
+    def _advance_windows_history_control_locked(
+        self,
+        *,
+        head: Mapping[str, Any],
+        authority_root: Mapping[str, Any],
+        journal_checkpoint: Mapping[str, Any],
+    ) -> None:
+        """Advance control bytes only after all new immutable files are held."""
+
+        history = self._windows_event_history
+        if history is None:
+            return
+        try:
+            if self._authority_generation is None:
+                raise WindowsEventHistoryViolation(
+                    "EventStore has no authority generation for seal advancement"
+                )
+            history.advance_verified_control(
+                head=head,
+                authority_generation=self._authority_generation,
+                head_payload=canonical_bytes(head),
+                authority_root_payload=canonical_bytes(authority_root),
+                checkpoint_payload=canonical_bytes(journal_checkpoint),
+            )
+        except WindowsEventHistoryError as exc:
+            self._close_windows_event_history()
+            raise JournalCorruption(
+                "Windows physical history controls could not advance"
+            ) from exc
+
+    def _try_activate_windows_history_after_commit_locked(
+        self,
+        *,
+        authority_root: Mapping[str, Any],
+        journal_checkpoint: Mapping[str, Any],
+    ) -> None:
+        """Enable the optional seal after the first durable Windows commit.
+
+        A newly created EventStore has no durable ``HEAD.json`` to seal at
+        genesis.  Once the first normal commit has completed, take provisional
+        handles and run the exact verifier while held.  This is an
+        optimization only: an unavailable seal leaves the committed result and
+        the normal full-scan route intact.
+        """
+
+        if self._windows_event_history is not None:
+            return
+        provisional = self._try_hold_windows_event_history_locked()
+        if provisional is None:
+            return
+        try:
+            verified_root = self._verify_authority_prefix_locked(self._head)
+            head_payload = canonical_bytes(self._head)
+            authority_root_payload = canonical_bytes(authority_root)
+            checkpoint_payload = canonical_bytes(journal_checkpoint)
+            if (
+                _read_bytes(self.head_path) != head_payload
+                or _read_bytes(self.authority_head_path) != authority_root_payload
+                or _read_bytes(self.checkpoint_path) != checkpoint_payload
+                or canonical_bytes(verified_root) != authority_root_payload
+            ):
+                raise WindowsEventHistoryViolation(
+                    "post-commit history controls changed before seal admission"
+                )
+            self._verified_windows_history_control = {
+                "authority_generation": authority_root["generation"],
+                "head_payload": head_payload,
+                "authority_root_payload": authority_root_payload,
+                "checkpoint_payload": checkpoint_payload,
+            }
+            self._bind_windows_event_history_locked(provisional)
+        except (
+            CanonicalError,
+            DerivedCheckpointError,
+            JournalCorruption,
+            OSError,
+            WindowsEventHistoryError,
+        ):
+            # The original commit is already durable; do not turn optional
+            # acceleration failure into a false rollback or a success claim.
+            provisional.close()
+
     def _recover_locked(self) -> dict[str, Any]:
+        self._clear_committed_envelope_witness()
+        self._close_windows_event_history()
+        self._verified_windows_history_control = None
         head = self._empty_head()
+        durable_head_present = _path_exists(self.head_path)
+        durable_head = (
+            self._read_disk_head()
+            if durable_head_present
+            else self._empty_head()
+        )
+        durable_prefix_head = self._empty_head()
+        forward_journal_suffix: list[tuple[Path, dict[str, Any], str]] = []
         command_ids: dict[str, tuple[str, dict[str, Any]]] = {}
         idempotency: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
         batch_ids: set[str] = set()
@@ -1925,6 +2754,19 @@ class EventStore:
                 validation_operation="rebuild",
             )
             batch = envelope["batch"]
+            replayed_head = {
+                "sequence": batch["sequence"],
+                "batch_id": batch["batch_id"],
+                "batch_digest": batch_digest,
+            }
+            if batch["sequence"] == durable_head["sequence"]:
+                durable_prefix_head = copy.deepcopy(replayed_head)
+            elif batch["sequence"] > durable_head["sequence"]:
+                forward_journal_suffix.append((path, envelope, batch_digest))
+                if len(forward_journal_suffix) > 1:
+                    raise JournalCorruption(
+                        "journal contains more than one uncommitted suffix batch"
+                    )
             command = envelope["command"]
             if batch["batch_id"] in batch_ids:
                 raise JournalCorruption("duplicate batch_id")
@@ -2005,15 +2847,18 @@ class EventStore:
                 index_generation,
                 prior_event_count=event_count - len(batch["events"]),
             )
-            head = {"sequence": batch["sequence"], "batch_id": batch["batch_id"], "batch_digest": batch_digest}
+            head = replayed_head
             previous_digest = batch_digest
             previous_authority_commitment = expected_authority_commitment
             expected_sequence += 1
-        try:
-            disk_head = self._read_disk_head()
-        except JournalCorruption:
-            disk_head = None
-        if disk_head != head:
+        self._validate_recovery_head_locked(
+            durable_head=durable_head,
+            durable_head_present=durable_head_present,
+            durable_prefix_head=durable_prefix_head,
+            replayed_head=head,
+            forward_journal_suffix=forward_journal_suffix,
+        )
+        if durable_head != head:
             _write_atomic(self.head_path, canonical_bytes(head))
         committed_batch_ids = batch_ids
         for path in _matching_paths(self.pending, "*.json"):
@@ -2058,7 +2903,7 @@ class EventStore:
             state_binding_digest=self._state_binding_digest,
             state_binding_update_count=state_binding_update_count,
         )
-        self._write_journal_checkpoint(
+        journal_checkpoint = self._write_journal_checkpoint(
             head=head,
             batch_count=head["sequence"],
             event_count=event_count,
@@ -2082,7 +2927,109 @@ class EventStore:
             active_index_generation=index_generation,
             active_authority_generation=authority_generation,
         )
+        # The recovery replay above is the authority proof.  The optional
+        # Windows optimization now takes handles and runs one exact verifier
+        # while held before it may suppress later old-payload rehashes.
+        self._seal_recovered_windows_history_locked(
+            authority_root=authority_root,
+            journal_checkpoint=journal_checkpoint,
+        )
         return self.head()
+
+    def _pending_proves_forward_journal_suffix_locked(
+        self,
+        durable_head: Mapping[str, Any],
+        suffix: list[tuple[Path, dict[str, Any], str]],
+    ) -> None:
+        """Permit only the one crash-recoverable append staged in ``pending``.
+
+        ``pending`` is deliberately not a second authority source.  It may
+        advance an already validated durable HEAD only when it is the exact
+        same canonical payload as the next linked journal batch.  The normal
+        single-writer protocol has at most one such in-flight batch.
+        """
+
+        if len(suffix) != 1:
+            raise JournalCorruption(
+                "journal suffix beyond durable HEAD is not one pending transaction"
+            )
+        journal_path, envelope, batch_digest = suffix[0]
+        batch = envelope.get("batch")
+        if not isinstance(batch, dict):
+            raise JournalCorruption("journal suffix lacks an EventBatch")
+        if (
+            batch.get("sequence") != durable_head["sequence"] + 1
+            or batch.get("previous_digest") != durable_head["batch_digest"]
+            or batch_digest != digest_value(batch)
+            or not isinstance(batch.get("batch_id"), str)
+        ):
+            raise JournalCorruption("journal suffix is not linked to durable HEAD")
+        batch_file_id = hashlib.sha256(
+            batch["batch_id"].encode("utf-8")
+        ).hexdigest()
+        expected_journal_name = (
+            f"{batch['sequence']:020d}-{batch_file_id}.json"
+        )
+        if journal_path.name != expected_journal_name:
+            raise JournalCorruption("journal suffix filename differs from its batch identity")
+        pending_path = self.pending / f"{batch_file_id}.json"
+        try:
+            journal_payload = _read_bytes(journal_path)
+            pending_payload = _read_bytes(pending_path)
+        except OSError as exc:
+            raise JournalCorruption(
+                "journal suffix lacks its exact pending transaction"
+            ) from exc
+        if pending_payload != journal_payload:
+            raise JournalCorruption(
+                "pending transaction differs from journal suffix bytes"
+            )
+        pending = self._read_envelope(pending_path)
+        if pending != envelope:
+            raise JournalCorruption(
+                "pending transaction differs from journal suffix content"
+            )
+
+    def _validate_recovery_head_locked(
+        self,
+        *,
+        durable_head: Mapping[str, Any],
+        durable_head_present: bool,
+        durable_prefix_head: Mapping[str, Any],
+        replayed_head: Mapping[str, Any],
+        forward_journal_suffix: list[tuple[Path, dict[str, Any], str]],
+    ) -> None:
+        """Refuse recovery that would lower or replace durable history."""
+
+        checked_durable = self._validate_head_value(dict(durable_head))
+        checked_prefix = self._validate_head_value(dict(durable_prefix_head))
+        checked_replayed = self._validate_head_value(dict(replayed_head))
+        if checked_durable["sequence"] > checked_replayed["sequence"]:
+            raise JournalCorruption(
+                "durable HEAD is ahead of the replayed journal prefix"
+            )
+        if checked_durable["sequence"] > 0 and checked_prefix != checked_durable:
+            raise JournalCorruption(
+                "durable HEAD differs from the replayed committed journal prefix"
+            )
+        if checked_durable["sequence"] == checked_replayed["sequence"]:
+            if checked_replayed != checked_durable:
+                raise JournalCorruption(
+                    "replayed journal HEAD differs from durable HEAD"
+                )
+            return
+        if checked_prefix != checked_durable:
+            raise JournalCorruption(
+                "journal suffix does not begin at the durable HEAD"
+            )
+        # A missing HEAD is harmless only for an empty genesis journal or the
+        # single exact pending append written before HEAD's durability point.
+        if not durable_head_present and checked_durable["sequence"] != 0:
+            raise JournalCorruption("durable journal HEAD disappeared during recovery")
+        self._pending_proves_forward_journal_suffix_locked(
+            checked_durable,
+            forward_journal_suffix,
+        )
 
     @staticmethod
     def _prune_generation_root(
@@ -2610,6 +3557,15 @@ class EventStore:
         self._state_binding_update_count = authority_root[
             "state_binding_update_count"
         ]
+        # These are the exact canonical control bytes consumed by the full
+        # verifier above.  A provisional Windows hold is bound only to these
+        # bytes; a later replacement forces the ordinary full path.
+        self._verified_windows_history_control = {
+            "authority_generation": authority_root["generation"],
+            "head_payload": canonical_bytes(head),
+            "authority_root_payload": canonical_bytes(authority_root),
+            "checkpoint_payload": canonical_bytes(value),
+        }
 
     @staticmethod
     def _index_identity_digest(kind: str, identity: Any) -> str:
@@ -2649,7 +3605,11 @@ class EventStore:
             raise DerivedCheckpointError("event identity index already exists")
         connection = self._event_identity_connection(generation, create=True)
         try:
-            connection.execute("PRAGMA journal_mode=TRUNCATE")
+            # DELETE is intentionally restated here because, unlike WAL, the
+            # TRUNCATE selection would not persist across the short-lived
+            # connections used by later publications.  Peak rollback-journal
+            # bytes are measured by the saturation harness.
+            connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -2762,7 +3722,7 @@ class EventStore:
             raise DerivedCheckpointError("state binding index already exists")
         connection = self._state_binding_connection(generation, create=True)
         try:
-            connection.execute("PRAGMA journal_mode=TRUNCATE")
+            connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -2778,6 +3738,7 @@ class EventStore:
             connection.execute(
                 "CREATE TABLE node ("
                 "depth INTEGER NOT NULL, prefix BLOB NOT NULL, digest BLOB NOT NULL, "
+                "children BLOB NOT NULL, "
                 "PRIMARY KEY(depth, prefix)) WITHOUT ROWID"
             )
             connection.execute(
@@ -2792,15 +3753,36 @@ class EventStore:
                     self._genesis_state_binding_digest,
                 ),
             )
-            connection.executemany(
-                "INSERT INTO node(depth, prefix, digest) VALUES (?, ?, ?)",
-                (
-                    (depth, prefix, node_digest)
-                    for (depth, prefix), node_digest in sorted(
-                        self._genesis_state_binding_nodes.items(),
-                        key=lambda item: (item[0][0], item[0][1]),
+            activation_key = _state_leaf_key_digest(
+                {
+                    "leaf_type": "Activation",
+                    "leaf_id": self.active_activation_digest,
+                }
+            )
+            genesis_rows: list[tuple[int, bytes, bytes, bytes]] = []
+            for (depth, prefix), node_digest in sorted(
+                self._genesis_state_binding_nodes.items(),
+                key=lambda item: (item[0][0], item[0][1]),
+            ):
+                if depth % _STATE_BINDING_STORAGE_STRIDE != 0:
+                    continue
+                if depth == _STATE_TREE_DEPTH:
+                    children_payload = b""
+                else:
+                    edge = activation_key[depth // 8]
+                    child_prefix = prefix + bytes((edge,))
+                    child_digest = self._genesis_state_binding_nodes[
+                        (depth + _STATE_BINDING_STORAGE_STRIDE, child_prefix)
+                    ]
+                    children_payload = _encode_state_storage_children(
+                        {edge: child_digest}
                     )
-                ),
+                genesis_rows.append(
+                    (depth, prefix, node_digest, children_payload)
+                )
+            connection.executemany(
+                "INSERT INTO node(depth, prefix, digest, children) VALUES (?, ?, ?, ?)",
+                genesis_rows,
             )
             connection.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -2829,53 +3811,62 @@ class EventStore:
         return row
 
     @staticmethod
-    def _state_node_digest(
+    def _state_storage_rows(
         connection: sqlite3.Connection,
         depth: int,
-        prefix: bytes,
-        overlay: Mapping[tuple[int, bytes], bytes] | None = None,
-    ) -> bytes:
-        identity = (depth, prefix)
-        if overlay is not None and identity in overlay:
-            return overlay[identity]
-        try:
-            row = connection.execute(
-                "SELECT digest FROM node WHERE depth = ? AND prefix = ?",
-                (depth, prefix),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise DerivedCheckpointError("state binding tree node is unreadable") from exc
-        if row is None:
-            return _STATE_DEFAULT_DIGESTS[depth]
-        if len(row) != 1 or not isinstance(row[0], bytes) or len(row[0]) != 32:
-            raise DerivedCheckpointError("state binding tree node is invalid")
-        return row[0]
+        prefixes: Iterable[bytes],
+    ) -> dict[bytes, tuple[bytes, dict[int, bytes]]]:
+        """Fetch all affected byte-boundary rows with one indexed query."""
 
-    def _state_path_root(
-        self,
-        connection: sqlite3.Connection,
-        key_digest: bytes,
-        overlay: Mapping[tuple[int, bytes], bytes],
-    ) -> bytes:
-        current = self._state_node_digest(
-            connection,
-            _STATE_TREE_DEPTH,
-            _state_prefix(key_digest, _STATE_TREE_DEPTH),
-            overlay,
-        )
-        for child_depth in range(_STATE_TREE_DEPTH, 0, -1):
-            bit_index = child_depth - 1
-            sibling_prefix = bytearray(_state_prefix(key_digest, child_depth))
-            sibling_prefix[bit_index // 8] ^= 1 << (7 - (bit_index % 8))
-            sibling = self._state_node_digest(
-                connection, child_depth, bytes(sibling_prefix), overlay
-            )
-            parent_depth = child_depth - 1
-            if key_digest[bit_index // 8] & (1 << (7 - (bit_index % 8))):
-                current = _state_internal_digest(parent_depth, sibling, current)
+        selected = tuple(sorted(set(prefixes)))
+        if (
+            depth < 0
+            or depth > _STATE_TREE_DEPTH
+            or depth % _STATE_BINDING_STORAGE_STRIDE != 0
+            or any(not isinstance(prefix, bytes) or len(prefix) != depth // 8 for prefix in selected)
+        ):
+            raise DerivedCheckpointError("state binding storage row request is invalid")
+        if not selected:
+            return {}
+        placeholders = ",".join("?" for _unused in selected)
+        try:
+            rows = connection.execute(
+                "SELECT prefix, digest, children FROM node "
+                f"WHERE depth = ? AND prefix IN ({placeholders}) ORDER BY prefix",
+                (depth, *selected),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("state binding storage rows are unreadable") from exc
+        observed: dict[bytes, tuple[bytes, dict[int, bytes]]] = {}
+        for prefix, node_digest, children_payload in rows:
+            if (
+                prefix not in selected
+                or prefix in observed
+                or not isinstance(node_digest, bytes)
+                or len(node_digest) != 32
+            ):
+                raise DerivedCheckpointError("state binding storage row is invalid")
+            children = _decode_state_storage_children(children_payload)
+            if depth == _STATE_TREE_DEPTH:
+                if children:
+                    raise DerivedCheckpointError("state binding leaf row has children")
             else:
-                current = _state_internal_digest(parent_depth, current, sibling)
-        return current
+                child_default = _STATE_DEFAULT_DIGESTS[
+                    depth + _STATE_BINDING_STORAGE_STRIDE
+                ]
+                if any(value == child_default for value in children.values()):
+                    raise DerivedCheckpointError(
+                        "state binding storage row retains a default child"
+                    )
+                if _state_storage_parent_digest(depth, children) != node_digest:
+                    raise DerivedCheckpointError("state binding storage row digest mismatch")
+            if node_digest == _STATE_DEFAULT_DIGESTS[depth]:
+                raise DerivedCheckpointError("state binding storage retains a default row")
+            observed[prefix] = (node_digest, children)
+        return {
+            prefix: observed.get(prefix, (_STATE_DEFAULT_DIGESTS[depth], {}))
+            for prefix in selected
+        }
 
     def _stage_state_binding_delta(
         self,
@@ -2885,9 +3876,9 @@ class EventStore:
         prior_sequence: int,
         prior_root_digest: str | None,
         prior_update_count: int,
-    ) -> tuple[str, dict[tuple[int, bytes], bytes]]:
+    ) -> tuple[str, dict[tuple[int, bytes], tuple[bytes, bytes]]]:
         connection = self._state_binding_connection(generation)
-        overlay: dict[tuple[int, bytes], bytes] = {}
+        overlay: dict[tuple[int, bytes], tuple[bytes, bytes]] = {}
         current_root = bytes.fromhex(
             _EMPTY_STATE_BINDING_DIGEST
             if prior_root_digest is None
@@ -2907,38 +3898,70 @@ class EventStore:
             )
             if self._state_binding_binding(connection) != expected_binding:
                 raise DerivedCheckpointError("state binding index is not at the previous HEAD")
+            leaf_keys = tuple(_state_leaf_key_digest(update) for update in delta)
+            if len(leaf_keys) != len(set(leaf_keys)):
+                raise DerivedCheckpointError("state binding leaf keys collide")
+            leaf_rows = self._state_storage_rows(
+                connection,
+                _STATE_TREE_DEPTH,
+                leaf_keys,
+            )
+            changed: dict[bytes, tuple[bytes, bytes]] = {}
             for update in delta:
                 key_digest = _state_leaf_key_digest(update)
-                if self._state_path_root(connection, key_digest, overlay) != current_root:
-                    raise DerivedCheckpointError(
-                        "state binding touched-path proof differs from current root"
-                    )
                 leaf_digest = (
                     _state_leaf_digest(key_digest, update["value_digest"])
                     if update["operation"] == "set"
                     else _STATE_DEFAULT_DIGESTS[_STATE_TREE_DEPTH]
                 )
-                overlay[
-                    (_STATE_TREE_DEPTH, _state_prefix(key_digest, _STATE_TREE_DEPTH))
-                ] = leaf_digest
-                current = leaf_digest
-                for child_depth in range(_STATE_TREE_DEPTH, 0, -1):
-                    bit_index = child_depth - 1
-                    sibling_prefix = bytearray(
-                        _state_prefix(key_digest, child_depth)
+                old_leaf = leaf_rows[key_digest][0]
+                changed[key_digest] = (old_leaf, leaf_digest)
+                overlay[(_STATE_TREE_DEPTH, key_digest)] = (leaf_digest, b"")
+
+            for parent_depth in range(
+                _STATE_TREE_DEPTH - _STATE_BINDING_STORAGE_STRIDE,
+                -1,
+                -_STATE_BINDING_STORAGE_STRIDE,
+            ):
+                grouped: dict[bytes, dict[int, tuple[bytes, bytes]]] = {}
+                for child_prefix, pair in changed.items():
+                    parent_prefix = child_prefix[:-1]
+                    grouped.setdefault(parent_prefix, {})[child_prefix[-1]] = pair
+                parent_rows = self._state_storage_rows(
+                    connection,
+                    parent_depth,
+                    grouped,
+                )
+                next_changed: dict[bytes, tuple[bytes, bytes]] = {}
+                child_default = _STATE_DEFAULT_DIGESTS[
+                    parent_depth + _STATE_BINDING_STORAGE_STRIDE
+                ]
+                for parent_prefix in sorted(grouped):
+                    old_parent, existing_children = parent_rows[parent_prefix]
+                    children = dict(existing_children)
+                    for edge, (old_child, new_child) in grouped[parent_prefix].items():
+                        if children.get(edge, child_default) != old_child:
+                            raise DerivedCheckpointError(
+                                "state binding touched-path proof differs from stored child"
+                            )
+                        if new_child == child_default:
+                            children.pop(edge, None)
+                        else:
+                            children[edge] = new_child
+                    new_parent = _state_storage_parent_digest(parent_depth, children)
+                    children_payload = _encode_state_storage_children(children)
+                    overlay[(parent_depth, parent_prefix)] = (
+                        new_parent,
+                        children_payload,
                     )
-                    sibling_prefix[bit_index // 8] ^= 1 << (7 - (bit_index % 8))
-                    sibling = self._state_node_digest(
-                        connection, child_depth, bytes(sibling_prefix), overlay
-                    )
-                    parent_depth = child_depth - 1
-                    if key_digest[bit_index // 8] & (1 << (7 - (bit_index % 8))):
-                        current = _state_internal_digest(parent_depth, sibling, current)
-                    else:
-                        current = _state_internal_digest(parent_depth, current, sibling)
-                    overlay[(parent_depth, _state_prefix(key_digest, parent_depth))] = current
-                current_root = current
-            return current_root.hex(), overlay
+                    next_changed[parent_prefix] = (old_parent, new_parent)
+                changed = next_changed
+            root_pair = changed.get(b"")
+            if root_pair is None or root_pair[0] != current_root:
+                raise DerivedCheckpointError(
+                    "state binding touched-path proof differs from current root"
+                )
+            return root_pair[1].hex(), overlay
         finally:
             connection.close()
 
@@ -2951,7 +3974,7 @@ class EventStore:
         prior_update_count: int,
         root_digest: str,
         delta_count: int,
-        overlay: Mapping[tuple[int, bytes], bytes],
+        overlay: Mapping[tuple[int, bytes], tuple[bytes, bytes]],
     ) -> tuple[int, int]:
         connection = self._state_binding_connection(generation)
         previous_root = (
@@ -2975,20 +3998,62 @@ class EventStore:
             )
             if self._state_binding_binding(connection) != expected_binding:
                 raise DerivedCheckpointError("state binding index publication is stale")
-            for (depth, prefix), node_digest in sorted(
+            root_row = overlay.get((0, b""))
+            if root_row is None or root_row[0].hex() != root_digest:
+                raise DerivedCheckpointError(
+                    "state binding overlay root differs from publication binding"
+                )
+            deletes: list[tuple[int, bytes]] = []
+            upserts: list[tuple[int, bytes, bytes, bytes]] = []
+            for (depth, prefix), (node_digest, children_payload) in sorted(
                 overlay.items(), key=lambda item: (item[0][0], item[0][1])
             ):
-                if node_digest == _STATE_DEFAULT_DIGESTS[depth]:
-                    connection.execute(
-                        "DELETE FROM node WHERE depth = ? AND prefix = ?",
-                        (depth, prefix),
-                    )
+                if (
+                    depth < 0
+                    or depth > _STATE_TREE_DEPTH
+                    or depth % _STATE_BINDING_STORAGE_STRIDE != 0
+                    or not isinstance(prefix, bytes)
+                    or len(prefix) != depth // 8
+                    or not isinstance(node_digest, bytes)
+                    or len(node_digest) != 32
+                ):
+                    raise DerivedCheckpointError("state binding overlay row is invalid")
+                children = _decode_state_storage_children(children_payload)
+                if depth == _STATE_TREE_DEPTH:
+                    if children:
+                        raise DerivedCheckpointError(
+                            "state binding overlay leaf has children"
+                        )
                 else:
-                    connection.execute(
-                        "INSERT INTO node(depth, prefix, digest) VALUES (?, ?, ?) "
-                        "ON CONFLICT(depth, prefix) DO UPDATE SET digest=excluded.digest",
-                        (depth, prefix, node_digest),
+                    child_default = _STATE_DEFAULT_DIGESTS[
+                        depth + _STATE_BINDING_STORAGE_STRIDE
+                    ]
+                    if any(value == child_default for value in children.values()):
+                        raise DerivedCheckpointError(
+                            "state binding overlay retains a default child"
+                        )
+                    if _state_storage_parent_digest(depth, children) != node_digest:
+                        raise DerivedCheckpointError(
+                            "state binding overlay children differ from their digest"
+                        )
+                if node_digest == _STATE_DEFAULT_DIGESTS[depth]:
+                    deletes.append((depth, prefix))
+                else:
+                    upserts.append(
+                        (depth, prefix, node_digest, children_payload)
                     )
+            if deletes:
+                connection.executemany(
+                    "DELETE FROM node WHERE depth = ? AND prefix = ?",
+                    deletes,
+                )
+            if upserts:
+                connection.executemany(
+                    "INSERT INTO node(depth, prefix, digest, children) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(depth, prefix) DO UPDATE SET "
+                    "digest=excluded.digest, children=excluded.children",
+                    upserts,
+                )
             connection.execute(
                 "UPDATE binding SET head_sequence = ?, update_count = ?, "
                 "root_digest = ? WHERE singleton = 1",
@@ -3009,7 +4074,10 @@ class EventStore:
             raise DerivedCheckpointError("state binding index publication failed") from exc
         finally:
             connection.close()
-        logical_bytes = sum(2 + len(prefix) + len(node_digest) for (depth, prefix), node_digest in overlay.items())
+        logical_bytes = sum(
+            2 + len(prefix) + len(node_digest) + len(children_payload)
+            for (depth, prefix), (node_digest, children_payload) in overlay.items()
+        )
         return logical_bytes, len(overlay)
 
     def _validate_state_binding_index(
@@ -3038,7 +4106,7 @@ class EventStore:
             )
             if self._state_binding_binding(connection) != expected:
                 raise DerivedCheckpointError("state binding index binding is stale")
-            root_node = self._state_node_digest(connection, 0, b"")
+            root_node = self._state_storage_rows(connection, 0, (b"",))[b""][0]
             if root_node.hex() != expected_root:
                 raise DerivedCheckpointError("state binding index root node is stale")
         finally:
@@ -3527,6 +4595,135 @@ class EventStore:
             normalized_delta,
         )
 
+    def _finish_durable_commit_after_non_authoritative_failure_locked(
+        self,
+        *,
+        failure: Exception,
+        envelope: Mapping[str, Any],
+        payload: bytes,
+        journal_path: Path,
+        new_head: Mapping[str, Any],
+        authority_segment: Mapping[str, Any],
+        authority_root: Mapping[str, Any],
+        result: Mapping[str, Any],
+        command_effect_digest: str,
+    ) -> dict[str, Any]:
+        """Resolve an exact durable append after non-authoritative failure.
+
+        ``HEAD.json`` is the commit linearization point.  Once it names this
+        envelope, a later index/checkpoint/control/cleanup failure must not be
+        reported as if the command rolled back.  Re-verify the complete
+        journal-owned prefix under the still-held writer lock and invalidate
+        the entire derived-index generation rather than trusting unknown
+        partial finalization.  An existing pending marker is left for recovery;
+        if unlink completed before its directory fsync failed, the exact bound
+        checkpoint permits either durable directory outcome on reopen.
+        """
+
+        self._clear_committed_envelope_witness()
+        self._close_windows_event_history()
+        self._verified_windows_history_control = None
+        checked_head = self._validate_head_value(dict(new_head))
+        try:
+            if self._read_disk_head() != checked_head:
+                raise JournalCorruption(
+                    "durable HEAD changed after non-authoritative finalization failed"
+                )
+            if _read_bytes(journal_path) != payload:
+                raise JournalCorruption(
+                    "durable journal bytes changed after non-authoritative finalization failed"
+                )
+            checked_envelope = self._read_envelope(journal_path)
+            if checked_envelope != dict(envelope):
+                raise JournalCorruption(
+                    "durable envelope changed after non-authoritative finalization failed"
+                )
+            batch = checked_envelope["batch"]
+            actual_batch_digest = self._validate_envelope(
+                checked_envelope,
+                expected_sequence=checked_head["sequence"],
+                expected_previous_digest=batch.get("previous_digest"),
+                validate_runtime=False,
+            )
+            if (
+                batch["batch_id"] != checked_head["batch_id"]
+                or actual_batch_digest != checked_head["batch_digest"]
+            ):
+                raise JournalCorruption(
+                    "durable envelope differs from HEAD after non-authoritative failure"
+                )
+            verified_authority_root = self._verify_authority_prefix_locked(
+                checked_head
+            )
+            if verified_authority_root != dict(authority_root):
+                raise JournalCorruption(
+                    "durable authority root changed after non-authoritative failure"
+                )
+        except (
+            CanonicalError,
+            DerivedCheckpointError,
+            JournalCorruption,
+            OSError,
+        ) as authority_failure:
+            raise JournalCorruption(
+                "durable commit could not be resolved after non-authoritative "
+                f"finalization failed: {type(failure).__name__}: {failure}"
+            ) from authority_failure
+
+        command = checked_envelope["command"]
+        id_key = (
+            command["activation_digest"],
+            command["subject_id"],
+            command["idempotency_key"],
+        )
+        checked_result = copy.deepcopy(dict(result))
+        self._head = checked_head
+        self._batch_count = checked_head["sequence"]
+        self._event_count = batch["cumulative_event_count"]
+        self._semantic_digest = batch["event_semantic_digest"]
+        self._authority_generation = verified_authority_root["generation"]
+        self._authority_prefix_digest = batch["authority_commitment"]
+        self._state_binding_digest = batch["state_binding_digest"]
+        self._state_binding_update_count = batch[
+            "cumulative_state_binding_update_count"
+        ]
+        # The failed generation may contain any prefix of the attempted
+        # publications.  No caller may consult it again.
+        self._index_generation = None
+        self._command_ids[command["command_id"]] = (
+            command_effect_digest,
+            checked_result,
+        )
+        self._idempotency[id_key] = (command_effect_digest, checked_result)
+        self._batch_ids.add(batch["batch_id"])
+        self._event_ids.update(event["event_id"] for event in batch["events"])
+        self._open_mode = "authority-only-derived-unavailable"
+        self._fallback_reason = (
+            "post-HEAD non-authoritative finalization failed; authority was verified: "
+            f"{type(failure).__name__}: {failure}"
+        )
+
+        authority_bytes = len(canonical_bytes(dict(authority_segment))) + len(
+            canonical_bytes(verified_authority_root)
+        )
+        head_bytes = len(canonical_bytes(checked_head))
+        logical_final_bytes = len(payload) + head_bytes + authority_bytes
+        self._last_commit_write_metrics = {
+            "changed_records": len(batch["events"]),
+            "journal_authority_bytes": len(payload),
+            "temporary_staging_bytes": len(payload),
+            "head_bytes": head_bytes,
+            "derived_index_bytes": 0,
+            "journal_checkpoint_bytes": 0,
+            "state_binding_index_bytes": 0,
+            "state_binding_updates": len(batch["state_binding_delta"]),
+            "state_binding_node_writes": 0,
+            "journal_checkpoint_writes": 0,
+            "logical_final_bytes": logical_final_bytes,
+            "physical_payload_bytes": logical_final_bytes + len(payload),
+        }
+        return copy.deepcopy(checked_result)
+
     def commit(
         self,
         command: Mapping[str, Any],
@@ -3535,6 +4732,9 @@ class EventStore:
         created_at: str | None = None,
         crash_hook: Callable[[str], Any] | None = None,
     ) -> dict[str, Any]:
+        # A prior continuation is valid for one exact post-commit read only;
+        # even a rejected later mutation must not extend that window.
+        self._clear_committed_envelope_witness()
         try:
             command_payload = canonical_bytes(
                 dict(command), limits=ParseLimits(max_bytes=self.policy.max_command_bytes)
@@ -3724,9 +4924,18 @@ class EventStore:
                 raise EventStoreError(
                     f"journal envelope exceeds its canonical byte ceiling: {exc}"
                 ) from exc
+            # Reserve both immutable files before the first pending/journal
+            # write.  A cap boundary is an optimization transition, never a
+            # reason to leave one otherwise valid batch half-sealed.
+            self._reserve_windows_history_append_capacity_locked()
             _write_atomic(pending_path, payload)
             self._crash(crash_hook, "after_pending")
             _write_atomic(journal_path, payload)
+            self._hold_new_windows_history_file_locked(
+                kind="journal",
+                path=journal_path,
+                payload=payload,
+            )
             self._crash(crash_hook, "after_batch")
             new_head = {"sequence": batch["sequence"], "batch_id": batch["batch_id"], "batch_digest": batch_digest}
             if self._authority_generation is None:
@@ -3736,6 +4945,14 @@ class EventStore:
                 envelope=envelope,
                 journal_path=journal_path,
                 journal_payload=payload,
+            )
+            authority_segment_path = self._authority_segment_path(
+                self._authority_generation, batch["sequence"]
+            )
+            self._hold_new_windows_history_file_locked(
+                kind="authority",
+                path=authority_segment_path,
+                payload=canonical_bytes(authority_segment),
             )
             self._crash(crash_hook, "after_authority_segment")
             authority_root = self._write_authority_root(
@@ -3755,25 +4972,42 @@ class EventStore:
             self._crash(crash_hook, "after_head")
             self._crash(crash_hook, "before_checkpoint")
             result = self._result(normalized, batch_digest, "committed", batch)
-            if self._index_generation is None:
-                raise DerivedCheckpointError("event index generation is unavailable")
-            index_bytes = self._write_envelope_index_entries(
-                envelope,
-                journal_path,
-                batch_digest,
-                command_digest,
-                result,
-                self._index_generation,
-            )
-            state_index_bytes, state_node_writes = self._publish_state_binding_delta(
-                state_generation,
-                sequence=batch["sequence"],
-                prior_root_digest=prior_state_binding_digest,
-                prior_update_count=prior_state_binding_update_count,
-                root_digest=batch["state_binding_digest"],
-                delta_count=len(prepared.state_binding_delta),
-                overlay=state_binding_overlay,
-            )
+            try:
+                if self._index_generation is None:
+                    raise DerivedCheckpointError(
+                        "event index generation is unavailable"
+                    )
+                index_bytes = self._write_envelope_index_entries(
+                    envelope,
+                    journal_path,
+                    batch_digest,
+                    command_digest,
+                    result,
+                    self._index_generation,
+                )
+                state_index_bytes, state_node_writes = (
+                    self._publish_state_binding_delta(
+                        state_generation,
+                        sequence=batch["sequence"],
+                        prior_root_digest=prior_state_binding_digest,
+                        prior_update_count=prior_state_binding_update_count,
+                        root_digest=batch["state_binding_digest"],
+                        delta_count=len(prepared.state_binding_delta),
+                        overlay=state_binding_overlay,
+                    )
+                )
+            except (CanonicalError, DerivedCheckpointError, OSError) as exc:
+                return self._finish_durable_commit_after_non_authoritative_failure_locked(
+                    failure=exc,
+                    envelope=envelope,
+                    payload=payload,
+                    journal_path=journal_path,
+                    new_head=new_head,
+                    authority_segment=authority_segment,
+                    authority_root=authority_root,
+                    result=result,
+                    command_effect_digest=command_digest,
+                )
             self._crash(crash_hook, "after_state_binding_index")
             index_bytes += state_index_bytes
             new_semantic_digest = batch["event_semantic_digest"]
@@ -3781,21 +5015,59 @@ class EventStore:
             new_state_binding_update_count = batch[
                 "cumulative_state_binding_update_count"
             ]
-            journal_checkpoint = self._write_journal_checkpoint(
-                head=new_head,
-                batch_count=new_head["sequence"],
-                event_count=new_event_count,
-                semantic_digest=new_semantic_digest,
-                index_generation=self._index_generation,
-                last_journal_file=journal_path.name,
-                last_journal_file_digest=hashlib.sha256(payload).hexdigest(),
-                authority_root=authority_root,
-                state_binding_update_count=new_state_binding_update_count,
-            )
-            journal_checkpoint_bytes = len(canonical_bytes(journal_checkpoint))
+            try:
+                journal_checkpoint = self._write_journal_checkpoint(
+                    head=new_head,
+                    batch_count=new_head["sequence"],
+                    event_count=new_event_count,
+                    semantic_digest=new_semantic_digest,
+                    index_generation=self._index_generation,
+                    last_journal_file=journal_path.name,
+                    last_journal_file_digest=hashlib.sha256(payload).hexdigest(),
+                    authority_root=authority_root,
+                    state_binding_update_count=new_state_binding_update_count,
+                )
+                self._advance_windows_history_control_locked(
+                    head=new_head,
+                    authority_root=authority_root,
+                    journal_checkpoint=journal_checkpoint,
+                )
+                journal_checkpoint_bytes = len(
+                    canonical_bytes(journal_checkpoint)
+                )
+            except (
+                CanonicalError,
+                DerivedCheckpointError,
+                JournalCorruption,
+                OSError,
+            ) as exc:
+                return self._finish_durable_commit_after_non_authoritative_failure_locked(
+                    failure=exc,
+                    envelope=envelope,
+                    payload=payload,
+                    journal_path=journal_path,
+                    new_head=new_head,
+                    authority_segment=authority_segment,
+                    authority_root=authority_root,
+                    result=result,
+                    command_effect_digest=command_digest,
+                )
             self._crash(crash_hook, "after_checkpoint")
-            _unlink(pending_path, missing_ok=True)
-            _fsync_directory(self.pending)
+            try:
+                _unlink(pending_path, missing_ok=True)
+                _fsync_directory(self.pending)
+            except OSError as exc:
+                return self._finish_durable_commit_after_non_authoritative_failure_locked(
+                    failure=exc,
+                    envelope=envelope,
+                    payload=payload,
+                    journal_path=journal_path,
+                    new_head=new_head,
+                    authority_segment=authority_segment,
+                    authority_root=authority_root,
+                    result=result,
+                    command_effect_digest=command_digest,
+                )
             self._head = new_head
             self._batch_count = new_head["sequence"]
             self._event_count = new_event_count
@@ -3807,6 +5079,10 @@ class EventStore:
             self._idempotency[id_key] = (command_digest, result)
             self._batch_ids.add(batch["batch_id"])
             self._event_ids.update(event["event_id"] for event in batch["events"])
+            self._try_activate_windows_history_after_commit_locked(
+                authority_root=authority_root,
+                journal_checkpoint=journal_checkpoint,
+            )
             authority_bytes = len(canonical_bytes(authority_segment)) + len(
                 canonical_bytes(authority_root)
             )
@@ -3831,6 +5107,13 @@ class EventStore:
                 "logical_final_bytes": logical_final_bytes,
                 "physical_payload_bytes": logical_final_bytes + len(payload),
             }
+            self._record_committed_envelope_witness(
+                envelope=envelope,
+                payload=payload,
+                journal_path=journal_path,
+                head=new_head,
+                authority_root=authority_root,
+            )
             return copy.deepcopy(result)
 
     @staticmethod
@@ -4100,7 +5383,20 @@ class EventStore:
     ) -> Iterator[dict[str, Any]]:
         previous: str | None = None
         sequence = 1
-        for path in sorted(_matching_paths(self.journal, "*.json")):
+        history = self._windows_event_history
+        if history is None:
+            paths = sorted(_matching_paths(self.journal, "*.json"))
+        else:
+            try:
+                paths = [
+                    history.journal_path_for_sequence(item)
+                    for item in range(1, self._head["sequence"] + 1)
+                ]
+            except WindowsEventHistoryError as exc:
+                raise JournalCorruption(
+                    "sealed journal sequence closure is invalid"
+                ) from exc
+        for path in paths:
             envelope = self._read_envelope(path)
             if validate:
                 previous = self._validate_envelope(
@@ -4125,23 +5421,56 @@ class EventStore:
             yield from self._iter_envelopes_locked(validate=True)
 
     def _journal_path_for_sequence(self, sequence: int) -> Path:
+        history = self._windows_event_history
+        if history is not None:
+            try:
+                return history.journal_path_for_sequence(sequence)
+            except WindowsEventHistoryError as exc:
+                raise JournalCorruption(
+                    f"sealed journal sequence {sequence} is missing or ambiguous"
+                ) from exc
         matches = _matching_paths(self.journal, f"{sequence:020d}-*.json")
         if len(matches) != 1:
             raise JournalCorruption(f"journal sequence {sequence} is missing or ambiguous")
         return matches[0]
 
     def _refresh_from_disk_locked(self) -> None:
+        self._clear_committed_envelope_witness()
         try:
             disk_head = self._read_disk_head()
         except JournalCorruption as exc:
+            self._close_windows_event_history()
             self._fallback_reason = f"{type(exc).__name__}: {exc}"
             self._recover_locked()
             self._open_mode = "full-replay-fallback"
             return
         if disk_head == self._head:
+            history = self._windows_event_history
+            if history is not None:
+                try:
+                    if self._authority_generation is None:
+                        raise WindowsEventHistoryViolation(
+                            "EventStore has no active authority generation"
+                        )
+                    history.validate_fast(
+                        head=disk_head,
+                        authority_generation=self._authority_generation,
+                        head_payload=_read_bytes(self.head_path),
+                        authority_root_payload=_read_bytes(self.authority_head_path),
+                        checkpoint_payload=_read_bytes(self.checkpoint_path),
+                    )
+                except (OSError, WindowsEventHistoryError):
+                    # A physical witness is optional.  Drop it before the
+                    # mandatory existing verifier; do not reinterpret a
+                    # metadata mismatch as a healthy prefix.
+                    self._close_windows_event_history()
+                else:
+                    self._fallback_reason = None
+                    return
             try:
                 authority_root = self._verify_authority_prefix_locked(disk_head)
             except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+                self._close_windows_event_history()
                 self._fallback_reason = f"{type(exc).__name__}: {exc}"
                 self._recover_locked()
                 self._open_mode = "full-replay-fallback"
@@ -4155,15 +5484,25 @@ class EventStore:
                 "state_binding_update_count"
             ]
             return
+        self._close_windows_event_history()
+        provisional_history = self._try_hold_windows_event_history_locked()
         try:
-            self._load_journal_checkpoint_locked()
-        except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-            self._fallback_reason = f"{type(exc).__name__}: {exc}"
-            self._recover_locked()
-            self._open_mode = "full-replay-fallback"
-        else:
-            self._fallback_reason = None
-            self._open_mode = "verified-checkpoint"
+            try:
+                self._load_journal_checkpoint_locked()
+            except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+                self._fallback_reason = f"{type(exc).__name__}: {exc}"
+                self._recover_locked()
+                self._open_mode = "full-replay-fallback"
+            else:
+                self._bind_windows_event_history_locked(provisional_history)
+                self._fallback_reason = None
+                self._open_mode = "verified-checkpoint"
+        finally:
+            if (
+                provisional_history is not None
+                and self._windows_event_history is not provisional_history
+            ):
+                provisional_history.close()
 
     def envelope_at_head(self) -> dict[str, Any] | None:
         """Read only the authoritative envelope named by current HEAD."""
@@ -4186,7 +5525,7 @@ class EventStore:
             return copy.deepcopy(envelope)
 
     def read_envelope(self, batch_digest: str) -> dict[str, Any]:
-        """Resolve one batch digest through the disposable targeted index."""
+        """Resolve one batch digest through a freshly verified journal prefix."""
 
         if not isinstance(batch_digest, str) or not _DIGEST.fullmatch(batch_digest):
             raise EventStoreError("batch digest is invalid")
@@ -4296,97 +5635,821 @@ class EventStore:
             )
         return batch["state_binding_digest"]
 
-    def validate_state_binding_leaves(
+    def validate_state_binding_commitments(
         self,
-        leaves: Iterable[Mapping[str, Any]],
+        commitments: Iterable[Mapping[str, Any]],
         *,
         expected_head: Mapping[str, Any],
     ) -> str:
-        """Prove complete restored authority/domain values against journal HEAD."""
+        """Prove a streamed complete commitment set against journal HEAD.
 
-        try:
-            limits = ParseLimits(max_bytes=_DERIVED_STATE_LIMITS.max_bytes)
-            normalized = parse_json_strict(
-                canonical_bytes(list(leaves), limits=limits), limits=limits
-            )
-        except (CanonicalError, TypeError, ValueError) as exc:
-            raise DerivedCheckpointError(
-                f"restored state leaves are not bounded canonical JSON: {exc}"
-            ) from exc
-        if not isinstance(normalized, list):
-            raise DerivedCheckpointError("restored state leaves must be an array")
-        identities: list[tuple[str, str]] = []
-        computed: list[dict[str, str]] = []
-        for leaf in normalized:
-            if not isinstance(leaf, dict) or set(leaf) != {"leaf_type", "value"}:
-                raise DerivedCheckpointError("restored state leaf fields mismatch")
-            leaf_type = leaf["leaf_type"]
-            value = leaf["value"]
-            if (
-                leaf_type == "Activation"
-                or leaf_type not in self.policy.allowed_state_binding_leaf_type_set
-            ):
-                raise DerivedCheckpointError(
-                    "restored state leaf type is not a non-Activation Core leaf"
-                )
-            rule = self.policy.state_binding_value_rules[leaf_type]
-            if (
-                not isinstance(value, dict)
-                or value.get("record_type") != rule["value_definition"]
-            ):
-                raise DerivedCheckpointError(
-                    "restored state value differs from its Core leaf definition"
-                )
-            identity_value = value
-            if leaf_type == "Grant":
-                identity_value = value.get("grant")
-                if not isinstance(identity_value, dict):
-                    raise DerivedCheckpointError(
-                        "restored Grant authority state lacks its identity owner"
-                    )
+        Each commitment is independently bounded canonical JSON.  This keeps
+        the 16 MiB derived-record ceiling meaningful without imposing that
+        ceiling on the aggregate state of a large project.  The existing
+        typed sparse-Merkle root is still recomputed from the complete set;
+        the compact SQLite node index is never accepted as the proof here.
+        """
+
+        def normalized_commitments() -> Iterator[dict[str, str]]:
+            previous_identity: tuple[str, str] | None = None
             try:
-                leaf_id = state_binding_leaf_id(
-                    self.policy,
-                    leaf_type,
-                    identity_value,
-                )
-            except EventStoreError as exc:
+                iterator = iter(commitments)
+            except TypeError as exc:
                 raise DerivedCheckpointError(
-                    "restored state value has no single Core-owned leaf identity"
+                    "restored state commitments are not iterable"
                 ) from exc
-            identities.append((leaf_type, leaf_id))
-            computed.append(
-                {
+            for commitment in iterator:
+                if not isinstance(commitment, Mapping):
+                    raise DerivedCheckpointError(
+                        "restored state commitment must be an object"
+                    )
+                try:
+                    normalized = parse_json_strict(
+                        canonical_bytes(
+                            dict(commitment),
+                            limits=_STATE_BINDING_COMMITMENT_LIMITS,
+                        ),
+                        limits=_STATE_BINDING_COMMITMENT_LIMITS,
+                    )
+                except (CanonicalError, TypeError, ValueError) as exc:
+                    raise DerivedCheckpointError(
+                        f"restored state commitment is not bounded canonical JSON: {exc}"
+                    ) from exc
+                if not isinstance(normalized, dict) or set(normalized) != {
+                    "leaf_type",
+                    "leaf_id",
+                    "value_digest",
+                }:
+                    raise DerivedCheckpointError(
+                        "restored state commitment fields mismatch"
+                    )
+                leaf_type = normalized["leaf_type"]
+                leaf_id = normalized["leaf_id"]
+                value_digest = normalized["value_digest"]
+                if (
+                    not isinstance(leaf_type, str)
+                    or leaf_type == "Activation"
+                    or leaf_type
+                    not in self.policy.allowed_state_binding_leaf_type_set
+                ):
+                    raise DerivedCheckpointError(
+                        "restored state commitment type is not a non-Activation Core leaf"
+                    )
+                if not isinstance(leaf_id, str) or not _ID.fullmatch(leaf_id):
+                    raise DerivedCheckpointError(
+                        "restored state commitment leaf ID is invalid"
+                    )
+                if (
+                    not isinstance(value_digest, str)
+                    or not _DIGEST.fullmatch(value_digest)
+                ):
+                    raise DerivedCheckpointError(
+                        "restored state commitment value digest is invalid"
+                    )
+                identity = (leaf_type, leaf_id)
+                if previous_identity is not None and identity <= previous_identity:
+                    raise DerivedCheckpointError(
+                        "restored state commitments must use unique canonical leaf order"
+                    )
+                previous_identity = identity
+                yield {
                     "leaf_type": leaf_type,
                     "leaf_id": leaf_id,
-                    "value_digest": digest_value(value),
+                    "value_digest": value_digest,
                 }
-            )
-        if identities != sorted(identities) or len(identities) != len(set(identities)):
-            raise DerivedCheckpointError(
-                "restored state leaves must use unique canonical leaf order"
-            )
+
         activation_leaf = {
             "leaf_type": "Activation",
             "leaf_id": self.active_activation_digest,
             "value_digest": self.activation_record_digest,
         }
         computed_root = _state_binding_root_from_leaves(
-            itertools.chain((activation_leaf,), computed)
+            itertools.chain((activation_leaf,), normalized_commitments())
         )
         checked_head = self._validate_head_value(dict(expected_head))
         with _WriterLock(self.lock_path, self.lock_timeout):
             self._refresh_from_disk_locked()
             if checked_head != self._head:
                 raise DerivedCheckpointError(
-                    "restored state leaves are bound to a stale journal HEAD"
+                    "restored state commitments are bound to a stale journal HEAD"
                 )
             journal_root = self._journal_state_binding_for_head_locked(checked_head)
             if journal_root is None or computed_root != journal_root:
                 raise DerivedCheckpointError(
-                    "restored state leaves do not reproduce the journal state binding"
+                    "restored state commitments do not reproduce the journal state binding"
                 )
             return computed_root
+
+    def validate_state_binding_leaves(
+        self,
+        leaves: Iterable[Mapping[str, Any]],
+        *,
+        expected_head: Mapping[str, Any],
+    ) -> str:
+        """Stream full restored values into the exact commitment verifier."""
+
+        def commitments() -> Iterator[dict[str, str]]:
+            try:
+                iterator = iter(leaves)
+            except TypeError as exc:
+                raise DerivedCheckpointError(
+                    "restored state leaves are not iterable"
+                ) from exc
+            for leaf in iterator:
+                if not isinstance(leaf, Mapping):
+                    raise DerivedCheckpointError(
+                        "restored state leaf must be an object"
+                    )
+                try:
+                    normalized = parse_json_strict(
+                        canonical_bytes(dict(leaf), limits=_DERIVED_STATE_LIMITS),
+                        limits=_DERIVED_STATE_LIMITS,
+                    )
+                except (CanonicalError, TypeError, ValueError) as exc:
+                    raise DerivedCheckpointError(
+                        f"restored state leaf is not bounded canonical JSON: {exc}"
+                    ) from exc
+                if not isinstance(normalized, dict) or set(normalized) != {
+                    "leaf_type",
+                    "value",
+                }:
+                    raise DerivedCheckpointError(
+                        "restored state leaf fields mismatch"
+                    )
+                leaf_type = normalized["leaf_type"]
+                value = normalized["value"]
+                if (
+                    not isinstance(leaf_type, str)
+                    or leaf_type == "Activation"
+                    or leaf_type
+                    not in self.policy.allowed_state_binding_leaf_type_set
+                ):
+                    raise DerivedCheckpointError(
+                        "restored state leaf type is not a non-Activation Core leaf"
+                    )
+                rule = self.policy.state_binding_value_rules[leaf_type]
+                if (
+                    not isinstance(value, dict)
+                    or value.get("record_type") != rule["value_definition"]
+                ):
+                    raise DerivedCheckpointError(
+                        "restored state value differs from its Core leaf definition"
+                    )
+                identity_value = value
+                if leaf_type == "Grant":
+                    identity_value = value.get("grant")
+                    if not isinstance(identity_value, dict):
+                        raise DerivedCheckpointError(
+                            "restored Grant authority state lacks its identity owner"
+                        )
+                try:
+                    leaf_id = state_binding_leaf_id(
+                        self.policy,
+                        leaf_type,
+                        identity_value,
+                    )
+                except EventStoreError as exc:
+                    raise DerivedCheckpointError(
+                        "restored state value has no single Core-owned leaf identity"
+                    ) from exc
+                yield {
+                    "leaf_type": leaf_type,
+                    "leaf_id": leaf_id,
+                    "value_digest": digest_value(value),
+                }
+
+        return self.validate_state_binding_commitments(
+            commitments(),
+            expected_head=expected_head,
+        )
+
+    def _derived_rows_path(self, name: str) -> Path:
+        if not isinstance(name, str) or not _ID.fullmatch(name):
+            raise EventStoreError("derived rows name is not a canonical ID")
+        identity = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        return self.derived_rows_root / f"{identity}.sqlite3"
+
+    @staticmethod
+    def _validate_derived_rows_schema(connection: sqlite3.Connection) -> None:
+        try:
+            objects = connection.execute(
+                "SELECT type, name, tbl_name FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+            binding_columns = connection.execute(
+                "PRAGMA table_info(binding)"
+            ).fetchall()
+            row_columns = connection.execute(
+                "PRAGMA table_info(derived_row)"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("derived rows schema is unreadable") from exc
+        if objects != [
+            ("table", "binding", "binding"),
+            ("table", "derived_row", "derived_row"),
+        ]:
+            raise DerivedCheckpointError("derived rows schema objects mismatch")
+        if [
+            (row[1], row[2], row[3], row[5]) for row in binding_columns
+        ] != [
+            ("singleton", "INTEGER", 0, 1),
+            ("manifest", "BLOB", 1, 0),
+        ]:
+            raise DerivedCheckpointError("derived rows binding schema mismatch")
+        if [(row[1], row[2], row[3], row[5]) for row in row_columns] != [
+            ("section", "TEXT", 1, 1),
+            ("key", "TEXT", 1, 2),
+            ("payload", "BLOB", 1, 0),
+            ("payload_digest", "TEXT", 1, 0),
+        ]:
+            raise DerivedCheckpointError("derived rows row schema mismatch")
+
+    @staticmethod
+    def _read_derived_rows_manifest(
+        connection: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        EventStore._validate_derived_rows_schema(connection)
+        try:
+            rows = connection.execute(
+                "SELECT singleton, manifest FROM binding"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("derived rows binding is unreadable") from exc
+        if (
+            len(rows) != 1
+            or rows[0][0] != 1
+            or not isinstance(rows[0][1], bytes)
+        ):
+            raise DerivedCheckpointError("derived rows binding is missing")
+        payload = rows[0][1]
+        try:
+            value = parse_json_strict(
+                payload,
+                limits=_DERIVED_ROWS_MANIFEST_LIMITS,
+            )
+            if canonical_bytes(
+                value,
+                limits=_DERIVED_ROWS_MANIFEST_LIMITS,
+            ) != payload:
+                raise DerivedCheckpointError(
+                    "derived rows manifest is not canonical"
+                )
+        except CanonicalError as exc:
+            raise DerivedCheckpointError(
+                "derived rows manifest is invalid"
+            ) from exc
+        if not isinstance(value, dict):
+            raise DerivedCheckpointError("derived rows manifest must be an object")
+        return value
+
+    def _validate_derived_rows_manifest_locked(
+        self,
+        name: str,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        value = copy.deepcopy(dict(manifest))
+        required = {
+            "record_type",
+            "version",
+            "authoritative",
+            "name",
+            "activation_digest",
+            "implementation_closure_digest",
+            "head",
+            "batch_count",
+            "event_count",
+            "event_semantic_digest",
+            "authority_state_binding_digest",
+            "checkpoint_count",
+            "row_count",
+            "row_transcript_digest",
+            "checkpoint_digest",
+        }
+        if set(value) != required or value.get("record_type") != "DerivedRowsCheckpoint":
+            raise DerivedCheckpointError("derived rows manifest fields mismatch")
+        supplied_digest = value.pop("checkpoint_digest")
+        if (
+            not isinstance(supplied_digest, str)
+            or not _DIGEST.fullmatch(supplied_digest)
+            or digest_value(value) != supplied_digest
+        ):
+            raise DerivedCheckpointError("derived rows manifest digest mismatch")
+        value["checkpoint_digest"] = supplied_digest
+        if (
+            value["version"] != _DERIVED_ROWS_INDEX_VERSION
+            or value["authoritative"] is not False
+            or value["name"] != name
+            or value["activation_digest"] != self.active_activation_digest
+            or value["implementation_closure_digest"]
+            != self.implementation_closure_digest
+        ):
+            raise DerivedCheckpointError("derived rows manifest binding mismatch")
+        head = self._validate_head_value(value["head"])
+        value["head"] = head
+        current = self._head
+        if head["sequence"] > current["sequence"]:
+            raise DerivedCheckpointError("derived rows checkpoint is ahead of HEAD")
+        if head["sequence"] == current["sequence"] and head != current:
+            raise DerivedCheckpointError(
+                "derived rows checkpoint is bound to another HEAD"
+            )
+        if head["sequence"] == 0:
+            event_count = 0
+            event_semantic_digest = self.policy.genesis_event_semantic_digest
+            state_binding_digest = self._genesis_state_binding_digest
+        else:
+            path = self._journal_path_for_sequence(head["sequence"])
+            envelope = self._read_envelope(path)
+            batch = envelope["batch"]
+            batch_digest = self._validate_envelope(
+                envelope,
+                expected_sequence=head["sequence"],
+                expected_previous_digest=batch.get("previous_digest"),
+                validate_runtime=False,
+            )
+            if (
+                batch["batch_id"] != head["batch_id"]
+                or batch_digest != head["batch_digest"]
+            ):
+                raise DerivedCheckpointError(
+                    "derived rows checkpoint HEAD differs from journal"
+                )
+            event_count = batch["cumulative_event_count"]
+            event_semantic_digest = batch["event_semantic_digest"]
+            state_binding_digest = batch["state_binding_digest"]
+        for field in ("batch_count", "event_count", "checkpoint_count", "row_count"):
+            item = value[field]
+            if (
+                not isinstance(item, int)
+                or isinstance(item, bool)
+                or item < (1 if field == "checkpoint_count" else 0)
+            ):
+                raise DerivedCheckpointError(
+                    f"derived rows manifest {field} is invalid"
+                )
+        if (
+            value["batch_count"] != head["sequence"]
+            or value["event_count"] != event_count
+            or value["event_semantic_digest"] != event_semantic_digest
+            or value["authority_state_binding_digest"] != state_binding_digest
+            or not isinstance(value["row_transcript_digest"], str)
+            or not _DIGEST.fullmatch(value["row_transcript_digest"])
+        ):
+            raise DerivedCheckpointError("derived rows manifest content is stale")
+        return value
+
+    @staticmethod
+    def _normalize_derived_row(row: Mapping[str, Any]) -> tuple[dict[str, Any], bytes, str]:
+        if not isinstance(row, Mapping):
+            raise DerivedCheckpointError("derived row must be an object")
+        try:
+            payload = canonical_bytes(dict(row), limits=_DERIVED_STATE_LIMITS)
+            normalized = parse_json_strict(payload, limits=_DERIVED_STATE_LIMITS)
+        except (CanonicalError, TypeError, ValueError) as exc:
+            raise DerivedCheckpointError(
+                f"derived row is not bounded canonical JSON: {exc}"
+            ) from exc
+        if not isinstance(normalized, dict) or set(normalized) != {
+            "section",
+            "key",
+            "value",
+        }:
+            raise DerivedCheckpointError("derived row fields mismatch")
+        section = normalized["section"]
+        key = normalized["key"]
+        if (
+            not isinstance(section, str)
+            or not _DERIVED_ROW_ID.fullmatch(section)
+            or not isinstance(key, str)
+            or not _DERIVED_ROW_ID.fullmatch(key)
+        ):
+            raise DerivedCheckpointError("derived row identity is invalid")
+        _reject_reserved_secret_fields(
+            normalized["value"],
+            surface="derived row checkpoint",
+            error_type=DerivedCheckpointError,
+        )
+        return normalized, payload, hashlib.sha256(payload).hexdigest()
+
+    def write_derived_rows(
+        self,
+        name: str,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        expected_head: Mapping[str, Any],
+        checkpoint_count: int,
+        crash_hook: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace a normalized disposable row checkpoint.
+
+        The SQLite lifecycle is independent of the sparse-Merkle index.  Each
+        row retains the 16 MiB record ceiling while the database may contain a
+        project-sized number of rows.  The manifest binds the exact journal
+        HEAD and an ordered transcript of every canonical row.
+        """
+
+        path = self._derived_rows_path(name)
+        checked_head = self._validate_head_value(dict(expected_head))
+        if (
+            not isinstance(checkpoint_count, int)
+            or isinstance(checkpoint_count, bool)
+            or checkpoint_count < 1
+        ):
+            raise EventStoreError("derived rows checkpoint_count must be positive")
+        try:
+            row_iterator = iter(rows)
+        except TypeError as exc:
+            raise EventStoreError("derived rows must be iterable") from exc
+        with _WriterLock(self.lock_path, self.lock_timeout):
+            self._refresh_from_disk_locked()
+            if checked_head != self._head:
+                raise DerivedCheckpointError(
+                    "derived rows were computed for a stale authoritative HEAD"
+                )
+            state_binding_digest = self._journal_state_binding_for_head_locked(
+                checked_head
+            )
+            if state_binding_digest is None:
+                raise DerivedCheckpointError(
+                    "authoritative HEAD has no semantic state binding"
+                )
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.stem}-",
+                suffix=".tmp",
+                dir=_native_os_path(self.derived_rows_root),
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(
+                    _native_os_path(temporary),
+                    timeout=self.lock_timeout,
+                    isolation_level=None,
+                )
+                connection.execute(
+                    f"PRAGMA busy_timeout={int(self.lock_timeout * 1000)}"
+                )
+                connection.execute("PRAGMA journal_mode=DELETE")
+                connection.execute("PRAGMA synchronous=FULL")
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "CREATE TABLE binding ("
+                    "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+                    "manifest BLOB NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE TABLE derived_row ("
+                    "section TEXT NOT NULL, key TEXT NOT NULL, "
+                    "payload BLOB NOT NULL, payload_digest TEXT NOT NULL, "
+                    "PRIMARY KEY(section, key)) WITHOUT ROWID"
+                )
+                previous_identity: tuple[str, str] | None = None
+                transcript = _DERIVED_ROWS_TRANSCRIPT_GENESIS
+                row_count = 0
+                pending_rows: list[tuple[str, str, bytes, str]] = []
+                for row in row_iterator:
+                    normalized, payload, payload_digest = self._normalize_derived_row(
+                        row
+                    )
+                    identity = (normalized["section"], normalized["key"])
+                    if previous_identity is not None and identity <= previous_identity:
+                        raise DerivedCheckpointError(
+                            "derived rows must use unique canonical order"
+                        )
+                    previous_identity = identity
+                    transcript = _extend_derived_rows_transcript(
+                        transcript,
+                        section=identity[0],
+                        key=identity[1],
+                        payload_digest=payload_digest,
+                    )
+                    pending_rows.append(
+                        (identity[0], identity[1], payload, payload_digest)
+                    )
+                    if len(pending_rows) >= _DERIVED_ROWS_INSERT_BATCH:
+                        connection.executemany(
+                            "INSERT INTO derived_row(section, key, payload, payload_digest) "
+                            "VALUES (?, ?, ?, ?)",
+                            pending_rows,
+                        )
+                        pending_rows.clear()
+                    row_count += 1
+                if pending_rows:
+                    connection.executemany(
+                        "INSERT INTO derived_row(section, key, payload, payload_digest) "
+                        "VALUES (?, ?, ?, ?)",
+                        pending_rows,
+                    )
+                manifest = {
+                    "record_type": "DerivedRowsCheckpoint",
+                    "version": _DERIVED_ROWS_INDEX_VERSION,
+                    "authoritative": False,
+                    "name": name,
+                    "activation_digest": self.active_activation_digest,
+                    "implementation_closure_digest": self.implementation_closure_digest,
+                    "head": copy.deepcopy(checked_head),
+                    "batch_count": self._batch_count,
+                    "event_count": self._event_count,
+                    "event_semantic_digest": self._semantic_digest,
+                    "authority_state_binding_digest": state_binding_digest,
+                    "checkpoint_count": checkpoint_count,
+                    "row_count": row_count,
+                    "row_transcript_digest": transcript,
+                }
+                manifest["checkpoint_digest"] = digest_value(manifest)
+                connection.execute(
+                    "INSERT INTO binding(singleton, manifest) VALUES (1, ?)",
+                    (
+                        canonical_bytes(
+                            manifest,
+                            limits=_DERIVED_ROWS_MANIFEST_LIMITS,
+                        ),
+                    ),
+                )
+                connection.execute("COMMIT")
+                connection.close()
+                connection = None
+                with open(_native_os_path(temporary), "rb+") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._crash(crash_hook, "before_derived_rows_checkpoint")
+                _replace_durable(temporary, path)
+                self._crash(crash_hook, "after_derived_rows_checkpoint")
+                self._derived_rows_issues[name] = None
+                return copy.deepcopy(manifest)
+            except sqlite3.Error as exc:
+                if connection is not None:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise DerivedCheckpointError(
+                    "derived rows checkpoint write failed"
+                ) from exc
+            finally:
+                if connection is not None:
+                    connection.close()
+                _unlink(temporary, missing_ok=True)
+                _unlink(Path(str(temporary) + "-journal"), missing_ok=True)
+
+    @staticmethod
+    def _decode_derived_row(
+        section: Any,
+        key: Any,
+        payload: Any,
+        payload_digest: Any,
+    ) -> tuple[dict[str, Any], str]:
+        if (
+            not isinstance(section, str)
+            or not _DERIVED_ROW_ID.fullmatch(section)
+            or not isinstance(key, str)
+            or not _DERIVED_ROW_ID.fullmatch(key)
+            or not isinstance(payload, bytes)
+            or not isinstance(payload_digest, str)
+            or not _DIGEST.fullmatch(payload_digest)
+            or hashlib.sha256(payload).hexdigest() != payload_digest
+        ):
+            raise DerivedCheckpointError("derived row storage value is invalid")
+        try:
+            normalized = parse_json_strict(payload, limits=_DERIVED_STATE_LIMITS)
+            if canonical_bytes(
+                normalized,
+                limits=_DERIVED_STATE_LIMITS,
+            ) != payload:
+                raise DerivedCheckpointError("derived row payload is not canonical")
+        except CanonicalError as exc:
+            raise DerivedCheckpointError("derived row payload is invalid") from exc
+        if (
+            not isinstance(normalized, dict)
+            or set(normalized) != {"section", "key", "value"}
+            or normalized["section"] != section
+            or normalized["key"] != key
+        ):
+            raise DerivedCheckpointError("derived row payload identity mismatch")
+        _reject_reserved_secret_fields(
+            normalized["value"],
+            surface="derived row checkpoint",
+            error_type=DerivedCheckpointError,
+        )
+        return normalized, payload_digest
+
+    def _scan_derived_rows_locked(
+        self,
+        connection: sqlite3.Connection,
+        manifest: Mapping[str, Any],
+    ) -> None:
+        transcript = _DERIVED_ROWS_TRANSCRIPT_GENESIS
+        row_count = 0
+        previous_identity: tuple[str, str] | None = None
+        try:
+            cursor = connection.execute(
+                "SELECT section, key, payload, payload_digest "
+                "FROM derived_row ORDER BY section, key"
+            )
+            for section, key, payload, payload_digest in cursor:
+                _normalized, checked_digest = self._decode_derived_row(
+                    section,
+                    key,
+                    payload,
+                    payload_digest,
+                )
+                identity = (section, key)
+                if previous_identity is not None and identity <= previous_identity:
+                    raise DerivedCheckpointError(
+                        "derived row storage order is not canonical"
+                    )
+                previous_identity = identity
+                transcript = _extend_derived_rows_transcript(
+                    transcript,
+                    section=section,
+                    key=key,
+                    payload_digest=checked_digest,
+                )
+                row_count += 1
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("derived rows are unreadable") from exc
+        if (
+            row_count != manifest["row_count"]
+            or transcript != manifest["row_transcript_digest"]
+        ):
+            raise DerivedCheckpointError(
+                "derived rows differ from their bound transcript"
+            )
+
+    def consume_derived_rows(
+        self,
+        name: str,
+        consume_row: Callable[[dict[str, Any]], Any],
+    ) -> dict[str, Any] | None:
+        """Validate one row database, then consume every row from one snapshot.
+
+        No row reaches the callback until schema, exact journal binding, row
+        count, per-row canonical bytes, and the complete ordered transcript
+        have passed.  The callback must not call back into this EventStore;
+        the writer lock and SQLite read transaction remain held so the second
+        pass cannot observe a different file or HEAD.
+        """
+
+        path = self._derived_rows_path(name)
+        if not callable(consume_row):
+            raise EventStoreError("derived row consumer must be callable")
+        if not _path_exists(path):
+            self._derived_rows_issues[name] = "derived rows checkpoint is missing"
+            return None
+        with _WriterLock(self.lock_path, self.lock_timeout):
+            self._refresh_from_disk_locked()
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(
+                    _native_os_path(path),
+                    timeout=self.lock_timeout,
+                    isolation_level=None,
+                )
+                connection.execute(
+                    f"PRAGMA busy_timeout={int(self.lock_timeout * 1000)}"
+                )
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("BEGIN")
+                manifest = self._validate_derived_rows_manifest_locked(
+                    name,
+                    self._read_derived_rows_manifest(connection),
+                )
+                self._scan_derived_rows_locked(connection, manifest)
+            except (
+                CanonicalError,
+                DerivedCheckpointError,
+                JournalCorruption,
+                OSError,
+                sqlite3.Error,
+            ) as exc:
+                self._derived_rows_issues[name] = f"{type(exc).__name__}: {exc}"
+                if connection is not None:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    connection.close()
+                return None
+
+            # The validation pass and callback pass share this one SQLite read
+            # transaction.  Callback failures are semantic/consumer failures,
+            # not silently reclassified as a storage-cache miss.
+            assert connection is not None
+            try:
+                cursor = connection.execute(
+                    "SELECT section, key, payload, payload_digest "
+                    "FROM derived_row ORDER BY section, key"
+                )
+                for section, key, payload, payload_digest in cursor:
+                    normalized, _checked_digest = self._decode_derived_row(
+                        section,
+                        key,
+                        payload,
+                        payload_digest,
+                    )
+                    consume_row(copy.deepcopy(normalized))
+                connection.execute("COMMIT")
+            finally:
+                connection.close()
+            self._derived_rows_issues[name] = None
+            return copy.deepcopy(manifest)
+
+    def derived_rows_tail_status(self, name: str) -> dict[str, Any]:
+        """Measure the journal tail after a normalized row checkpoint."""
+
+        path = self._derived_rows_path(name)
+        checked_batch_threshold = self.policy.derived_tail_batch_threshold
+        checked_byte_threshold = self.policy.derived_tail_byte_threshold
+        with _WriterLock(self.lock_path, self.lock_timeout):
+            self._refresh_from_disk_locked()
+            manifest: dict[str, Any] | None = None
+            issue: str | None = None
+            connection: sqlite3.Connection | None = None
+            if _path_exists(path):
+                try:
+                    connection = sqlite3.connect(
+                        _native_os_path(path),
+                        timeout=self.lock_timeout,
+                        isolation_level=None,
+                    )
+                    connection.execute("PRAGMA query_only=ON")
+                    connection.execute("BEGIN")
+                    manifest = self._validate_derived_rows_manifest_locked(
+                        name,
+                        self._read_derived_rows_manifest(connection),
+                    )
+                    connection.execute("COMMIT")
+                except (
+                    CanonicalError,
+                    DerivedCheckpointError,
+                    JournalCorruption,
+                    OSError,
+                    sqlite3.Error,
+                ) as exc:
+                    issue = f"{type(exc).__name__}: {exc}"
+                    if connection is not None:
+                        try:
+                            connection.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                finally:
+                    if connection is not None:
+                        connection.close()
+            else:
+                issue = "derived rows checkpoint is missing"
+            checkpoint_sequence = (
+                0 if manifest is None else manifest["head"]["sequence"]
+            )
+            checkpoint_count = (
+                0 if manifest is None else manifest["checkpoint_count"]
+            )
+            tail_bytes = 0
+            for sequence in range(
+                checkpoint_sequence + 1,
+                self._head["sequence"] + 1,
+            ):
+                try:
+                    tail_bytes += os.stat(
+                        _native_os_path(self._journal_path_for_sequence(sequence))
+                    ).st_size
+                except OSError as exc:
+                    raise JournalCorruption(
+                        "derived rows tail journal file is unavailable"
+                    ) from exc
+            tail_batches = self._head["sequence"] - checkpoint_sequence
+            self._derived_rows_issues[name] = issue
+            return {
+                "record_type": "DerivedRowsTailStatus",
+                "authoritative": False,
+                "name": name,
+                "head": self.head(),
+                "checkpoint_head_sequence": checkpoint_sequence,
+                "checkpoint_count": checkpoint_count,
+                "tail_batches": tail_batches,
+                "tail_bytes": tail_bytes,
+                "batch_threshold": checked_batch_threshold,
+                "byte_threshold": checked_byte_threshold,
+                "compaction_due": manifest is None
+                or tail_batches >= checked_batch_threshold
+                or tail_bytes >= checked_byte_threshold,
+                "checkpoint_issue": issue,
+            }
+
+    def derived_rows_issue(self, name: str) -> str | None:
+        self._derived_rows_path(name)
+        return self._derived_rows_issues.get(name)
+
+    def derived_rows_storage_bytes(self, name: str) -> int:
+        """Measure the current disposable row database without granting credit."""
+
+        path = self._derived_rows_path(name)
+        try:
+            if _is_symlink(path) or not os.path.isfile(_native_os_path(path)):
+                return 0
+            return int(os.stat(_native_os_path(path), follow_symlinks=False).st_size)
+        except OSError:
+            return 0
 
     def derived_tail_status(self, name: str) -> dict[str, Any]:
         """Measure the event tail after a verified disposable checkpoint."""
@@ -4714,10 +6777,15 @@ class EventStore:
 
     def _read_envelope(self, path: Path) -> dict[str, Any]:
         try:
-            raw = _read_bytes(path)
+            history = self._windows_event_history
+            raw = (
+                history.read_held_bytes(path)
+                if history is not None
+                else _read_bytes(path)
+            )
             limits = ParseLimits(max_bytes=self.policy.max_envelope_bytes)
             value = parse_json_strict(raw, limits=limits)
-        except (OSError, CanonicalError) as exc:
+        except (OSError, CanonicalError, WindowsEventHistoryError) as exc:
             raise JournalCorruption(f"journal envelope is unreadable: {path.name}") from exc
         if canonical_bytes(value, limits=limits) != raw:
             raise JournalCorruption(f"journal envelope is not canonical: {path.name}")

@@ -1235,8 +1235,11 @@ def _verify_authority_owner(authority: dict[str, Any]) -> None:
             )
         )
         or event_contract["runtime_overlay_compaction_depth"] > 1024
-        or event_contract["events_per_batch_max"] != 20
-        or event_contract["state_binding_updates_per_batch_max"] != 20
+        or event_contract["command_bytes_max"] != 1048576
+        or event_contract["state_binding_bytes_max"] != 1048576
+        or event_contract["envelope_bytes_max"] != 2097152
+        or event_contract["events_per_batch_max"] != 128
+        or event_contract["state_binding_updates_per_batch_max"] != 128
         or event_contract["primary_event_count_per_command"] != 1
         or event_contract["requested_scope_items_max_source"]
         != "scope_contract.requested_scope_items_max"
@@ -3419,6 +3422,23 @@ def _compile_projection(
         "required": list(checkpoint_common),
         "type": "object",
     }
+    checkpoint_unavailable = {
+        "additionalProperties": False,
+        "properties": {
+            **deepcopy(checkpoint_common),
+            "written": {"const": False},
+            "status": {"const": "unavailable"},
+            "issue": {"const": "derived-checkpoint-unavailable"},
+            "error_type": {"minLength": 1, "maxLength": 128, "type": "string"},
+        },
+        "required": [
+            *checkpoint_common,
+            "status",
+            "issue",
+            "error_type",
+        ],
+        "type": "object",
+    }
     checkpoint_written = {
         "additionalProperties": False,
         "properties": {
@@ -3443,7 +3463,11 @@ def _compile_projection(
             "head": deepcopy(head_shape),
             "runtime_checkpoint_written": {"type": "boolean"},
             "runtime_checkpoint": {
-                "oneOf": [checkpoint_not_written, checkpoint_written]
+                "oneOf": [
+                    checkpoint_not_written,
+                    checkpoint_written,
+                    checkpoint_unavailable,
+                ]
             },
             "runtime_checkpoint_authoritative": {"const": False},
         },
@@ -3586,7 +3610,11 @@ def _compile_projection(
                 ]
             },
             "runtime_checkpoint": {
-                "oneOf": [checkpoint_not_written, checkpoint_written]
+                "oneOf": [
+                    checkpoint_not_written,
+                    checkpoint_written,
+                    checkpoint_unavailable,
+                ]
             },
             "physical_payload_bytes": deepcopy(nonnegative_integer),
             "bytes_per_changed_record": deepcopy(nonnegative_number),

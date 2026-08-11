@@ -25,6 +25,7 @@ from .init_profiles import (
     InitProfileError,
     load_init_profile,
     negotiate_language_capabilities,
+    resolve_init_experience,
     resolve_init_profile,
 )
 from .resources import bundle_root
@@ -61,6 +62,26 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--verification", choices=("accept", "decline", "custom"))
     init.add_argument("--documentation-tool", action="append", default=[])
     init.add_argument("--verification-tool", action="append", default=[])
+    init.add_argument(
+        "--init-experience",
+        choices=("minimal", "expert"),
+        help="guided capability UX; omitted defaults to deterministic minimal unless legacy selection flags are supplied",
+    )
+    init.add_argument(
+        "--capability-language",
+        action="append",
+        default=[],
+        metavar="LANGUAGE_ID",
+        help="repeat one registered generic language ID for --init-experience expert",
+    )
+    init.add_argument(
+        "--capability-selections",
+        "--capability-selection-json",
+        dest="capability_selections",
+        type=Path,
+        metavar="PATH",
+        help="strict JSON object of complete registered selections for --init-experience expert",
+    )
     init.add_argument("--max-preflight-files", type=int, default=PREFLIGHT_FILE_ITEMS_MAX)
     init.add_argument("--apply", "--yes", dest="apply", action="store_true", help="apply the resolved plan")
     init.add_argument("--plan-only", action="store_true", help="never apply the resolved plan")
@@ -191,9 +212,23 @@ def _expert_init_requested(args: argparse.Namespace) -> bool:
         args.authority_plan,
     )
     present = [value is not None for value in values]
-    if any(present) and not all(present):
-        raise ServiceError("expert init requires all standard/preset/project/standards/technologies/licenses/authority paths")
-    return all(present)
+    complete = all(present)
+    if any(present) and not complete:
+        raise ServiceError(
+            "expert init requires all standard/preset/project/standards/technologies/licenses/authority paths"
+        )
+    if not complete and any(
+        (
+            args.activation_proofs is not None,
+            args.emit_plan is not None,
+            args.review_plan,
+            args.dry_run,
+        )
+    ):
+        raise ServiceError(
+            "--activation-proofs, --emit-plan, --review-plan, and --dry-run require complete hidden expert plan inputs"
+        )
+    return complete
 
 
 def _run_expert_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
@@ -235,7 +270,187 @@ def _run_expert_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     return ProminService(root).initialize(request)
 
 
+_REGISTERED_GENERIC_LANGUAGE_ORDER = (
+    "c",
+    "cpp",
+    "csharp",
+    "java",
+    "javascript",
+    "python",
+)
+_DETECTED_TECHNOLOGY_GENERIC_LANGUAGE_IDS: Mapping[str, tuple[str, ...]] = {
+    # ``detect_technologies`` deliberately reports the C family as ``cpp``;
+    # retaining both registered IDs is a deterministic compatibility mapping,
+    # not a semantic decision or a host observation.
+    "cpp": ("c", "cpp"),
+    "cmake": ("c", "cpp"),
+    "dotnet": ("csharp",),
+    "java": ("java",),
+    "javascript": ("javascript",),
+    "typescript": ("javascript",),
+    "node": ("javascript",),
+    "python": ("python",),
+}
+
+
+def _legacy_capability_flags_present(args: argparse.Namespace) -> bool:
+    return any(
+        (
+            args.documentation is not None,
+            args.verification is not None,
+            bool(args.documentation_tool),
+            bool(args.verification_tool),
+        )
+    )
+
+
+def _validate_legacy_capability_flags(args: argparse.Namespace) -> None:
+    """Reject legacy tool flags that would otherwise be silently ignored."""
+
+    if args.documentation_tool and args.documentation != "custom":
+        raise ServiceError("--documentation-tool requires --documentation custom")
+    if args.verification_tool and args.verification != "custom":
+        raise ServiceError("--verification-tool requires --verification custom")
+    if args.documentation == "custom" and not args.documentation_tool:
+        raise ServiceError("--documentation custom requires at least one --documentation-tool")
+    if args.verification == "custom" and not args.verification_tool:
+        raise ServiceError("--verification custom requires at least one --verification-tool")
+
+
+def _guided_capability_mode(args: argparse.Namespace) -> str:
+    """Choose one public selection route with no implicit cross-route merge."""
+
+    legacy_flags = _legacy_capability_flags_present(args)
+    expert_controls = bool(args.capability_language) or args.capability_selections is not None
+    if legacy_flags:
+        _validate_legacy_capability_flags(args)
+
+    if args.init_experience == "expert":
+        if legacy_flags:
+            raise ServiceError(
+                "--init-experience expert cannot be combined with legacy --documentation/--verification selections"
+            )
+        if not args.capability_language:
+            raise ServiceError("--init-experience expert requires at least one --capability-language")
+        if args.capability_selections is None:
+            raise ServiceError("--init-experience expert requires --capability-selections PATH")
+        return "expert"
+
+    if expert_controls:
+        raise ServiceError(
+            "--capability-language and --capability-selections require --init-experience expert"
+        )
+    if args.init_experience == "minimal":
+        if legacy_flags:
+            raise ServiceError(
+                "--init-experience minimal cannot be combined with legacy --documentation/--verification selections"
+            )
+        return "minimal"
+    return "legacy" if legacy_flags else "minimal"
+
+
+def _registered_languages_from_detected_technologies(
+    plan: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Map only deterministic technology facts to registered generic IDs."""
+
+    detected = {
+        str(item.get("technology", "")).casefold()
+        for item in plan.get("detected_technologies", [])
+        if isinstance(item, Mapping)
+    }
+    selected = {
+        language
+        for technology in detected
+        for language in _DETECTED_TECHNOLOGY_GENERIC_LANGUAGE_IDS.get(technology, ())
+    }
+    return tuple(
+        language
+        for language in _REGISTERED_GENERIC_LANGUAGE_ORDER
+        if language in selected
+    )
+
+
+def _load_expert_capability_selections(path: Path) -> dict[str, Any]:
+    loaded = load_json_strict(path, root=path.parent)
+    if not isinstance(loaded, Mapping):
+        raise ServiceError("--capability-selections must contain one JSON object keyed by language ID")
+    return dict(loaded)
+
+
+def _compact_experience_capability_selection(
+    resolved_experience: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind an H1 digest through the existing strict Core selection shape.
+
+    The canonical ProjectInit schema intentionally owns only the compact
+    selection record.  The richer public experience result remains available
+    to the caller, while its digest binds every registered reference selected
+    before ``apply_plan``.  Its status remains ``UNAVAILABLE`` until a separate
+    host observation; generic reference selection is not tool availability.
+    """
+
+    profile = resolved_experience["profile"]
+    if not isinstance(profile, Mapping):  # pragma: no cover - resolver owns this invariant
+        raise InitProfileError("resolved init experience profile is invalid")
+    experience = resolved_experience["experience"]
+    return {
+        "status": "UNAVAILABLE",
+        "selection_source": "cli" if experience == "expert" else "default",
+        "profile_digest": profile["profile_digest"],
+        "selection_digest": resolved_experience["experience_digest"],
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+    }
+
+
+def _legacy_capability_selection(
+    args: argparse.Namespace,
+    profile: Mapping[str, Any],
+    resolved_init_profile: Mapping[str, Any],
+    languages: tuple[str, ...],
+) -> dict[str, Any]:
+    selection = resolved_init_profile["effective"]["selection"]
+    if (
+        selection["documentationChoice"] == "ask"
+        or selection["verificationChoice"] == "ask"
+    ):
+        return {
+            "status": "PENDING_OWNER_SELECTION",
+            "selection_source": resolved_init_profile["selection_source"],
+            "profile_digest": resolved_init_profile["profile_digest"],
+            "documentation_choice": selection["documentationChoice"],
+            "verification_choice": selection["verificationChoice"],
+            "authority_granted": False,
+            "pass_credit": False,
+            "acceptance_pass": False,
+        }
+    language_selection = negotiate_language_capabilities(
+        profile["language_capability_profiles"],
+        languages=languages,
+        documentation_choice=selection["documentationChoice"],
+        verification_choice=selection["verificationChoice"],
+        selection_source=resolved_init_profile["selection_source"],
+        custom_documentation=tuple(args.documentation_tool),
+        custom_verification=tuple(args.verification_tool),
+    )
+    return {
+        "status": language_selection["status"],
+        "selection_source": resolved_init_profile["selection_source"],
+        "profile_digest": resolved_init_profile["profile_digest"],
+        "selection_digest": language_selection["selection_digest"],
+        "documentation_choice": selection["documentationChoice"],
+        "verification_choice": selection["verificationChoice"],
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+    }
+
+
 def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    capability_mode = _guided_capability_mode(args)
+    resolved_experience: dict[str, Any] | None = None
     brief = None
     if args.brief is not None:
         loaded = load_json_strict(args.brief, root=args.brief.parent)
@@ -256,53 +471,46 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         cli_override: dict[str, Any] = {}
         if args.autonomy is not None:
             cli_override["autonomy"] = args.autonomy
-        requested_documentation = args.documentation or "ask"
-        requested_verification = args.verification or "ask"
-        if args.documentation is not None or args.verification is not None:
+        if capability_mode == "legacy":
+            requested_documentation = args.documentation or "ask"
+            requested_verification = args.verification or "ask"
             cli_override["selection"] = {
                 "documentationChoice": requested_documentation,
                 "verificationChoice": requested_verification,
                 "customProfile": "cli-custom" if "custom" in {requested_documentation, requested_verification} else None,
             }
-        resolved_init_profile = resolve_init_profile(
-            profile,
-            cli_override=cli_override or None,
-        )
-        tech_ids = {str(item.get("technology", "")) for item in plan.get("detected_technologies", []) if isinstance(item, Mapping)}
-        languages = [language for language in ("c", "cpp") if {"cpp", "cmake"} & tech_ids]
-        selection = resolved_init_profile["effective"]["selection"]
-        if selection["documentationChoice"] == "ask" or selection["verificationChoice"] == "ask":
-            compact_selection: dict[str, Any] = {
-                "status": "PENDING_OWNER_SELECTION",
-                "selection_source": resolved_init_profile["selection_source"],
-                "profile_digest": resolved_init_profile["profile_digest"],
-                "documentation_choice": selection["documentationChoice"],
-                "verification_choice": selection["verificationChoice"],
-                "authority_granted": False,
-                "pass_credit": False,
-                "acceptance_pass": False,
-            }
-        else:
-            language_selection = negotiate_language_capabilities(
-                profile["language_capability_profiles"],
-                languages=languages,
-                documentation_choice=selection["documentationChoice"],
-                verification_choice=selection["verificationChoice"],
-                selection_source=resolved_init_profile["selection_source"],
-                custom_documentation=tuple(args.documentation_tool),
-                custom_verification=tuple(args.verification_tool),
+        if capability_mode in {"minimal", "expert"}:
+            languages = (
+                _registered_languages_from_detected_technologies(plan)
+                if capability_mode == "minimal"
+                else tuple(args.capability_language)
             )
-            compact_selection = {
-                "status": language_selection["status"],
-                "selection_source": resolved_init_profile["selection_source"],
-                "profile_digest": resolved_init_profile["profile_digest"],
-                "selection_digest": language_selection["selection_digest"],
-                "documentation_choice": selection["documentationChoice"],
-                "verification_choice": selection["verificationChoice"],
-                "authority_granted": False,
-                "pass_credit": False,
-                "acceptance_pass": False,
-            }
+            resolved_experience = resolve_init_experience(
+                profile,
+                experience=capability_mode,
+                languages=languages,
+                cli_override=cli_override or None,
+                expert_selections=(
+                    _load_expert_capability_selections(args.capability_selections)
+                    if capability_mode == "expert"
+                    else None
+                ),
+                expert_source="cli" if capability_mode == "expert" else None,
+            )
+            compact_selection = _compact_experience_capability_selection(
+                resolved_experience
+            )
+        else:
+            resolved_init_profile = resolve_init_profile(
+                profile,
+                cli_override=cli_override or None,
+            )
+            compact_selection = _legacy_capability_selection(
+                args,
+                profile,
+                resolved_init_profile,
+                _registered_languages_from_detected_technologies(plan),
+            )
         plan = bind_init_capability_selection(plan, compact_selection)
     except InitProfileError as exc:
         raise ServiceError(f"init capability selection is invalid: {exc}") from exc
@@ -322,6 +530,8 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         result = apply_plan(root, plan)
         if emitted is not None:
             result["expert_config"] = emitted
+        if resolved_experience is not None:
+            result["init_experience"] = resolved_experience
         return result
     return {
         "record_type": "GuidedInitReview",
@@ -330,13 +540,47 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         "apply_command": "promin init --yes",
         "clarification": "Repeat init with --goal, --profile, --autonomy or edit emitted expert config.",
         "expert_config": emitted,
+        "init_experience": resolved_experience,
         "authority": False,
         "pass_credit": False,
+        "acceptance_pass": False,
     }
 
 
 def _is_initialized(root: Path) -> bool:
     return (root / ".promin" / "init" / "activation.json").is_file()
+
+
+def _reject_guided_options_for_full_expert_plan(args: argparse.Namespace) -> None:
+    """Keep the hidden complete-plan route exclusive instead of ignoring input."""
+
+    conflicting_options = [
+        option
+        for option, present in (
+            ("--goal", args.goal is not None),
+            ("--brief", args.brief is not None),
+            ("--autonomy", args.autonomy is not None),
+            ("--language", args.language is not None),
+            ("--profile", bool(args.profile)),
+            ("--documentation", args.documentation is not None),
+            ("--verification", args.verification is not None),
+            ("--documentation-tool", bool(args.documentation_tool)),
+            ("--verification-tool", bool(args.verification_tool)),
+            ("--init-experience", args.init_experience is not None),
+            ("--capability-language", bool(args.capability_language)),
+            ("--capability-selections", args.capability_selections is not None),
+            ("--apply/--yes", args.apply),
+            ("--plan-only", args.plan_only),
+            ("--plan-out", args.plan_out is not None),
+            ("--emit-expert-config", args.emit_expert_config is not None),
+        )
+        if present
+    ]
+    if conflicting_options:
+        raise ServiceError(
+            "complete expert plan input cannot be combined with guided init options: "
+            + ", ".join(conflicting_options)
+        )
 
 
 def _require_initialized(root: Path) -> None:
@@ -409,7 +653,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     timer = OperationTimer()
     try:
         if args.workflow == "init":
-            result = _run_expert_init(args, root) if _expert_init_requested(args) else _guided_init(args, root)
+            if args.apply and args.plan_only:
+                raise ServiceError("--yes cannot be combined with --plan-only")
+            if _expert_init_requested(args):
+                _reject_guided_options_for_full_expert_plan(args)
+                result = _run_expert_init(args, root)
+            else:
+                result = _guided_init(args, root)
         elif args.workflow == "doctor":
             if args.checklist:
                 result = run_system_check(root)

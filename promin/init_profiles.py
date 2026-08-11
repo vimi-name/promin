@@ -527,3 +527,341 @@ class ToolOutcome:
             "acceptance_pass": False,
             "authority_granted": False,
         }
+
+
+# H1 deliberately keeps these as generic, portable reference identifiers.  A
+# selected identifier is not a host probe, executable path, installed package,
+# semantic classification, or authority grant.
+INIT_EXPERIENCE_SCHEMA = "promin.init-experience.v1"
+LANGUAGE_REFERENCE_SELECTION_SCHEMA = "promin.language-reference-selection.v1"
+
+_INIT_EXPERIENCES = frozenset({"minimal", "expert"})
+_EXPERT_SELECTION_SOURCES = frozenset({"owner", "cli", "interactive-user"})
+_MINIMAL_SELECTION_SOURCE = "minimal-one-click"
+_GENERIC_LANGUAGE_ORDER = (
+    "c",
+    "cpp",
+    "csharp",
+    "java",
+    "javascript",
+    "python",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageReferenceSet:
+    """The bounded generic references available for one explicit language ID."""
+
+    language: str
+    capability_id: str
+    minimal_documentation: tuple[str, ...]
+    optional_documentation: tuple[str, ...]
+    required_tools: tuple[str, ...]
+    optional_tools: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _id(self.language, "generic language id")
+        _id(self.capability_id, "generic capability id")
+        for label, values in (
+            ("minimal documentation", self.minimal_documentation),
+            ("optional documentation", self.optional_documentation),
+            ("required tools", self.required_tools),
+            ("optional tools", self.optional_tools),
+        ):
+            if not values:
+                raise InitProfileError(f"generic {label} must not be empty")
+            for item in values:
+                _id(item, f"generic {label} item")
+            if len(values) != len(set(values)):
+                raise InitProfileError(f"generic {label} contains duplicates")
+        if set(self.minimal_documentation) & set(self.optional_documentation):
+            raise InitProfileError("generic documentation references overlap")
+        if set(self.required_tools) & set(self.optional_tools):
+            raise InitProfileError("generic tool references overlap")
+
+    @property
+    def documentation_references(self) -> tuple[str, ...]:
+        return self.minimal_documentation + self.optional_documentation
+
+    @property
+    def tool_references(self) -> tuple[str, ...]:
+        return self.required_tools + self.optional_tools
+
+
+_GENERIC_LANGUAGE_REFERENCES: dict[str, LanguageReferenceSet] = {
+    "c": LanguageReferenceSet(
+        language="c",
+        capability_id="c-language",
+        minimal_documentation=("c-language-reference",),
+        optional_documentation=("c-api-guidelines", "c-documentation-generator"),
+        required_tools=("c-syntax-check",),
+        optional_tools=("c-language-server", "c-static-analysis"),
+    ),
+    "cpp": LanguageReferenceSet(
+        language="cpp",
+        capability_id="cpp-language",
+        minimal_documentation=("cpp-language-reference",),
+        optional_documentation=("cpp-core-guidelines", "cpp-documentation-generator"),
+        required_tools=("cpp-syntax-check",),
+        optional_tools=("cpp-language-server", "cpp-static-analysis"),
+    ),
+    "csharp": LanguageReferenceSet(
+        language="csharp",
+        capability_id="csharp-language",
+        minimal_documentation=("csharp-language-reference",),
+        optional_documentation=("csharp-api-guidelines", "csharp-documentation-generator"),
+        required_tools=("csharp-compiler-check",),
+        optional_tools=("csharp-language-server", "csharp-static-analysis"),
+    ),
+    "java": LanguageReferenceSet(
+        language="java",
+        capability_id="java-language",
+        minimal_documentation=("java-language-specification",),
+        optional_documentation=("java-api-documentation", "java-documentation-generator"),
+        required_tools=("java-compiler-check",),
+        optional_tools=("java-language-server", "java-static-analysis"),
+    ),
+    "javascript": LanguageReferenceSet(
+        language="javascript",
+        capability_id="javascript-language",
+        minimal_documentation=("ecmascript-language-specification",),
+        optional_documentation=(
+            "javascript-api-documentation",
+            "javascript-documentation-generator",
+        ),
+        required_tools=("javascript-syntax-check",),
+        optional_tools=("javascript-language-server", "javascript-static-analysis"),
+    ),
+    "python": LanguageReferenceSet(
+        language="python",
+        capability_id="python-language",
+        minimal_documentation=("python-language-reference",),
+        optional_documentation=("python-api-documentation", "python-documentation-generator"),
+        required_tools=("python-compile-check",),
+        optional_tools=("python-language-server", "python-static-analysis"),
+    ),
+}
+
+
+def _iterable_values(value: object, label: str) -> list[object]:
+    """Require a caller-owned sequence instead of coercing strings or mappings."""
+
+    if isinstance(value, (str, bytes, Mapping)):
+        raise InitProfileError(f"{label} must be an explicit array")
+    try:
+        return list(value)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise InitProfileError(f"{label} must be an explicit array") from exc
+
+
+def _selected_generic_languages(languages: Iterable[str]) -> tuple[str, ...]:
+    requested = _string_list(
+        _iterable_values(languages, "generic languages"),
+        "generic languages",
+    )
+    unknown = sorted(set(requested) - set(_GENERIC_LANGUAGE_REFERENCES))
+    if unknown:
+        raise InitProfileError(f"unknown generic language selection: {unknown[0]}")
+    selected = set(requested)
+    return tuple(language for language in _GENERIC_LANGUAGE_ORDER if language in selected)
+
+
+def _registered_values(
+    value: object,
+    *,
+    allowed: tuple[str, ...],
+    label: str,
+) -> tuple[str, ...]:
+    requested = _string_list(_iterable_values(value, label), label)
+    unknown = sorted(set(requested) - set(allowed))
+    if unknown:
+        raise InitProfileError(f"unknown {label} reference: {unknown[0]}")
+    selected = set(requested)
+    return tuple(item for item in allowed if item in selected)
+
+
+def _expert_language_selections(
+    value: Mapping[str, Any],
+    *,
+    languages: tuple[str, ...],
+) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    selections = _mapping(value, "expert language selections")
+    if set(selections) != set(languages):
+        raise InitProfileError(
+            "expert language selections must contain exactly the explicit language IDs"
+        )
+    result: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for language in languages:
+        reference_set = _GENERIC_LANGUAGE_REFERENCES[language]
+        selection = _mapping(selections[language], f"expert {language} selection")
+        if set(selection) != {"capability_id", "documentation", "tools"}:
+            raise InitProfileError(
+                f"expert {language} selection has an unsupported field set"
+            )
+        if selection["capability_id"] != reference_set.capability_id:
+            raise InitProfileError(
+                f"expert {language} selection cannot change its registered capability"
+            )
+        documentation = _registered_values(
+            selection["documentation"],
+            allowed=reference_set.documentation_references,
+            label=f"expert {language} documentation",
+        )
+        tools = _registered_values(
+            selection["tools"],
+            allowed=reference_set.tool_references,
+            label=f"expert {language} tools",
+        )
+        missing_required = [
+            tool for tool in reference_set.required_tools if tool not in tools
+        ]
+        if missing_required:
+            raise InitProfileError(
+                f"expert {language} selection omits required tool {missing_required[0]}"
+            )
+        result[language] = (documentation, tools)
+    return result
+
+
+def _language_reference_selection(
+    reference_set: LanguageReferenceSet,
+    *,
+    documentation: tuple[str, ...],
+    tools: tuple[str, ...],
+    selection_source: str,
+) -> dict[str, Any]:
+    """Return one typed selection without asserting a tool exists on this host."""
+
+    identity = {
+        "schema": LANGUAGE_REFERENCE_SELECTION_SCHEMA,
+        "language": reference_set.language,
+        "capability_id": reference_set.capability_id,
+        "selection_source": selection_source,
+        "semantic_decision_policy": "registered-reference-only",
+        "weak_model_semantic_decision": False,
+        "documentation": [
+            {
+                "reference_id": reference,
+                "reference_kind": "generic-documentation-reference",
+                "source": selection_source,
+            }
+            for reference in documentation
+        ],
+        "tools": [
+            {
+                "tool_id": tool,
+                "reference_kind": "generic-tool-reference",
+                "source": selection_source,
+                "required": tool in reference_set.required_tools,
+                "availability": "UNOBSERVED",
+                "pass_credit": False,
+            }
+            for tool in tools
+        ],
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+    }
+    return {**identity, "selection_digest": digest_value(identity)}
+
+
+def resolve_init_experience(
+    standard_default: Mapping[str, Any],
+    *,
+    experience: str = "minimal",
+    languages: Iterable[str] = (),
+    host_override: Mapping[str, Any] | None = None,
+    project_override: Mapping[str, Any] | None = None,
+    cli_override: Mapping[str, Any] | None = None,
+    interactive_override: Mapping[str, Any] | None = None,
+    expert_selections: Mapping[str, Any] | None = None,
+    expert_source: str | None = None,
+) -> dict[str, Any]:
+    """Resolve deterministic minimal or explicitly selected expert init UX.
+
+    Language IDs must be supplied by a caller that already has an explicit,
+    independently-derived language choice.  This function never infers a
+    language, chooses a semantic capability from model output, probes tools, or
+    grants authority.  Expert input can choose only registered generic
+    references, and every unknown input is rejected before a result is made.
+    """
+
+    if not isinstance(experience, str) or experience not in _INIT_EXPERIENCES:
+        raise InitProfileError("init experience must be minimal or expert")
+    profile = resolve_init_profile(
+        standard_default,
+        host_override=host_override,
+        project_override=project_override,
+        cli_override=cli_override,
+        interactive_override=interactive_override,
+    )
+    selected_languages = _selected_generic_languages(languages)
+    if experience == "minimal":
+        if expert_selections is not None or expert_source is not None:
+            raise InitProfileError(
+                "minimal one-click experience does not accept expert semantic selections"
+            )
+        selection_source = _MINIMAL_SELECTION_SOURCE
+        selections = [
+            _language_reference_selection(
+                _GENERIC_LANGUAGE_REFERENCES[language],
+                documentation=_GENERIC_LANGUAGE_REFERENCES[language].minimal_documentation,
+                tools=_GENERIC_LANGUAGE_REFERENCES[language].required_tools,
+                selection_source=selection_source,
+            )
+            for language in selected_languages
+        ]
+        capability_precedence = [
+            "registered-generic-reference",
+            _MINIMAL_SELECTION_SOURCE,
+        ]
+    else:
+        if not selected_languages:
+            raise InitProfileError("expert experience requires at least one explicit language")
+        if expert_selections is None:
+            raise InitProfileError("expert experience requires explicit language selections")
+        if (
+            not isinstance(expert_source, str)
+            or expert_source not in _EXPERT_SELECTION_SOURCES
+        ):
+            raise InitProfileError(
+                "expert semantic selection source must be owner, cli, or interactive-user"
+            )
+        selection_source = expert_source
+        selected = _expert_language_selections(
+            expert_selections,
+            languages=selected_languages,
+        )
+        selections = [
+            _language_reference_selection(
+                _GENERIC_LANGUAGE_REFERENCES[language],
+                documentation=selected[language][0],
+                tools=selected[language][1],
+                selection_source=selection_source,
+            )
+            for language in selected_languages
+        ]
+        capability_precedence = ["registered-generic-reference", selection_source]
+
+    identity = {
+        "schema": INIT_EXPERIENCE_SCHEMA,
+        "experience": experience,
+        "profile": profile,
+        "profile_precedence": list(_SELECTION_SOURCES),
+        "applied_profile_sources": list(profile["applied_sources"]),
+        "profile_provenance": profile["provenance"],
+        "capability_precedence": capability_precedence,
+        "capability_selection_source": selection_source,
+        "languages": list(selected_languages),
+        "capability_selections": selections,
+        "semantic_decision_policy": "registered-default-or-explicit-owner-cli-interactive",
+        "weak_model_semantic_decisions": False,
+        "model_inference_used": False,
+        "host_probe_performed": False,
+        "status": "CONFIGURED_PENDING_HOST_OBSERVATION",
+        "authority_effect": "none",
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+    }
+    return {**identity, "experience_digest": digest_value(identity)}

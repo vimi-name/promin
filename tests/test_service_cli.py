@@ -164,22 +164,22 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         ".github/": 1,
         "capability_profiles/": 2,
         "core/": 6,
-        "docs/": 19,
+        "docs/": 25,
         "examples/": 1,
         "human/": 4,
-        "language_profiles/": 1,
+        "language_profiles/": 7,
         "presets/": 1,
         "profiles/": 12,
-        "promin/": 51,
+        "promin/": 55,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 56,
-        "tools/": 13,
+        "tests/": 71,
+        "tools/": 15,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 185
+    assert len(manifest["files"]) == 218
     actual_counts = {key: 0 for key in expected_counts}
     actual_counts["package root"] = 2  # MANIFEST.json and SHA256SUMS.txt
     for item in manifest["files"]:
@@ -187,7 +187,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         location = path.split("/", 1)[0] + "/" if "/" in path else "package root"
         actual_counts[location] += 1
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 187
+    assert sum(expected_counts.values()) == 220
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:
@@ -2000,11 +2000,12 @@ def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head
     assert ranked_candidate_calls == 1
     assert event_store_initializations == 1
 
+    next_task_at = _at()
     next_task = {
         **task,
         "task_id": "task:query-cache-head-change",
         "state": "PLANNED",
-        "created_at": _at(),
+        "created_at": next_task_at,
     }
     next_task = _task_with_gate_definition(
         service,
@@ -2020,7 +2021,7 @@ def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head
             command_kind="task.record",
             payload=next_task,
             expected_head=head,
-            issued_at=_at(),
+            issued_at=next_task_at,
             authorization=_grant_authorization(grants["planner"]),
         )
     )
@@ -2041,11 +2042,12 @@ def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head
     assert ranked_candidate_calls == 2
     assert event_store_initializations == before_new_head_query_initializations
 
+    external_task_at = _at()
     external_task = {
         **task,
         "task_id": "task:query-cache-external-head",
         "state": "PLANNED",
-        "created_at": _at(),
+        "created_at": external_task_at,
     }
     external_task = _task_with_gate_definition(
         service,
@@ -2060,7 +2062,7 @@ def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head
             command_kind="task.record",
             payload=external_task,
             expected_head=committed["batch_digest"],
-            issued_at=_at(),
+            issued_at=external_task_at,
             authorization=_grant_authorization(grants["planner"]),
         )
     )

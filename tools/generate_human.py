@@ -1588,14 +1588,14 @@ def main_story(data: dict[str, dict[str, Any]], language: str, st: dict[str, Par
     scale_mode_rows = (
         [
             ('python -B -m pytest -q -m "not scale"', "focused conformance mode; excludes the physical scale lane"),
-            ("PowerShell: $env:PROMIN_SCALE_WORKSPACE='C:\\promin-scale'; python -B -m pytest -q -m scale", "Windows physical 100000-file lane; the dedicated workspace is explicit"),
-            ('POSIX: PROMIN_SCALE_WORKSPACE=/tmp/promin-scale python -B -m pytest -q -m scale', "Linux physical 100000-file lane; the dedicated workspace is explicit"),
+            ("PowerShell: $env:PROMIN_SCALE_WORKSPACE='C:\\promin-scale'; $env:PROMIN_SCALE_ARCHIVE='C:\\evidence\\promin.zip'; python -B -m pytest -q -m scale", "Windows physical 100000-file lane; workspace and exact archive are explicit"),
+            ('POSIX: PROMIN_SCALE_WORKSPACE=/tmp/promin-scale PROMIN_SCALE_ARCHIVE=/tmp/evidence/promin.zip python -B -m pytest -q -m scale', "Linux physical 100000-file lane; workspace and exact archive are explicit"),
         ]
         if language == "en"
         else [
             ('python -B -m pytest -q -m "not scale"', "focused режим відповідності; фізична scale lane не виконується"),
-            ("PowerShell: $env:PROMIN_SCALE_WORKSPACE='C:\\promin-scale'; python -B -m pytest -q -m scale", "Windows physical lane на 100000 файлів; dedicated workspace задано явно"),
-            ('POSIX: PROMIN_SCALE_WORKSPACE=/tmp/promin-scale python -B -m pytest -q -m scale', "Linux physical lane на 100000 файлів; dedicated workspace задано явно"),
+            ("PowerShell: $env:PROMIN_SCALE_WORKSPACE='C:\\promin-scale'; $env:PROMIN_SCALE_ARCHIVE='C:\\evidence\\promin.zip'; python -B -m pytest -q -m scale", "Windows physical lane на 100000 файлів; workspace і точний архів задано явно"),
+            ('POSIX: PROMIN_SCALE_WORKSPACE=/tmp/promin-scale PROMIN_SCALE_ARCHIVE=/tmp/evidence/promin.zip python -B -m pytest -q -m scale', "Linux physical lane на 100000 файлів; workspace і точний архів задано явно"),
         ]
     )
     story.append(make_table(["Scale mode", "Execution truth"], scale_mode_rows, [56 * mm, 113 * mm], st))

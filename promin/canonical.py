@@ -303,6 +303,125 @@ def digest_value(value: Any, *, limits: ParseLimits = DEFAULT_LIMITS) -> str:
     return digest_bytes(canonical_bytes(value, limits=limits))
 
 
+def digest_value_streaming(
+    value: Any,
+    *,
+    limits: ParseLimits = DEFAULT_LIMITS,
+) -> str:
+    """Digest exact canonical JSON without materializing its encoded bytes.
+
+    This preserves :func:`canonical_bytes` identity, including NFC keys,
+    sorted object members, compact separators, and the terminal newline.  It
+    exists for bounded aggregate derived records whose total encoding may be
+    large while every semantic row remains independently bounded.
+    """
+
+    result = hashlib.sha256()
+    byte_count = 0
+    item_count = 0
+
+    def emit(text: str) -> None:
+        nonlocal byte_count
+        payload = text.encode("utf-8")
+        byte_count += len(payload)
+        if byte_count > limits.max_bytes:
+            raise CanonicalError(f"canonical JSON exceeds {limits.max_bytes} bytes")
+        result.update(payload)
+
+    def encode(current: Any, depth: int) -> None:
+        nonlocal item_count
+        if depth > limits.max_depth:
+            raise CanonicalError(f"JSON nesting exceeds {limits.max_depth}")
+        item_count += 1
+        if item_count > limits.max_items:
+            raise CanonicalError(f"JSON item count exceeds {limits.max_items}")
+        if current is None:
+            emit("null")
+            return
+        if isinstance(current, bool):
+            emit("true" if current else "false")
+            return
+        if isinstance(current, int):
+            if len(str(abs(current))) > limits.max_number_length:
+                raise CanonicalError("JSON integer exceeds numeric length limit")
+            emit(str(current))
+            return
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise CanonicalError("non-finite JSON number rejected")
+            emit(
+                json.dumps(
+                    current,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+            return
+        if isinstance(current, str):
+            normalized = unicodedata.normalize("NFC", current)
+            if len(normalized) > limits.max_string_length:
+                raise CanonicalError(
+                    f"JSON string exceeds {limits.max_string_length} characters"
+                )
+            emit(
+                json.dumps(
+                    normalized,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+            return
+        if isinstance(current, list):
+            emit("[")
+            for index, item in enumerate(current):
+                if index:
+                    emit(",")
+                encode(item, depth + 1)
+            emit("]")
+            return
+        if isinstance(current, dict):
+            members: list[tuple[str, Any]] = []
+            observed: dict[str, str] = {}
+            for key, item in current.items():
+                if not isinstance(key, str):
+                    raise CanonicalError("JSON object key must be a string")
+                normalized_key = unicodedata.normalize("NFC", key)
+                if len(normalized_key) > limits.max_string_length:
+                    raise CanonicalError("JSON object key exceeds string length limit")
+                previous = observed.get(normalized_key)
+                if previous is not None:
+                    raise CanonicalError(
+                        f"JSON key collision after NFC: {previous!r} vs {key!r}"
+                    )
+                observed[normalized_key] = key
+                members.append((normalized_key, item))
+            emit("{")
+            for index, (key, item) in enumerate(sorted(members)):
+                if index:
+                    emit(",")
+                emit(
+                    json.dumps(
+                        key,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                )
+                emit(":")
+                encode(item, depth + 1)
+            emit("}")
+            return
+        raise CanonicalError(
+            f"unsupported canonical JSON type: {type(current).__name__}"
+        )
+
+    encode(value, 1)
+    emit("\n")
+    return result.hexdigest()
+
+
 def digest_file(
     path: str | os.PathLike[str], *, root: str | os.PathLike[str] | None = None
 ) -> str:

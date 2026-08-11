@@ -57,7 +57,7 @@ def test_bundle_install_uses_final_filesystem_boundary_for_deep_project_staging(
     index = 0
     while len(str(deep_root)) < 220:
         deep_root = deep_root / (f"segment-{index:02d}-" + ("x" * 36))
-        deep_root.mkdir()
+        os.mkdir(filesystem_path(deep_root))
         index += 1
     staging = deep_root / ".p-long-boundary"
     os.mkdir(filesystem_path(staging))

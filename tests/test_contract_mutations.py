@@ -1438,7 +1438,38 @@ class ContractMutationTests(unittest.TestCase):
         self.assertEqual(len(policies["policies"]), 68)
         self.assertEqual(len(conformance["required_acceptance"]), 102)
         self.assertEqual(len(conformance["mutation_families"]), 77)
-        self.assertEqual(authority["event_contract"]["events_per_batch_max"], 20)
+        self.assertEqual(authority["event_contract"]["events_per_batch_max"], 128)
+        self.assertEqual(
+            authority["event_contract"]["state_binding_updates_per_batch_max"],
+            128,
+        )
+        self.assertEqual(authority["event_contract"]["command_bytes_max"], 1_048_576)
+        self.assertEqual(
+            authority["event_contract"]["state_binding_bytes_max"], 1_048_576
+        )
+        self.assertEqual(authority["event_contract"]["envelope_bytes_max"], 2_097_152)
+        self.assertEqual(
+            definitions["EventBatch"]["properties"]["events"]["maxItems"],
+            128,
+        )
+        self.assertEqual(
+            definitions["EventBatch"]["properties"]["state_binding_delta"][
+                "maxItems"
+            ],
+            128,
+        )
+        self.assertEqual(
+            definitions["EventStorePolicy"]["properties"]["max_events_per_batch"][
+                "const"
+            ],
+            128,
+        )
+        self.assertEqual(
+            definitions["EventStorePolicy"]["properties"][
+                "max_state_binding_updates_per_batch"
+            ]["const"],
+            128,
+        )
         self.assertEqual(
             authority["event_contract"]["command_conditional_fields"],
             ["definition_digest"],

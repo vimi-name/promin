@@ -3709,8 +3709,23 @@ def _event_contract_owner(
         != owner["event_batch_required_fields"]
         or definitions["EventBatch"]["properties"]["events"]["maxItems"]
         != owner["events_per_batch_max"]
-        or owner["events_per_batch_max"] != 20
-        or owner["state_binding_updates_per_batch_max"] != 20
+        or definitions["EventBatch"]["properties"]["state_binding_delta"][
+            "maxItems"
+        ]
+        != owner["state_binding_updates_per_batch_max"]
+        or definitions["EventStorePolicy"]["properties"]["max_events_per_batch"][
+            "const"
+        ]
+        != owner["events_per_batch_max"]
+        or definitions["EventStorePolicy"]["properties"][
+            "max_state_binding_updates_per_batch"
+        ]["const"]
+        != owner["state_binding_updates_per_batch_max"]
+        or owner["command_bytes_max"] != 1048576
+        or owner["state_binding_bytes_max"] != 1048576
+        or owner["envelope_bytes_max"] != 2097152
+        or owner["events_per_batch_max"] != 128
+        or owner["state_binding_updates_per_batch_max"] != 128
         or definitions["Event"]["required"] != owner["event_required_fields"]
         or set(definitions["Event"]["properties"]["event_kind"]["enum"])
         != set(owner["command_to_primary_event"].values())

@@ -87,8 +87,8 @@ operational root: перед quarantine будь-який selected extension sou
 відсутнім, знаходитись на тому самому filesystem і не може бути замінений.
 Використовуються лише no-replace moves:
 
-- Windows: `MoveFileExW` без `MOVEFILE_REPLACE_EXISTING`, із
-  `MOVEFILE_WRITE_THROUGH`;
+- Windows: held-handle
+  `platform_paths.physical_rename_directory_create_only`, без replace;
 - Linux: `renameat2(RENAME_NOREPLACE)`;
 - інша платформа: `UNAVAILABLE`, без небезпечного fallback на replace/merge.
 
@@ -97,6 +97,35 @@ operational root: перед quarantine будь-який selected extension sou
 перед no-replace move. Recovery ніколи не видаляє старий root як частину
 rollback: воно або переміщує цілий root назад до порожнього `.promin`, або
 fail-closed.
+
+На Windows цей move проходить лише через
+`platform_paths.physical_rename_directory_create_only`. Він утримує handles
+source і destination-parent та викликає остаточну перевірку authority вже після
+їх reservation. Тому повторна перевірка extension closure, identity старого
+root і відсутності destination не лежить у відкритому pre-move вікні. Цей шлях
+не має fallback на replace, copy, merge або delete.
+
+## Обмежений restart після переривання
+
+`run_bounded_clean_reinitialization` спершу пробує exact reuse уже
+опублікованого результату. Reuse можливий тільки після exact digest binding і
+зовнішнього verifier-а, що повернув саме `True`; за такого reuse нова спроба та
+будь-яка мутація root не запускаються.
+
+Якщо потрібна нова операція, callback отримує transaction лише після повного
+quarantine старого root. Повторити спробу дозволено лише для явного
+`RecoveryInterruption` одного з pre-publication етапів standard init, overlay,
+task import, postcheck або activation. Перед наступною спробою обов'язково
+повертається **цілий** quarantined root. Довільна помилка callback-а, mutation
+extension closure, live/expired writer, помилка rollback або поява нового
+active root не запускають ще одну руйнівну спробу.
+
+Ліміт restart-ів становить від 1 до 16. Його вичерпання повертає
+детермінований report із `RESTART_LIMIT_REACHED`, відновленим старим root і
+`acceptance_pass=false`, `pass_credit=false`, `product_credit=false`.
+Report також завжди фіксує `state_migration_supported=false`,
+`previous_progress_replay_supported=false` та
+`previous_progress_imported=false`: restart не є replay старого стану.
 
 ## Exact-intent reuse
 
@@ -114,4 +143,8 @@ standard init, task import, doctor, status, refresh або package publication.
 owner-intent binding, PID reuse/liveness і extension restrictions. Linux має
 реалізацію no-replace move, але в цьому пакеті не отримує runtime pass credit
 без окремого Linux host run. macOS не має реалізації no-replace move в цьому
-шарі й чесно повертає `UNAVAILABLE`.
+шарі й чесно повертає `UNAVAILABLE`. Окремий локальний stress набір перевіряє
+серії явних interrupted phases, liveness matrix, exact reuse, mutation
+extension closure, bounded restart, rollback і детермінованість report-а. Це
+доказ шару recovery, а не public acceptance або proof розгортання на macOS чи
+Linux.

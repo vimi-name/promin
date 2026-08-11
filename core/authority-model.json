@@ -479,7 +479,7 @@
       "activation_digest",
       "payload"
     ],
-    "events_per_batch_max": 20,
+    "events_per_batch_max": 128,
     "genesis_event_semantic_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "genesis_previous_authority_commitment": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "lease_bound_command_kinds_source": "command_mutation_claim_rule.lease_bound_command_kinds",
@@ -579,7 +579,7 @@
       }
     },
     "state_binding_leaf_type_source": "Activation plus SemanticModel.persistent_entities.kind plus Relation",
-    "state_binding_updates_per_batch_max": 20,
+    "state_binding_updates_per_batch_max": 128,
     "state_binding_value_rules": {
       "Activation": {
         "event_kinds": [],

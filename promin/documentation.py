@@ -39,6 +39,7 @@ _WORKSPACE_FILE = _DOCS / "workspace-map.json"
 _BRIEF_FILE = _DOCS / "project-brief.json"
 _TEAM_SEED_FILE = _DOCS / "team-seed.json"
 _CONTEXT_POLICY_FILE = _DOCS / "context-policy.json"
+_CURRENT_SUMMARY_FILE = _DOCS / "current-summary.json"
 _PROJECT_CONTEXT_FILE = _DOCS / "PROJECT_CONTEXT.md"
 _WORKSPACE_MARKDOWN_FILE = _DOCS / "WORKSPACE_MAP.md"
 _OPERATIONS_FILE = _DOCS / "OPERATIONS.md"
@@ -53,6 +54,11 @@ _MAX_REFERENCE_RECORDS = 256
 _MAX_REFERENCE_RECORD_BYTES = 64 * 1024
 _MAX_REFERENCE_TOTAL_BYTES = 2 * 1024 * 1024
 _MAX_TEAM_STATE_BYTES = 512 * 1024
+_MAX_TRACKED_WORKSPACE_UNITS = 128
+_MAX_TRACKED_WORKSPACE_RELATIONS = 256
+_MAX_WORKSPACE_MARKDOWN_UNITS = 16
+_MAX_TRACKED_COLLECTION_ITEMS = 64
+_MAX_TRACKED_VALUE_BYTES = 512
 
 _IGNORE_DIRS = {
     ".git", ".promin", ".promin-host", ".idea", ".vscode", ".venv", "venv",
@@ -81,6 +87,30 @@ class DocumentationError(RuntimeError):
 
 def _json_bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _bounded_text(value: Any, *, limit: int = _MAX_TRACKED_VALUE_BYTES) -> str:
+    text = str(value)
+    payload = text.encode("utf-8")
+    if len(payload) <= limit:
+        return text
+    digest = hashlib.sha256(payload).hexdigest()
+    suffix = f" [truncated sha256={digest}]"
+    available = max(0, limit - len(suffix.encode("utf-8")))
+    return payload[:available].decode("utf-8", errors="ignore").rstrip() + suffix
+
+
+def _bounded_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _bounded_text(value)
+
+
+def _bounded_text_list(value: Any, *, limit: int = _MAX_TRACKED_COLLECTION_ITEMS) -> tuple[list[str], int]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return [], 0
+    items = [_bounded_text(item) for item in value]
+    return items[:limit], max(0, len(items) - limit)
 
 
 def _atomic_bytes(path: Path, payload: bytes) -> None:
@@ -462,39 +492,87 @@ unit only when the Task, changed path, or query targets it.
 
 
 def _portable_workspace(workspace: Mapping[str, Any]) -> dict[str, Any]:
+    raw_units = [item for item in workspace.get("units", []) if isinstance(item, Mapping)]
+    raw_units.sort(
+        key=lambda item: (
+            _bounded_text(item.get("unit_id", "")).casefold(),
+            _bounded_text(item.get("path", "")).casefold(),
+        )
+    )
     units = []
-    for raw in workspace.get("units", []):
-        if isinstance(raw, Mapping):
-            units.append({
-                "unit_id": raw.get("unit_id"), "path": raw.get("path"), "kind": raw.get("kind"),
-                "technology_ids": list(raw.get("technology_ids", [])),
-                "profile_layers": list(raw.get("profile_layers", [])), "confidence": raw.get("confidence"),
-            })
+    for raw in raw_units[:_MAX_TRACKED_WORKSPACE_UNITS]:
+        technologies, omitted_technologies = _bounded_text_list(raw.get("technology_ids", []))
+        profiles, omitted_profiles = _bounded_text_list(raw.get("profile_layers", []))
+        units.append({
+            "unit_id": _bounded_scalar(raw.get("unit_id")),
+            "path": _bounded_scalar(raw.get("path")),
+            "kind": _bounded_scalar(raw.get("kind")),
+            "technology_ids": technologies,
+            "omitted_technology_count": omitted_technologies,
+            "profile_layers": profiles,
+            "omitted_profile_count": omitted_profiles,
+            "confidence": _bounded_scalar(raw.get("confidence")),
+        })
+    raw_relations = [item for item in workspace.get("relations", []) if isinstance(item, Mapping)]
+    raw_relations.sort(
+        key=lambda item: (
+            _bounded_text(item.get("from", "")).casefold(),
+            _bounded_text(item.get("to", "")).casefold(),
+            _bounded_text(item.get("relation", item.get("kind", ""))).casefold(),
+        )
+    )
     relations = [
         {
-            "from": item.get("from"),
-            "to": item.get("to"),
-            "kind": item.get("relation", item.get("kind")),
+            "from": _bounded_scalar(item.get("from")),
+            "to": _bounded_scalar(item.get("to")),
+            "kind": _bounded_scalar(item.get("relation", item.get("kind"))),
         }
-        for item in workspace.get("relations", []) if isinstance(item, Mapping)
+        for item in raw_relations[:_MAX_TRACKED_WORKSPACE_RELATIONS]
     ]
     identity = {
-        "record_type": "PortableWorkspaceMap", "workspace_kind": workspace.get("workspace_kind"),
-        "unit_count": len(units), "units": units, "relations": relations,
+        "record_type": "PortableWorkspaceMap", "workspace_kind": _bounded_scalar(workspace.get("workspace_kind")),
+        "source_unit_count": len(raw_units), "unit_count": len(units),
+        "omitted_unit_count": max(0, len(raw_units) - len(units)),
+        "source_relation_count": len(raw_relations), "relation_count": len(relations),
+        "omitted_relation_count": max(0, len(raw_relations) - len(relations)),
+        "units": units, "relations": relations,
+        "large_workspace_policy": "compact-tracked-map; detailed inventory host-local",
         "one_control_layer": True, "authority": False, "pass_credit": False,
     }
     return {**identity, "workspace_map_digest": digest_value(identity)}
 
 
 def _portable_brief(plan: Mapping[str, Any]) -> dict[str, Any]:
+    success_criteria, omitted_success_criteria = _bounded_text_list(plan.get("success_criteria", []))
+    constraints, omitted_constraints = _bounded_text_list(plan.get("constraints", []))
+    non_goals, omitted_non_goals = _bounded_text_list(plan.get("non_goals", []))
+    deliverables, omitted_deliverables = _bounded_text_list(plan.get("deliverables", []))
+    references, omitted_references = _bounded_text_list(plan.get("references", []))
+    work_sources, omitted_work_sources = _bounded_text_list(plan.get("work_sources", []))
+    profile_overrides, omitted_profile_overrides = _bounded_text_list(
+        [
+            value
+            for value in plan.get("profile_layers", [])
+            if value not in {"general-development", "ask", "standing-reversible", "uk", "en"}
+        ]
+    )
     identity = {
-        "record_type": "PortableProjectBrief", "project_id": plan.get("project_id"),
-        "goal": plan.get("goal"), "success_criteria": list(plan.get("success_criteria", [])),
-        "constraints": list(plan.get("constraints", [])), "non_goals": list(plan.get("non_goals", [])),
-        "deliverables": list(plan.get("deliverables", [])), "references": list(plan.get("references", [])),
-        "work_sources": list(plan.get("work_sources", [])), "autonomy": plan.get("autonomy"),
-        "language": plan.get("reporting_language"),
-        "profile_overrides": [value for value in plan.get("profile_layers", []) if value not in {"general-development", "ask", "standing-reversible", "uk", "en"}],
+        "record_type": "PortableProjectBrief", "project_id": _bounded_scalar(plan.get("project_id")),
+        "goal": _bounded_scalar(plan.get("goal")), "success_criteria": success_criteria,
+        "constraints": constraints, "non_goals": non_goals,
+        "deliverables": deliverables, "references": references,
+        "work_sources": work_sources, "autonomy": _bounded_scalar(plan.get("autonomy")),
+        "language": _bounded_scalar(plan.get("reporting_language")),
+        "profile_overrides": profile_overrides,
+        "omitted": {
+            "success_criteria": omitted_success_criteria,
+            "constraints": omitted_constraints,
+            "non_goals": omitted_non_goals,
+            "deliverables": omitted_deliverables,
+            "references": omitted_references,
+            "work_sources": omitted_work_sources,
+            "profile_overrides": omitted_profile_overrides,
+        },
         "authority": False, "pass_credit": False,
     }
     return {**identity, "brief_digest": digest_value(identity)}
@@ -512,6 +590,7 @@ def _non_authoritative_team_seed(
     WorkCard through the authoritative command path.
     """
 
+    profile_layers, omitted_profile_layers = _bounded_text_list(plan.get("profile_layers", []))
     identity = {
         "record_type": "NonAuthoritativeTeamSeed",
         "schema_version": 1,
@@ -520,10 +599,11 @@ def _non_authoritative_team_seed(
         "source_plan_digest": plan.get("plan_digest"),
         "repository_content_digest": manifest.get("repository_content_digest"),
         "workspace_map_digest": _portable_workspace(plan.get("workspace_map", {})).get("workspace_map_digest"),
-        "project_mode": plan.get("project_mode"),
-        "profile_layers": list(plan.get("profile_layers", [])),
-        "reporting_language": plan.get("reporting_language"),
-        "autonomy": plan.get("autonomy"),
+        "project_mode": _bounded_scalar(plan.get("project_mode")),
+        "profile_layers": profile_layers,
+        "omitted_profile_count": omitted_profile_layers,
+        "reporting_language": _bounded_scalar(plan.get("reporting_language")),
+        "autonomy": _bounded_scalar(plan.get("autonomy")),
         "clean_reinitialization": "owner-confirmed project-package operation",
         "work_card_derivation": "after-activation",
         "operational_state_import": "forbidden",
@@ -608,23 +688,43 @@ def _truncate_text(text: str, limit: int, label: str) -> str:
 
 def _project_context_markdown(plan: Mapping[str, Any]) -> str:
     language = str(plan.get("reporting_language") or "en")
-    profiles = ", ".join(str(value) for value in plan.get("profile_layers", [])) or "general-development"
+    profile_values, omitted_profiles = _bounded_text_list(plan.get("profile_layers", []))
+    profiles = ", ".join(profile_values) or "general-development"
+    if omitted_profiles:
+        profiles += f" (+{omitted_profiles} omitted)"
+    raw_workspace = plan.get("workspace_map", {})
+    portable_workspace = _portable_workspace(raw_workspace if isinstance(raw_workspace, Mapping) else {})
     technologies = sorted({
         str(value)
-        for unit in plan.get("workspace_map", {}).get("units", [])
+        for unit in portable_workspace["units"]
         if isinstance(unit, Mapping)
         for value in unit.get("technology_ids", [])
     })
-    technology_text = ", ".join(technologies) or ("ще не визначено" if language == "uk" else "not resolved yet")
-    success = "\n".join(f"- {value}" for value in plan.get("success_criteria", [])) or "- none"
-    constraints = "\n".join(f"- {value}" for value in plan.get("constraints", [])) or "- none"
-    references = "\n".join(f"- `{value}`" for value in plan.get("references", [])) or "- none"
+    technology_values = [_bounded_text(value, limit=64) for value in technologies[:_MAX_TRACKED_COLLECTION_ITEMS]]
+    technology_text = ", ".join(technology_values) or ("ще не визначено" if language == "uk" else "not resolved yet")
+    if len(technologies) > len(technology_values):
+        technology_text += f" (+{len(technologies) - len(technology_values)} omitted)"
+    success_values, omitted_success = _bounded_text_list(plan.get("success_criteria", []))
+    constraint_values, omitted_constraints = _bounded_text_list(plan.get("constraints", []))
+    reference_values, omitted_references = _bounded_text_list(plan.get("references", []))
+    success = "\n".join(f"- {value}" for value in success_values) or "- none"
+    constraints = "\n".join(f"- {value}" for value in constraint_values) or "- none"
+    references = "\n".join(f"- `{value}`" for value in reference_values) or "- none"
+    if omitted_success:
+        success += f"\n- (+{omitted_success} omitted from portable projection)"
+    if omitted_constraints:
+        constraints += f"\n- (+{omitted_constraints} omitted from portable projection)"
+    if omitted_references:
+        references += f"\n- (+{omitted_references} omitted from portable projection)"
+    goal = _bounded_text(plan.get("goal", "Продовжити проєкт надійно." if language == "uk" else "Continue the project reliably."))
+    mode = _bounded_text(plan.get("project_mode", "unknown"))
+    autonomy = _bounded_text(plan.get("autonomy", "ask"))
     if language == "uk":
         text = f"""# Контекст проєкту
 
-- Мета: {plan.get('goal', 'Продовжити проєкт надійно.')}
-- Режим: `{plan.get('project_mode', 'unknown')}`
-- Автономність: `{plan.get('autonomy', 'ask')}`
+- Мета: {goal}
+- Режим: `{mode}`
+- Автономність: `{autonomy}`
 - Профілі: {profiles}
 - Технології: {technology_text}
 
@@ -645,9 +745,9 @@ def _project_context_markdown(plan: Mapping[str, Any]) -> str:
     else:
         text = f"""# Project context
 
-- Goal: {plan.get('goal', 'Continue the project reliably.')}
-- Mode: `{plan.get('project_mode', 'unknown')}`
-- Autonomy: `{plan.get('autonomy', 'ask')}`
+- Goal: {goal}
+- Mode: `{mode}`
+- Autonomy: `{autonomy}`
 - Profiles: {profiles}
 - Technologies: {technology_text}
 
@@ -670,12 +770,38 @@ This is a short generated projection. Canonical facts live in Core/init/events; 
 
 def _workspace_markdown(plan: Mapping[str, Any]) -> str:
     language = str(plan.get("reporting_language") or "en")
-    units = [value for value in plan.get("workspace_map", {}).get("units", []) if isinstance(value, Mapping)]
+    raw_workspace = plan.get("workspace_map", {})
+    portable_workspace = _portable_workspace(raw_workspace if isinstance(raw_workspace, Mapping) else {})
+    units = portable_workspace["units"][:_MAX_WORKSPACE_MARKDOWN_UNITS]
     rows = []
     for unit in units:
-        technologies = ", ".join(str(value) for value in unit.get("technology_ids", [])) or "-"
-        rows.append(f"| `{unit.get('unit_id')}` | `{unit.get('path', '.')}` | {unit.get('kind', 'project-unit')} | {technologies} |")
+        technology_ids = unit.get("technology_ids", [])
+        technology_values = [
+            _bounded_text(value, limit=32)
+            for value in technology_ids[:4]
+        ] if isinstance(technology_ids, list) else []
+        technologies = ", ".join(technology_values) or "-"
+        omitted_technologies = max(0, len(technology_ids) - len(technology_values)) if isinstance(technology_ids, list) else 0
+        if omitted_technologies:
+            technologies += f" (+{omitted_technologies})"
+        unit_id = _bounded_text(unit.get("unit_id", "root"), limit=80).replace("|", "\\|").replace("\n", " ")
+        path = _bounded_text(unit.get("path", "."), limit=80).replace("|", "\\|").replace("\n", " ")
+        kind = _bounded_text(unit.get("kind", "project-unit"), limit=48).replace("|", "\\|").replace("\n", " ")
+        rows.append(f"| `{unit_id}` | `{path}` | {kind} | {technologies} |")
     table = "\n".join(rows) or "| `root` | `.` | project-unit | - |"
+    omitted_units = int(portable_workspace["source_unit_count"]) - len(units)
+    if language == "uk" and omitted_units:
+        bounded_notice = (
+            f"\n- У портативній проєкції показано {len(units)} unit; "
+            f"{omitted_units} детальних unit залишено host-local.\n"
+        )
+    elif omitted_units:
+        bounded_notice = (
+            f"\n- The portable projection shows {len(units)} units; "
+            f"{omitted_units} detailed units remain host-local.\n"
+        )
+    else:
+        bounded_notice = ""
     if language == "uk":
         text = f"""# Карта workspace
 
@@ -690,6 +816,7 @@ def _workspace_markdown(plan: Mapping[str, Any]) -> str:
 - Оновити після розподілених змін: `promin refresh`
 
 Не завантажуйте весь monorepo у prompt; починайте з unit, пов'язаного з Task або changed path.
+{bounded_notice}
 """
     else:
         text = f"""# Workspace map
@@ -705,6 +832,7 @@ One top-level promin layer coordinates every repository unit.
 - Refresh after distributed changes: `promin refresh`
 
 Do not load the whole monorepo into a prompt; start with the unit bound to the Task or changed path.
+{bounded_notice}
 """
     return _truncate_text(text, _MAX_WORKSPACE_MARKDOWN_BYTES, "workspace map")
 
@@ -754,6 +882,40 @@ def _context_policy(entry: str) -> dict[str, Any]:
     return {**identity, "policy_digest": digest_value(identity)}
 
 
+def _current_document_summary(
+    plan: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    docs: Mapping[Path, bytes],
+) -> dict[str, Any]:
+    """Create the one compact tracked summary; historic detail stays host-local."""
+
+    document_rows = [
+        {
+            "path": path.as_posix(),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+        }
+        for path, payload in sorted(docs.items(), key=lambda item: item[0].as_posix())
+    ]
+    identity = {
+        "record_type": "CurrentDocumentationSummary",
+        "lifecycle": "CURRENT",
+        "project_id": _bounded_scalar(plan.get("project_id")),
+        "source_plan_digest": plan.get("plan_digest"),
+        "repository_content_digest": manifest.get("repository_content_digest"),
+        "workspace_map_digest": _portable_workspace(plan.get("workspace_map", {})).get("workspace_map_digest"),
+        "covered_current_document_count": len(document_rows),
+        "covered_current_document_bytes": sum(int(row["bytes"]) for row in document_rows),
+        "covered_current_document_digest": digest_value(document_rows),
+        "coverage_boundary": "pre-manifest generated document set; manifest is derived separately",
+        "superseded_payloads": "host-local-only",
+        "detailed_artifacts": "explicit-mode-host-local-only",
+        "authority": False,
+        "pass_credit": False,
+    }
+    return {**identity, "current_summary_digest": digest_value(identity)}
+
+
 def _expected_docs(plan: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[Path, bytes]:
     entry = _agent_entry(plan)
     outputs: dict[Path, bytes] = {
@@ -766,6 +928,9 @@ def _expected_docs(plan: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict
         _TEAM_SEED_FILE: _json_bytes(_non_authoritative_team_seed(plan, manifest)),
         _CONTEXT_POLICY_FILE: _json_bytes(_context_policy(entry)),
     }
+    outputs[_CURRENT_SUMMARY_FILE] = _json_bytes(
+        _current_document_summary(plan, manifest, outputs)
+    )
     try:
         manifest_identity = build_document_manifest(
             outputs,
@@ -995,6 +1160,7 @@ def sync_documentation(
         "unit_summary_bytes": sum(len(value.encode("utf-8")) for value in summaries.values()),
         "artifact_mode": selected_artifact_mode,
         "tracked_documentation_bytes": sum(len(payload) for payload in docs.values()),
+        "current_compact_report": _CURRENT_SUMMARY_FILE.as_posix(),
         "reference_record_count": len(refs), "reference_records": refs,
         "documentation_snapshot_digest": snapshot["documentation_snapshot_digest"],
         "full_content_scan": manifest.get("kind") != "git-objects-plus-working-overlay",

@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -1855,7 +1856,11 @@ def test_init_bounds_atomic_staging_component(
     monkeypatch.setattr(init_runtime.os, "rename", capture)
     initialize_project(_request(project, paths))
 
-    assert len(observed) == 1
+    # Windows may transiently deny the atomic rename while a scanner or
+    # indexer holds the parent.  Publication permits at most eight attempts;
+    # every retry must retain the same bounded staging identity.
+    assert 1 <= len(observed) <= 8
+    assert len(set(observed)) == 1
     assert observed[0].startswith(".p-")
     assert len(observed[0]) == 15
     assert not list(project.glob(".p-*"))
@@ -2064,6 +2069,143 @@ def _select_bounded_git_inventory_provider(
         {"provider_id": "snapshot-provider", "license": license_value}
     )
     _write(paths["licenses_plan"], licenses)
+
+
+def _committed_immutable_inventory(
+    tmp_path: Path,
+) -> tuple[Path, service_runtime.InventoryResult]:
+    """Create and reload one real immutable Git-backed inventory."""
+
+    project, paths = _plans(tmp_path)
+    _select_bounded_git_inventory_provider(project, paths)
+    initialize_project(_request(project, paths))
+    source = project / "src" / "bound.txt"
+    source.parent.mkdir()
+    source.write_text("immutable candidate source\n", encoding="utf-8")
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("Git executable is required for immutable inventory tests")
+
+    def run_git(*arguments: str) -> None:
+        completed = subprocess.run(
+            [git, *arguments],
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr.decode("utf-8", errors="replace"))
+
+    run_git("init", "--quiet")
+    run_git("config", "user.name", "Promin Test")
+    run_git("config", "user.email", "promin-test@example.invalid")
+    run_git("add", "--", "src")
+    run_git("-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "immutable inventory")
+    inventory = service_runtime.inventory_candidate(
+        project,
+        ["."],
+        snapshot_descriptor={
+            "consistency_mode": "immutable-vcs-tree",
+            "provider_id": "snapshot-provider",
+            "repository": str(project),
+            "treeish": "HEAD",
+        },
+    )
+    return project, inventory
+
+
+def _immutable_binding_arguments(
+    inventory: service_runtime.InventoryResult,
+) -> dict[str, Any]:
+    binding = inventory.immutable_vcs_binding
+    assert binding is not None
+    assert inventory.stream_digest is not None
+    assert inventory.stream_bytes is not None
+    return {
+        "repository_tree_object": binding["repository_tree_object"],
+        "provider_invocations": [dict(value) for value in inventory.provider_invocations],
+        "candidate_recipe_digest": inventory.candidate["candidate_recipe_digest"],
+        "source_roots": list(binding["source_roots"]),
+        "inventory_digest": inventory.candidate["inventory_digest"],
+        "inventory_stream_digest": inventory.stream_digest,
+        "inventory_stream_bytes": inventory.stream_bytes,
+        "inventory_entry_count": len(inventory.entries),
+    }
+
+
+def test_immutable_vcs_snapshot_binds_full_receipt_pair_and_rejects_persisted_tamper(
+    tmp_path: Path,
+) -> None:
+    project, inventory = _committed_immutable_inventory(tmp_path)
+    binding = inventory.immutable_vcs_binding
+    assert binding is not None
+    arguments = _immutable_binding_arguments(inventory)
+    assert service_runtime._immutable_vcs_snapshot_binding(**arguments) == binding
+    assert service_runtime._immutable_vcs_snapshot_digest(**arguments) == inventory.candidate[
+        "snapshot_digest"
+    ]
+    assert binding["tree_object_completion_receipt"]["operation"] == "immutable-tree-object"
+    assert binding["tree_stream_completion_receipt"]["operation"] == "immutable-tree-stream"
+
+    resealed_stream = deepcopy(binding["tree_stream_completion_receipt"])
+    resealed_stream["output_digest"] = "0" * 64
+    resealed_stream["stdout_capture_digest"] = "0" * 64
+    resealed_stream["invocation_receipt_digest"] = digest_value(
+        {
+            key: value
+            for key, value in resealed_stream.items()
+            if key != "invocation_receipt_digest"
+        }
+    )
+    altered_arguments = dict(arguments)
+    altered_arguments["provider_invocations"] = [
+        dict(binding["tree_object_completion_receipt"]),
+        resealed_stream,
+    ]
+    assert (
+        service_runtime._immutable_vcs_snapshot_digest(**altered_arguments)
+        != inventory.candidate["snapshot_digest"]
+    )
+    with pytest.raises(service_runtime.ServiceError, match="operation"):
+        service_runtime._immutable_vcs_snapshot_binding(
+            **{
+                **arguments,
+                "provider_invocations": [
+                    dict(binding["tree_object_completion_receipt"]),
+                    dict(binding["tree_object_completion_receipt"]),
+                ],
+            }
+        )
+
+    inventory_root = project / ".promin" / "state" / "inventory"
+    metadata_path = inventory_root / f"{inventory.candidate['candidate_digest']}.json"
+    pointer_path = inventory_root / "current.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["provider_invocations"][1] = resealed_stream
+    metadata["immutable_vcs_binding"]["tree_stream_completion_receipt"] = resealed_stream
+    os.chmod(metadata_path, stat.S_IWRITE | stat.S_IREAD)
+    _write(metadata_path, metadata)
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["manifest_digest"] = digest_value(metadata)
+    _write(pointer_path, pointer)
+    with pytest.raises(service_runtime.ServiceError, match="Candidate snapshot digest"):
+        service_runtime._load_current_inventory(
+            project,
+            init_runtime.ActivationGuard(project).verify(),
+        )
+
+
+def test_observational_inventory_keeps_no_immutable_vcs_binding(tmp_path: Path) -> None:
+    project, paths = _plans(tmp_path)
+    initialize_project(_request(project, paths))
+    source = project / "src" / "observed.txt"
+    source.parent.mkdir()
+    source.write_text("observed source\n", encoding="utf-8")
+    inventory = service_runtime.inventory_candidate(project, ["."])
+    assert inventory.candidate["consistency_mode"] == "observational-best-effort"
+    assert inventory.immutable_vcs_binding is None
 
 
 def test_verified_mutation_context_reuses_directory_provider_receipt_guard(

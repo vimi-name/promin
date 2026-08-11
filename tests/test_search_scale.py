@@ -7,11 +7,14 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from promin import service as promin_service
 from promin.canonical import canonical_bytes
 from promin.events import (
     CommitReadView,
@@ -322,8 +325,9 @@ def _verified_inventory(rows: list[dict[str, object]]) -> VerifiedInventoryInput
     )
 
 
-def _event_store(root: Path) -> EventStore:
-    return EventStore(
+@contextmanager
+def _event_store(root: Path) -> Iterator[EventStore]:
+    store = EventStore(
         root,
         ACTIVATION,
         activation_record_digest=ACTIVATION_RECORD_DIGEST,
@@ -337,6 +341,19 @@ def _event_store(root: Path) -> EventStore:
         commit_prepare_callback=_prepare_scale_commit,
         derived_state_validator=lambda _name, _state, **_kwargs: True,
     )
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+@contextmanager
+def _promin_runtime(workspace: Path) -> Iterator[ProminService]:
+    runtime = ProminService(workspace)
+    try:
+        yield runtime
+    finally:
+        runtime.close()
 
 
 def _record(store: EventStore, kind: str, payload: dict[str, object], relations: list[dict[str, object]] | None = None) -> None:
@@ -616,9 +633,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             (PACKAGE_ROOT / "core" / "semantic-model.json").read_text(encoding="utf-8")
         )
         domains = compile_relation_domains(semantic)
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_focused_graph(store)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -715,7 +733,9 @@ class SearchScaleFocusedTests(unittest.TestCase):
             len(canonical_bytes({"path": row["path"], "digest": row["digest"], "size": row["size"]}))
             for row in rows
         )
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -725,7 +745,7 @@ class SearchScaleFocusedTests(unittest.TestCase):
                 relation_domains=compile_relation_domains(semantic),
             )
             stats = projection.rebuild(
-                _event_store(root / "state"),
+                store,
                 inventory=_verified_inventory(rows),
             )
             self.assertEqual(stats["inventory_entries"], 2_000)
@@ -747,9 +767,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             "max_fanout_per_entity": 1,
             "top_k": 1,
         }
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_fanout_graph(store)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -792,9 +813,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             "max_fanout_per_entity": 8,
             "top_k": 12,
         }
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_fanout_graph(store, 6, label_size=700)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -830,9 +852,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             "max_fanout_per_entity": 1,
             "top_k": 1,
         }
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_chain_graph(store)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -874,9 +897,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             "max_fanout_per_entity": 1,
             "top_k": 2,
         }
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_many_seed_graph(store)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -915,9 +939,10 @@ class SearchScaleFocusedTests(unittest.TestCase):
             "max_fanout_per_entity": 1,
             "top_k": 1,
         }
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
             root = Path(temporary)
-            store = _event_store(root / "state")
             _commit_fanout_graph(store)
             projection = Projection(
                 root / "projection.sqlite3",
@@ -1047,96 +1072,108 @@ class SearchScaleFocusedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "physical-saturation"
             saturation._initialize_saturation_workspace(workspace)
-            runtime = ProminService(workspace)
-            commit_observations = []
-            created = saturation._ensure_semantic_corpus(
-                runtime,
-                candidate_digest="a" * 64,
-                commit_observations=commit_observations,
-            )
-            self.assertEqual(created["task_count"], 32)
-            self.assertEqual(created["relation_count"], 28)
-            self.assertEqual(
-                created["continuation_query_ids"],
-                [
-                    "task:saturation:depth:12",
-                    "task:saturation:fanout:root",
-                ],
-            )
-            self.assertLessEqual(
-                set(created["continuation_query_ids"]), set(created["query_ids"])
-            )
-            self.assertFalse(created["reused"])
-            reused = saturation._ensure_semantic_corpus(
-                runtime,
-                candidate_digest="a" * 64,
-                commit_observations=commit_observations,
-            )
-            self.assertTrue(reused["reused"])
-            self.assertEqual(reused["query_grant"]["capability_id"], "projection.read")
+            with _promin_runtime(workspace) as runtime:
+                commit_observations = []
+                created = saturation._ensure_semantic_corpus(
+                    runtime,
+                    candidate_digest="a" * 64,
+                    commit_observations=commit_observations,
+                )
+                self.assertEqual(created["task_count"], 32)
+                self.assertEqual(created["relation_count"], 28)
+                self.assertEqual(
+                    created["continuation_query_ids"],
+                    [
+                        "task:saturation:depth:12",
+                        "task:saturation:fanout:root",
+                    ],
+                )
+                self.assertLessEqual(
+                    set(created["continuation_query_ids"]), set(created["query_ids"])
+                )
+                self.assertFalse(created["reused"])
+                reused = saturation._ensure_semantic_corpus(
+                    runtime,
+                    candidate_digest="a" * 64,
+                    commit_observations=commit_observations,
+                )
+                self.assertTrue(reused["reused"])
+                self.assertEqual(
+                    reused["query_grant"]["capability_id"], "projection.read"
+                )
 
     def test_physical_relation_corpus_uses_bounded_authorized_batches(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "physical-saturation"
             saturation._initialize_saturation_workspace(workspace)
-            runtime = ProminService(workspace)
-            product = workspace / "product"
-            product.mkdir()
-            for index in range(100):
-                (product / f"record-{index:03d}.txt").write_text(
-                    f"promin fixture {index:03d}\n", encoding="utf-8"
-                )
-            descriptor = saturation._prepare_vcs_snapshot(
-                workspace, reuse_product=False
-            )
-            inventory = inventory_candidate(
-                workspace,
-                ["product"],
-                snapshot_descriptor={
-                    key: descriptor[key]
-                    for key in (
-                        "consistency_mode",
-                        "provider_id",
-                        "repository",
-                        "treeish",
+            with _promin_runtime(workspace) as runtime:
+                product = workspace / "product"
+                product.mkdir()
+                for index in range(100):
+                    (product / f"record-{index:03d}.txt").write_text(
+                        f"promin fixture {index:03d}\n", encoding="utf-8"
                     )
-                },
-            )
-            candidate_digest = inventory.candidate["candidate_digest"]
-            commit_observations = []
-            artifact_ids = [
-                saturation._entry_query(entry) for entry in inventory.entries
-            ]
-            saturation._ensure_semantic_corpus(
-                runtime,
-                candidate_digest=candidate_digest,
-                commit_observations=commit_observations,
-            )
-            created = saturation._ensure_physical_relation_corpus(
-                runtime,
-                candidate_digest=candidate_digest,
-                artifact_ids=artifact_ids,
-                relation_count=255,
-                commit_observations=commit_observations,
-            )
-            self.assertEqual(created["task_count"], 3)
-            self.assertEqual(created["relation_count"], 255)
-            self.assertEqual(created["artifact_target_count"], 100)
-            self.assertEqual(created["artifact_target_coverage"], 1.0)
-            self.assertFalse(created["reused"])
-            reused = saturation._ensure_physical_relation_corpus(
-                runtime,
-                candidate_digest=candidate_digest,
-                artifact_ids=artifact_ids,
-                relation_count=255,
-                commit_observations=commit_observations,
-            )
-            self.assertTrue(reused["reused"])
-            rebuilt = runtime.rebuild(inventory)
-            self.assertEqual(rebuilt["inventory_proxies"], 100)
-            self.assertEqual(rebuilt["inventory_relations"], 0)
-            self.assertEqual(rebuilt["synthetic_task_count"], 0)
-            self.assertEqual(rebuilt["relation_count"], 283)
+                descriptor = saturation._prepare_vcs_snapshot(
+                    workspace, reuse_product=False
+                )
+                inventory = inventory_candidate(
+                    workspace,
+                    ["product"],
+                    snapshot_descriptor={
+                        key: descriptor[key]
+                        for key in (
+                            "consistency_mode",
+                            "provider_id",
+                            "repository",
+                            "treeish",
+                        )
+                    },
+                )
+                candidate_digest = inventory.candidate["candidate_digest"]
+                commit_observations = []
+                artifact_ids = [
+                    saturation._entry_query(entry) for entry in inventory.entries
+                ]
+                saturation._ensure_semantic_corpus(
+                    runtime,
+                    candidate_digest=candidate_digest,
+                    commit_observations=commit_observations,
+                )
+                created = saturation._ensure_physical_relation_corpus(
+                    runtime,
+                    candidate_digest=candidate_digest,
+                    artifact_ids=artifact_ids,
+                    relation_count=255,
+                    commit_observations=commit_observations,
+                )
+                self.assertEqual(created["task_count"], 3)
+                self.assertEqual(created["relation_count"], 255)
+                self.assertEqual(created["artifact_target_count"], 100)
+                self.assertEqual(created["artifact_target_coverage"], 1.0)
+                self.assertFalse(created["reused"])
+                physical_commits = [
+                    observation
+                    for observation in commit_observations
+                    if observation["phase"] == "physical-relation-corpus"
+                ]
+                self.assertEqual(len(physical_commits), created["task_count"])
+                self.assertEqual(
+                    [observation["changed_records"] for observation in physical_commits],
+                    [128, 128, 2],
+                )
+                reused = saturation._ensure_physical_relation_corpus(
+                    runtime,
+                    candidate_digest=candidate_digest,
+                    artifact_ids=artifact_ids,
+                    relation_count=255,
+                    commit_observations=commit_observations,
+                )
+                self.assertTrue(reused["reused"])
+                rebuilt = runtime.rebuild(inventory)
+                self.assertEqual(rebuilt["inventory_proxies"], 100)
+                self.assertEqual(rebuilt["inventory_relations"], 0)
+                self.assertEqual(rebuilt["synthetic_task_count"], 0)
+                self.assertEqual(rebuilt["relation_count"], 283)
 
     def test_mixed_query_plan_covers_every_required_class(self) -> None:
         continuation_query_ids = [
@@ -1254,10 +1291,115 @@ class SearchScaleFocusedTests(unittest.TestCase):
                     for key in ("consistency_mode", "provider_id", "repository", "treeish")
                 },
             )
-            result = ProminService(workspace).rebuild(inventory)
-            self.assertEqual(result["inventory_entries"], 1)
-            self.assertEqual(result["inventory_proxies"], 1)
-            self.assertEqual(result["product_passes"], 0)
+            with _promin_runtime(workspace) as runtime:
+                result = runtime.rebuild(inventory)
+                self.assertEqual(result["inventory_entries"], 1)
+                self.assertEqual(result["inventory_proxies"], 1)
+                self.assertEqual(result["product_passes"], 0)
+
+    def test_snapshot_signal_requires_one_full_tree_identity_and_stream_receipt_pair(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "physical-saturation"
+            saturation._initialize_saturation_workspace(workspace)
+            product = workspace / "product"
+            product.mkdir()
+            (product / "source.txt").write_text("promin source\n", encoding="utf-8")
+            descriptor = saturation._prepare_vcs_snapshot(workspace, reuse_product=False)
+            inventory = inventory_candidate(
+                workspace,
+                ["product"],
+                snapshot_descriptor={
+                    key: descriptor[key]
+                    for key in ("consistency_mode", "provider_id", "repository", "treeish")
+                },
+            )
+            receipts = [dict(value) for value in inventory.provider_invocations]
+            self.assertEqual(len(receipts), 2)
+
+            signal = saturation._snapshot_signal(inventory, descriptor)
+            self.assertEqual(signal["provider_invocations"], receipts)
+            self.assertEqual(
+                {value["operation"] for value in signal["provider_invocations"]},
+                {"immutable-tree-object", "immutable-tree-stream"},
+            )
+            self.assertTrue(
+                all(
+                    set(value) == promin_service._IMMUTABLE_VCS_RECEIPT_FIELDS
+                    for value in signal["provider_invocations"]
+                )
+            )
+
+            candidate = dict(inventory.candidate)
+
+            def snapshot_input(
+                supplied_receipts: list[dict[str, object]],
+                *,
+                supplied_candidate: dict[str, object] | None = None,
+                supplied_binding: dict[str, object] | None = None,
+            ) -> dict[str, object]:
+                return {
+                    "candidate": candidate if supplied_candidate is None else supplied_candidate,
+                    "provider_invocations": supplied_receipts,
+                    "immutable_vcs_binding": (
+                        dict(inventory.immutable_vcs_binding)
+                        if supplied_binding is None
+                        else supplied_binding
+                    ),
+                    "entries": inventory.entries,
+                    "stream_digest": inventory.stream_digest,
+                    "stream_bytes": inventory.stream_bytes,
+                }
+
+            self.assertIsNotNone(inventory.immutable_vcs_binding)
+            with self.subTest("missing_stream_receipt"):
+                with self.assertRaisesRegex(saturation.SaturationError, "exactly two"):
+                    saturation._snapshot_signal(
+                        snapshot_input([receipts[0]]),
+                        descriptor,
+                    )
+
+            with self.subTest("duplicate_tree_receipt"):
+                with self.assertRaisesRegex(saturation.SaturationError, "canonical"):
+                    saturation._snapshot_signal(
+                        snapshot_input([receipts[0], dict(receipts[0])]),
+                        descriptor,
+                    )
+
+            with self.subTest("resealed_shared_identity_tamper"):
+                tampered_stream = dict(receipts[1])
+                tampered_stream["identity_digest"] = "0" * 64
+                tampered_stream["invocation_receipt_digest"] = saturation._digest(
+                    {
+                        key: value
+                        for key, value in tampered_stream.items()
+                        if key != "invocation_receipt_digest"
+                    }
+                )
+                with self.assertRaisesRegex(saturation.SaturationError, "share a provider binding"):
+                    saturation._snapshot_signal(
+                        snapshot_input([receipts[0], tampered_stream]),
+                        descriptor,
+                    )
+
+            with self.subTest("unsealed_content_tamper"):
+                tampered_tree = dict(receipts[0])
+                tampered_tree["stderr_capture_digest"] = "f" * 64
+                with self.assertRaisesRegex(saturation.SaturationError, "self-seal"):
+                    saturation._snapshot_signal(
+                        snapshot_input([tampered_tree, receipts[1]]),
+                        descriptor,
+                    )
+
+            with self.subTest("candidate_snapshot_digest_tamper"):
+                tampered_candidate = dict(candidate)
+                tampered_candidate["snapshot_digest"] = "f" * 64
+                with self.assertRaisesRegex(saturation.SaturationError, "snapshot digest differs"):
+                    saturation._snapshot_signal(
+                        snapshot_input(receipts, supplied_candidate=tampered_candidate),
+                        descriptor,
+                    )
 
     def test_workcard_bound_is_fail_closed_and_continuation_is_explicit(self) -> None:
         ceiling = saturation._load_ceiling()
@@ -1301,13 +1443,18 @@ class SearchScalePhysicalTests(unittest.TestCase):
         configured = os.environ.get("PROMIN_SCALE_WORKSPACE")
         if not configured:
             self.fail("PROMIN_SCALE_WORKSPACE is required for the physical scale selection")
+        configured_archive = os.environ.get("PROMIN_SCALE_ARCHIVE")
+        if not configured_archive:
+            self.fail("PROMIN_SCALE_ARCHIVE is required for the physical scale selection")
         workspace = Path(configured).resolve()
+        archive = Path(configured_archive).resolve()
         product = workspace / "product"
         reuse = product.is_dir() and any(product.iterdir())
         with tempfile.TemporaryDirectory() as temporary:
             result = saturation.run(
                 workspace,
                 Path(temporary) / "physical-saturation",
+                archive=archive,
                 files=100_000,
                 queries=600,
                 reuse_product=reuse,

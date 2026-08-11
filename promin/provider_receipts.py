@@ -15,20 +15,25 @@ there is no metadata-only cache authority in this layer.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import stat
+import time
 import unicodedata
+from bisect import bisect_left
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import RLock
 from typing import Any, Iterable, Sequence
 
 from .canonical import canonical_bytes, digest_value
+from .gate_admission import ReceiptInvalidationClass
 from .input_identity import (
-    InputIdentityError,
     ProviderInputIdentity,
+    SourceEntry,
     SourceSelection,
-    revalidate_source_selection,
 )
 from .platform_paths import filesystem_path, resolve_contained_path
 from .provider_envelope import (
@@ -53,7 +58,10 @@ _NODE_DOMAIN = b"promin.target-merkle-receipt.node.v1\0"
 _EMPTY_DOMAIN = b"promin.target-merkle-receipt.empty.v1\0"
 _MERKLE_ALGORITHM = "sha256-domain-separated-merkle-v1"
 _CLOSURE_SCHEMA = "promin.target-merkle-closure.v1"
-_RECEIPT_SCHEMA = "promin.target-merkle-receipt.v1"
+_RECEIPT_SCHEMA = "promin.target-merkle-receipt.v2"
+_CAPTURE_SCHEMA = "promin.target-merkle-capture.v1"
+_BENCHMARK_SCHEMA = "promin.target-merkle-benchmark.v1"
+_CACHE_ENTRY_OVERHEAD_BYTES = 256
 
 
 def _require_digest(value: Any, field: str) -> str:
@@ -118,10 +126,46 @@ def _canonical_paths(values: Iterable[str | Path], field: str, *, allow_empty: b
 
 
 def _assert_nonoverlapping_prefixes(paths: Sequence[str], field: str) -> None:
-    for index, left in enumerate(paths):
-        for right in paths[index + 1 :]:
-            if _under(left, right) or _under(right, left):
+    seen: set[str] = set()
+    for current in paths:
+        prefix = ""
+        for component in current.split("/")[:-1]:
+            prefix = component if not prefix else prefix + "/" + component
+            if prefix in seen:
                 raise ProviderReceiptError(f"{field} contains overlapping paths")
+        seen.add(current)
+
+
+def _transient_applies_to_selection(selected: Sequence[str], transient: Sequence[str]) -> None:
+    """Prove every declared transient has a selected descendant in O(t log n)."""
+
+    # ``_canonical_paths`` orders normalized UTF-8 paths.  UTF-8 preserves
+    # Unicode scalar ordering, so the canonical selected tuple is directly
+    # searchable with ``bisect`` without materializing a second file list.
+    for prefix in transient:
+        position = bisect_left(selected, prefix)
+        if position < len(selected) and selected[position] == prefix:
+            continue
+        descendant_prefix = prefix + "/"
+        position = bisect_left(selected, descendant_prefix)
+        if position == len(selected) or not selected[position].startswith(descendant_prefix):
+            raise ProviderReceiptError("explicit transient path is outside the selected target closure")
+
+
+def _path_is_under_transient(path: str, transient_paths: frozenset[str]) -> bool:
+    prefix = ""
+    for component in path.split("/"):
+        prefix = component if not prefix else prefix + "/" + component
+        if prefix in transient_paths:
+            return True
+    return False
+
+
+def _excluded_selected_paths(selected: Sequence[str], transient: Sequence[str]) -> tuple[str, ...]:
+    if not transient:
+        return ()
+    roots = frozenset(transient)
+    return tuple(path for path in selected if _path_is_under_transient(path, roots))
 
 
 def _selected_paths(selection: SourceSelection) -> tuple[str, ...]:
@@ -161,28 +205,6 @@ def _assert_selection_root(selection: SourceSelection) -> Path:
     return root
 
 
-def _contained_selected_file(root: Path, relative: str) -> Path:
-    candidate = root.joinpath(*PurePosixPath(relative).parts)
-    try:
-        resolve_contained_path(
-            candidate,
-            root=root,
-            require_regular=True,
-            reject_internal_links=True,
-        )
-    except Exception as exc:
-        raise ProviderReceiptError(
-            f"selected receipt input is outside the source boundary or unavailable: {relative}"
-        ) from exc
-    try:
-        state = os.lstat(filesystem_path(candidate))
-    except OSError as exc:
-        raise ProviderReceiptError(f"selected receipt input cannot be inspected: {relative}") from exc
-    if _is_link_or_reparse(candidate, state) or not stat.S_ISREG(state.st_mode):
-        raise ProviderReceiptError(f"selected receipt input is not a real regular file: {relative}")
-    return candidate
-
-
 def _stat_witness(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
     """Return a read-race witness only; it never authorizes content reuse."""
 
@@ -196,7 +218,45 @@ def _stat_witness(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
     )
 
 
-def _stable_file_digest(path: Path, *, root: Path, relative: str) -> tuple[str, int]:
+def _assert_selection_entry_matches(entry: SourceEntry, state: os.stat_result, *, relative: str) -> None:
+    """Bind a one-pass byte read to the already-authorized source selection.
+
+    The metadata comparison rejects selection drift, but it is deliberately
+    not a cache key.  The caller still hashes the exact opened bytes even when
+    all of these values match (the Windows restored-mtime attack case).
+    """
+
+    if not isinstance(entry, SourceEntry):
+        raise ProviderReceiptError("source selection contains an untyped entry")
+    observed = (
+        stat.S_IMODE(state.st_mode),
+        int(state.st_size),
+        int(state.st_dev),
+        int(state.st_ino),
+        int(state.st_mtime_ns),
+        int(state.st_ctime_ns),
+    )
+    expected = (
+        entry.mode,
+        entry.size_bytes,
+        entry.device,
+        entry.inode,
+        entry.modified_ns,
+        entry.changed_ns,
+    )
+    if observed != expected:
+        raise ProviderReceiptError(
+            f"source selection changed after containment preflight: {relative}"
+        )
+
+
+def _stable_file_digest(
+    path: Path,
+    *,
+    root: Path,
+    relative: str,
+    expected_entry: SourceEntry,
+) -> tuple[str, int]:
     """Hash one selected file while rejecting path or object replacement races."""
 
     try:
@@ -211,6 +271,7 @@ def _stable_file_digest(path: Path, *, root: Path, relative: str) -> tuple[str, 
         raise ProviderReceiptError(f"receipt input cannot be resolved before hashing: {relative}") from exc
     if _is_link_or_reparse(path, before) or not stat.S_ISREG(before.st_mode):
         raise ProviderReceiptError(f"receipt input is not a real regular file: {relative}")
+    _assert_selection_entry_matches(expected_entry, before, relative=relative)
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     descriptor: int | None = None
@@ -309,25 +370,197 @@ def _validated_leaf(value: ReceiptLeaf) -> ReceiptLeaf:
     return expected
 
 
+@dataclass(frozen=True)
+class MerkleLeafCacheLimits:
+    """Explicit process-local bounds for byte-validated leaf reuse."""
+
+    max_entries: int = 250_000
+    max_bytes: int = 128 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for field, value in (("max_entries", self.max_entries), ("max_bytes", self.max_bytes)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ProviderReceiptError(f"leaf cache {field} must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class MerkleLeafCacheStatistics:
+    """A non-crediting view of bounded in-memory cache behavior."""
+
+    entry_count: int
+    accounted_bytes: int
+    hits: int
+    misses: int
+    evictions: int
+    uncacheable_leaves: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_type": "MerkleLeafCacheStatistics",
+            "schema": "promin.merkle-leaf-cache.v1",
+            "entry_count": self.entry_count,
+            "accounted_bytes": self.accounted_bytes,
+            "hits": self.hits,
+            "misses": self.misses,
+            "evictions": self.evictions,
+            "uncacheable_leaves": self.uncacheable_leaves,
+            "acceptance_pass": False,
+            "pass_credit": False,
+        }
+
+
+def _leaf_cache_cost(leaf: ReceiptLeaf) -> int:
+    """Conservative bounded-accounting cost, not a host heap measurement."""
+
+    return _CACHE_ENTRY_OVERHEAD_BYTES + len(leaf.path.encode("utf-8"))
+
+
+class MerkleLeafCache:
+    """LRU leaf reuse that accepts a hit only after a fresh byte SHA-256.
+
+    This is intentionally process-local and stores no host paths.  A caller
+    cannot obtain a leaf from it using metadata; :meth:`_after_byte_validation`
+    receives the SHA-256 generated by the current physical read.
+    """
+
+    def __init__(self, limits: MerkleLeafCacheLimits | None = None) -> None:
+        self._limits = MerkleLeafCacheLimits() if limits is None else limits
+        if not isinstance(self._limits, MerkleLeafCacheLimits):
+            raise ProviderReceiptError("leaf cache limits must be typed")
+        self._entries: OrderedDict[tuple[str, str, int], tuple[ReceiptLeaf, int]] = OrderedDict()
+        self._accounted_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._uncacheable_leaves = 0
+        self._lock = RLock()
+
+    @property
+    def limits(self) -> MerkleLeafCacheLimits:
+        return self._limits
+
+    def statistics(self) -> MerkleLeafCacheStatistics:
+        with self._lock:
+            return MerkleLeafCacheStatistics(
+                entry_count=len(self._entries),
+                accounted_bytes=self._accounted_bytes,
+                hits=self._hits,
+                misses=self._misses,
+                evictions=self._evictions,
+                uncacheable_leaves=self._uncacheable_leaves,
+            )
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._accounted_bytes = 0
+
+    def _after_byte_validation(
+        self,
+        *,
+        path: str,
+        sha256: str,
+        byte_count: int,
+    ) -> tuple[ReceiptLeaf, bool, int, bool]:
+        """Reuse only a leaf that equals the digest from this capture's read."""
+
+        fresh = ReceiptLeaf.from_content(path, sha256, byte_count)
+        key = (fresh.path, fresh.sha256, fresh.byte_count)
+        cost = _leaf_cache_cost(fresh)
+        with self._lock:
+            cached = self._entries.pop(key, None)
+            if cached is not None:
+                leaf, recorded_cost = cached
+                if leaf != fresh or recorded_cost != cost:
+                    raise ProviderReceiptError("leaf cache entry does not match fresh byte validation")
+                self._entries[key] = cached
+                self._hits += 1
+                return leaf, True, 0, False
+
+            self._misses += 1
+            if (
+                self._limits.max_entries == 0
+                or cost > self._limits.max_bytes
+                or self._limits.max_bytes == 0
+            ):
+                self._uncacheable_leaves += 1
+                return fresh, False, 0, True
+            local_evictions = 0
+            while self._entries and (
+                len(self._entries) >= self._limits.max_entries
+                or self._accounted_bytes + cost > self._limits.max_bytes
+            ):
+                _, (_, evicted_cost) = self._entries.popitem(last=False)
+                self._accounted_bytes -= evicted_cost
+                self._evictions += 1
+                local_evictions += 1
+            if (
+                len(self._entries) >= self._limits.max_entries
+                or self._accounted_bytes + cost > self._limits.max_bytes
+            ):
+                self._uncacheable_leaves += 1
+                return fresh, False, local_evictions, True
+            self._entries[key] = (fresh, cost)
+            self._accounted_bytes += cost
+            return fresh, False, local_evictions, False
+
+
+def _merkle_root_ordered(leaves: Iterable[ReceiptLeaf], *, validate: bool = True) -> str:
+    """Fold canonically ordered leaves with O(log n) intermediate hashes."""
+
+    stack: list[str | None] = []
+    previous_path: str | None = None
+    count = 0
+    for raw_leaf in leaves:
+        leaf = _validated_leaf(raw_leaf) if validate else raw_leaf
+        if not isinstance(leaf, ReceiptLeaf):
+            raise ProviderReceiptError("Merkle closure contains an untyped receipt leaf")
+        if previous_path is not None and leaf.path <= previous_path:
+            if leaf.path == previous_path:
+                raise ProviderReceiptError("Merkle closure contains duplicate logical paths")
+            raise ProviderReceiptError("Merkle closure leaves are not in canonical order")
+        previous_path = leaf.path
+        node = leaf.leaf_digest
+        level = 0
+        while True:
+            if level == len(stack):
+                stack.append(node)
+                break
+            left = stack[level]
+            if left is None:
+                stack[level] = node
+                break
+            node = _domain_hash(_NODE_DOMAIN, {"left": left, "right": node})
+            stack[level] = None
+            level += 1
+        count += 1
+    if count == 0:
+        return hashlib.sha256(_EMPTY_DOMAIN).hexdigest()
+
+    folded: str | None = None
+    folded_level = 0
+    for level, left in enumerate(stack):
+        if left is None:
+            continue
+        if folded is None:
+            folded = left
+            folded_level = level
+            continue
+        while folded_level < level:
+            folded = _domain_hash(_NODE_DOMAIN, {"left": folded, "right": folded})
+            folded_level += 1
+        folded = _domain_hash(_NODE_DOMAIN, {"left": left, "right": folded})
+        folded_level = level + 1
+    if folded is None:  # Defensive; count above proves a tree exists.
+        raise ProviderReceiptError("Merkle closure fold is unavailable")
+    return folded
+
+
 def merkle_root(leaves: Iterable[ReceiptLeaf]) -> str:
     """Calculate one order-stable, domain-separated Merkle root."""
 
-    typed = tuple(_validated_leaf(item) for item in leaves)
-    ordered = tuple(sorted(typed, key=lambda item: item.path.encode("utf-8")))
-    paths = tuple(item.path for item in ordered)
-    if len(paths) != len(set(paths)):
-        raise ProviderReceiptError("Merkle closure contains duplicate logical paths")
-    if not ordered:
-        return hashlib.sha256(_EMPTY_DOMAIN).hexdigest()
-    level = [item.leaf_digest for item in ordered]
-    while len(level) > 1:
-        next_level: list[str] = []
-        for index in range(0, len(level), 2):
-            left = level[index]
-            right = level[index + 1] if index + 1 < len(level) else left
-            next_level.append(_domain_hash(_NODE_DOMAIN, {"left": left, "right": right}))
-        level = next_level
-    return level[0]
+    ordered = sorted((_validated_leaf(item) for item in leaves), key=lambda item: item.path.encode("utf-8"))
+    return _merkle_root_ordered(ordered, validate=False)
 
 
 @dataclass(frozen=True)
@@ -368,6 +601,148 @@ class TargetClosure:
         }
 
 
+@dataclass(frozen=True)
+class TargetClosureLimits:
+    """Bound materialized receipt state while allowing a 100k-file closure."""
+
+    max_files: int = 250_000
+    max_total_bytes: int = 16 * 1024 * 1024 * 1024
+    max_leaf_accounted_bytes: int = 128 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("max_files", self.max_files),
+            ("max_total_bytes", self.max_total_bytes),
+            ("max_leaf_accounted_bytes", self.max_leaf_accounted_bytes),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ProviderReceiptError(f"target closure {field} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class TargetClosureCapture:
+    """One physical traversal's bounded, non-crediting capture observations."""
+
+    closure: TargetClosure
+    physical_traversal_passes: int
+    files_byte_validated: int
+    bytes_byte_validated: int
+    leaf_cache_hits: int
+    leaf_cache_misses: int
+    leaf_cache_evictions: int
+    leaf_cache_uncacheable_leaves: int
+    leaf_accounted_bytes: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.closure, TargetClosure):
+            raise ProviderReceiptError("target closure capture requires a typed closure")
+        for field, value in (
+            ("physical_traversal_passes", self.physical_traversal_passes),
+            ("files_byte_validated", self.files_byte_validated),
+            ("bytes_byte_validated", self.bytes_byte_validated),
+            ("leaf_cache_hits", self.leaf_cache_hits),
+            ("leaf_cache_misses", self.leaf_cache_misses),
+            ("leaf_cache_evictions", self.leaf_cache_evictions),
+            ("leaf_cache_uncacheable_leaves", self.leaf_cache_uncacheable_leaves),
+            ("leaf_accounted_bytes", self.leaf_accounted_bytes),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ProviderReceiptError(f"target closure capture {field} must be non-negative")
+        if self.physical_traversal_passes != 1:
+            raise ProviderReceiptError("target closure capture must report exactly one physical traversal")
+        if self.files_byte_validated != len(self.closure.leaves):
+            raise ProviderReceiptError("target closure capture file count does not match closure leaves")
+        if self.bytes_byte_validated != self.closure.total_bytes:
+            raise ProviderReceiptError("target closure capture byte count does not match closure")
+        if self.leaf_cache_hits + self.leaf_cache_misses != self.files_byte_validated:
+            raise ProviderReceiptError("target closure capture cache accounting does not match leaf count")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_type": "TargetClosureCapture",
+            "schema": _CAPTURE_SCHEMA,
+            "closure_digest": self.closure.closure_digest,
+            "physical_traversal_passes": self.physical_traversal_passes,
+            "files_byte_validated": self.files_byte_validated,
+            "bytes_byte_validated": self.bytes_byte_validated,
+            "leaf_cache": {
+                "hits": self.leaf_cache_hits,
+                "misses": self.leaf_cache_misses,
+                "evictions": self.leaf_cache_evictions,
+                "uncacheable_leaves": self.leaf_cache_uncacheable_leaves,
+                "accounted_leaf_bytes": self.leaf_accounted_bytes,
+            },
+            "acceptance_pass": False,
+            "pass_credit": False,
+        }
+
+
+@dataclass(frozen=True)
+class TargetClosureBenchmark:
+    """A controlled diagnostic benchmark; it never grants performance credit."""
+
+    samples: int
+    warmup_samples: int
+    file_count: int
+    elapsed_seconds: tuple[float, ...]
+    p95_seconds: float
+    requested_budget_seconds: float | None
+    within_budget: bool | None
+    cache_hits: int
+    cache_misses: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.samples, int) or isinstance(self.samples, bool) or not 1 <= self.samples <= 5:
+            raise ProviderReceiptError("benchmark samples must be between one and five")
+        if not isinstance(self.warmup_samples, int) or isinstance(self.warmup_samples, bool) or not 0 <= self.warmup_samples <= 2:
+            raise ProviderReceiptError("benchmark warmup_samples must be between zero and two")
+        if not isinstance(self.file_count, int) or isinstance(self.file_count, bool) or self.file_count < 1:
+            raise ProviderReceiptError("benchmark file_count must be positive")
+        if len(self.elapsed_seconds) != self.samples or any(
+            not isinstance(value, float) or not math.isfinite(value) or value < 0.0
+            for value in self.elapsed_seconds
+        ):
+            raise ProviderReceiptError("benchmark elapsed_seconds are invalid")
+        if (
+            not isinstance(self.p95_seconds, float)
+            or not math.isfinite(self.p95_seconds)
+            or self.p95_seconds < 0.0
+        ):
+            raise ProviderReceiptError("benchmark p95_seconds is invalid")
+        if self.requested_budget_seconds is None:
+            if self.within_budget is not None:
+                raise ProviderReceiptError("benchmark without a budget must not claim within_budget")
+        elif (
+            not isinstance(self.requested_budget_seconds, float)
+            or not math.isfinite(self.requested_budget_seconds)
+            or self.requested_budget_seconds <= 0.0
+            or not isinstance(self.within_budget, bool)
+        ):
+            raise ProviderReceiptError("benchmark budget fields are invalid")
+        for field, value in (("cache_hits", self.cache_hits), ("cache_misses", self.cache_misses)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ProviderReceiptError(f"benchmark {field} must be non-negative")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_type": "TargetClosureBenchmark",
+            "schema": _BENCHMARK_SCHEMA,
+            "classification": "DIAGNOSTIC_ONLY",
+            "samples": self.samples,
+            "warmup_samples": self.warmup_samples,
+            "file_count": self.file_count,
+            "elapsed_seconds": list(self.elapsed_seconds),
+            "p95_seconds": self.p95_seconds,
+            "requested_budget_seconds": self.requested_budget_seconds,
+            "within_budget": self.within_budget,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "performance_acceptance": False,
+            "acceptance_pass": False,
+            "pass_credit": False,
+        }
+
+
 def validate_target_closure(closure: TargetClosure) -> TargetClosure:
     """Recompute a closure's exact leaf set and content-addressed identity."""
 
@@ -389,9 +764,8 @@ def validate_target_closure(closure: TargetClosure) -> TargetClosure:
     if closure.transient_paths != transient:
         raise ProviderReceiptError("target closure transient paths are not in canonical order")
     _assert_nonoverlapping_prefixes(transient, "target closure transient paths")
-    if any(not any(_under(path, prefix) for path in selected) for prefix in transient):
-        raise ProviderReceiptError("target closure declares a transient path outside its selected inputs")
-    excluded = tuple(path for path in selected if any(_under(path, prefix) for prefix in transient))
+    _transient_applies_to_selection(selected, transient)
+    excluded = _excluded_selected_paths(selected, transient)
     if closure.excluded_paths != excluded:
         raise ProviderReceiptError("target closure excluded paths do not match explicit transient paths")
     if not isinstance(closure.leaves, tuple):
@@ -407,7 +781,7 @@ def validate_target_closure(closure: TargetClosure) -> TargetClosure:
     total_bytes = sum(item.byte_count for item in leaves)
     if closure.total_bytes != total_bytes:
         raise ProviderReceiptError("target closure byte count mismatch")
-    root = merkle_root(leaves)
+    root = _merkle_root_ordered(leaves, validate=False)
     if closure.merkle_root != root:
         raise ProviderReceiptError("target closure Merkle root mismatch")
     normalized = TargetClosure(
@@ -435,42 +809,78 @@ def validate_target_closure(closure: TargetClosure) -> TargetClosure:
     )
 
 
-def scan_target_closure(
+def capture_target_closure(
     selection: SourceSelection,
     *,
     transient_paths: Iterable[str | Path] = (),
-) -> TargetClosure:
-    """Hash all and only a canonical selected target closure.
+    leaf_cache: MerkleLeafCache | None = None,
+    limits: TargetClosureLimits | None = None,
+) -> TargetClosureCapture:
+    """Capture a closure in one physical source traversal.
 
     ``selection`` is intentionally the typed output of
     :func:`input_identity.validate_source_selection`; raw roots and path lists
-    are not admitted here.  That keeps containment and source selection owned
-    by one canonical layer before this module reads a single source byte.
+    are not admitted here.  The preflight metadata is compared while each file
+    is opened and byte-hashed, rather than by a separate filesystem traversal.
+    A cache hit is possible only after that fresh byte hash matches a leaf.
     """
 
     if not isinstance(selection, SourceSelection):
         raise ProviderReceiptError("target closure requires a typed source selection")
-    try:
-        # SourceSelection is the canonical owner of pre-hash membership and
-        # metadata drift detection.  A successful revalidation is still never
-        # byte authority: the loop below hashes every included file again.
-        selection = revalidate_source_selection(selection)
-    except InputIdentityError as exc:
-        raise ProviderReceiptError("source selection changed after containment preflight") from exc
+    active_limits = TargetClosureLimits() if limits is None else limits
+    if not isinstance(active_limits, TargetClosureLimits):
+        raise ProviderReceiptError("target closure limits must be typed")
+    if leaf_cache is not None and not isinstance(leaf_cache, MerkleLeafCache):
+        raise ProviderReceiptError("target closure leaf_cache must be typed")
     selected = _selected_paths(selection)
+    if len(selected) > active_limits.max_files:
+        raise ProviderReceiptError("target closure exceeds its selected-file bound")
     root = _assert_selection_root(selection)
     transient = _canonical_paths(transient_paths, "explicit transient path", allow_empty=True)
     _assert_nonoverlapping_prefixes(transient, "explicit transient paths")
-    if any(not any(_under(path, prefix) for path in selected) for prefix in transient):
-        raise ProviderReceiptError("explicit transient path is outside the selected target closure")
-    excluded = tuple(path for path in selected if any(_under(path, prefix) for prefix in transient))
+    _transient_applies_to_selection(selected, transient)
+    excluded = _excluded_selected_paths(selected, transient)
+    if len(excluded) == len(selected):
+        raise ProviderReceiptError("target closure must retain at least one non-transient source file")
+    transient_roots = frozenset(transient)
     leaves: list[ReceiptLeaf] = []
-    for relative in selected:
-        if relative in excluded:
+    total_bytes = 0
+    leaf_accounted_bytes = 0
+    cache_hits = 0
+    cache_misses = 0
+    cache_evictions = 0
+    cache_uncacheable = 0
+    for entry in selection.entries:
+        relative = entry.path
+        if _path_is_under_transient(relative, transient_roots):
             continue
-        candidate = _contained_selected_file(root, relative)
-        sha256, byte_count = _stable_file_digest(candidate, root=root, relative=relative)
-        leaves.append(ReceiptLeaf.from_content(relative, sha256, byte_count))
+        candidate = root.joinpath(*PurePosixPath(relative).parts)
+        sha256, byte_count = _stable_file_digest(
+            candidate,
+            root=root,
+            relative=relative,
+            expected_entry=entry,
+        )
+        total_bytes += byte_count
+        if total_bytes > active_limits.max_total_bytes:
+            raise ProviderReceiptError("target closure exceeds its byte bound")
+        if leaf_cache is None:
+            leaf = ReceiptLeaf.from_content(relative, sha256, byte_count)
+            cache_misses += 1
+        else:
+            leaf, hit, evictions, uncacheable = leaf_cache._after_byte_validation(
+                path=relative,
+                sha256=sha256,
+                byte_count=byte_count,
+            )
+            cache_hits += int(hit)
+            cache_misses += int(not hit)
+            cache_evictions += evictions
+            cache_uncacheable += int(uncacheable)
+        leaf_accounted_bytes += _leaf_cache_cost(leaf)
+        if leaf_accounted_bytes > active_limits.max_leaf_accounted_bytes:
+            raise ProviderReceiptError("target closure exceeds its materialized leaf bound")
+        leaves.append(leaf)
     _assert_selection_root(selection)
     provisional = TargetClosure(
         selection_digest=selection.selection_digest,
@@ -478,8 +888,8 @@ def scan_target_closure(
         transient_paths=transient,
         excluded_paths=excluded,
         leaves=tuple(leaves),
-        total_bytes=sum(item.byte_count for item in leaves),
-        merkle_root=merkle_root(leaves),
+        total_bytes=total_bytes,
+        merkle_root=_merkle_root_ordered(leaves, validate=False),
         closure_digest="",
     )
     closure = TargetClosure(
@@ -492,7 +902,106 @@ def scan_target_closure(
         merkle_root=provisional.merkle_root,
         closure_digest=digest_value(provisional.authority_identity),
     )
-    return validate_target_closure(closure)
+    normalized = validate_target_closure(closure)
+    return TargetClosureCapture(
+        closure=normalized,
+        physical_traversal_passes=1,
+        files_byte_validated=len(normalized.leaves),
+        bytes_byte_validated=normalized.total_bytes,
+        leaf_cache_hits=cache_hits,
+        leaf_cache_misses=cache_misses,
+        leaf_cache_evictions=cache_evictions,
+        leaf_cache_uncacheable_leaves=cache_uncacheable,
+        leaf_accounted_bytes=leaf_accounted_bytes,
+    )
+
+
+def scan_target_closure(
+    selection: SourceSelection,
+    *,
+    transient_paths: Iterable[str | Path] = (),
+    leaf_cache: MerkleLeafCache | None = None,
+    limits: TargetClosureLimits | None = None,
+) -> TargetClosure:
+    """Return the closure from one byte-validated physical capture."""
+
+    return capture_target_closure(
+        selection,
+        transient_paths=transient_paths,
+        leaf_cache=leaf_cache,
+        limits=limits,
+    ).closure
+
+
+def benchmark_target_closure_capture(
+    selection: SourceSelection,
+    *,
+    transient_paths: Iterable[str | Path] = (),
+    leaf_cache: MerkleLeafCache | None = None,
+    limits: TargetClosureLimits | None = None,
+    samples: int = 3,
+    warmup_samples: int = 1,
+    budget_seconds: float | None = None,
+) -> TargetClosureBenchmark:
+    """Run a bounded diagnostic-only benchmark over real byte captures.
+
+    It intentionally reports observations rather than a performance pass.  A
+    caller supplies a preselected target and may choose a process-local cache;
+    no source file is synthesized, mutated, or persisted by this helper.
+    """
+
+    if not isinstance(samples, int) or isinstance(samples, bool) or not 1 <= samples <= 5:
+        raise ProviderReceiptError("benchmark samples must be between one and five")
+    if not isinstance(warmup_samples, int) or isinstance(warmup_samples, bool) or not 0 <= warmup_samples <= 2:
+        raise ProviderReceiptError("benchmark warmup_samples must be between zero and two")
+    if budget_seconds is not None and (
+        isinstance(budget_seconds, bool)
+        or not isinstance(budget_seconds, (int, float))
+        or not math.isfinite(float(budget_seconds))
+        or float(budget_seconds) <= 0.0
+    ):
+        raise ProviderReceiptError("benchmark budget_seconds must be a positive finite number")
+    shared_cache = MerkleLeafCache() if leaf_cache is None else leaf_cache
+    for _ in range(warmup_samples):
+        capture_target_closure(
+            selection,
+            transient_paths=transient_paths,
+            leaf_cache=shared_cache,
+            limits=limits,
+        )
+    elapsed: list[float] = []
+    hits = 0
+    misses = 0
+    file_count: int | None = None
+    for _ in range(samples):
+        started = time.perf_counter()
+        capture = capture_target_closure(
+            selection,
+            transient_paths=transient_paths,
+            leaf_cache=shared_cache,
+            limits=limits,
+        )
+        elapsed.append(float(time.perf_counter() - started))
+        hits += capture.leaf_cache_hits
+        misses += capture.leaf_cache_misses
+        if file_count is None:
+            file_count = capture.files_byte_validated
+        elif file_count != capture.files_byte_validated:
+            raise ProviderReceiptError("benchmark target closure changed between controlled samples")
+    ordered = sorted(elapsed)
+    p95 = ordered[(95 * len(ordered) + 99) // 100 - 1]
+    budget = None if budget_seconds is None else float(budget_seconds)
+    return TargetClosureBenchmark(
+        samples=samples,
+        warmup_samples=warmup_samples,
+        file_count=0 if file_count is None else file_count,
+        elapsed_seconds=tuple(elapsed),
+        p95_seconds=float(p95),
+        requested_budget_seconds=budget,
+        within_budget=None if budget is None else p95 <= budget,
+        cache_hits=hits,
+        cache_misses=misses,
+    )
 
 
 def _canonical_record_sha256(value: Any) -> str:
@@ -523,6 +1032,7 @@ class TargetMerkleReceipt:
     lifecycle_interval_bytes_sha256: str | None
     lineage: dict[str, str]
     receipt_digest: str
+    contributing_envelope_digests: tuple[str, ...] = ()
 
     @property
     def authority_identity(self) -> dict[str, Any]:
@@ -547,6 +1057,9 @@ class TargetMerkleReceipt:
             "target_closure": {
                 "closure_digest": self.target_closure_digest,
                 "canonical_bytes_sha256": self.target_closure_bytes_sha256,
+            },
+            "contributor_lineage": {
+                "contributing_envelope_digests": list(self.contributing_envelope_digests),
             },
             "lineage": dict(self.lineage),
         }
@@ -585,6 +1098,20 @@ def _validate_receipt_shape(receipt: TargetMerkleReceipt) -> TargetMerkleReceipt
         _require_digest(value, field)
     if not isinstance(receipt.provider_scan_mode, ScanMode):
         raise ProviderReceiptError("target receipt provider scan mode must be typed")
+    if not isinstance(receipt.contributing_envelope_digests, tuple):
+        raise ProviderReceiptError("target receipt contributor lineage must be an exact tuple")
+    contributors = tuple(
+        sorted(
+            (_require_digest(value, "contributing envelope digest") for value in receipt.contributing_envelope_digests),
+            key=lambda value: value.encode("utf-8"),
+        )
+    )
+    if not contributors or len(contributors) != len(set(contributors)):
+        raise ProviderReceiptError("target receipt contributor lineage must be non-empty and unique")
+    if receipt.contributing_envelope_digests != contributors:
+        raise ProviderReceiptError("target receipt contributor lineage is not canonical")
+    if receipt.provider_envelope_digest not in contributors:
+        raise ProviderReceiptError("target receipt primary envelope is absent from contributor lineage")
     if (receipt.lifecycle_interval_digest is None) != (receipt.lifecycle_interval_bytes_sha256 is None):
         raise ProviderReceiptError("target receipt lifecycle binding is incomplete")
     if receipt.lifecycle_interval_digest is not None:
@@ -604,6 +1131,56 @@ def _validate_receipt_shape(receipt: TargetMerkleReceipt) -> TargetMerkleReceipt
     return receipt
 
 
+def classify_target_receipt_invalidation(
+    previous: TargetClosure,
+    current: TargetClosure,
+    *,
+    previous_receipt: TargetMerkleReceipt | None = None,
+    current_receipt: TargetMerkleReceipt | None = None,
+) -> ReceiptInvalidationClass:
+    """Classify a verified closure change without trusting cache metadata.
+
+    Provider/contributor changes are deliberately ranked before target-leaf
+    differences: they require the stronger existing configure/provider route.
+    When both receipts are absent, classification is restricted to the exact
+    byte/Merkle closure.  Supplying only one receipt is ambiguous and fails.
+    """
+
+    before = validate_target_closure(previous)
+    after = validate_target_closure(current)
+    if (previous_receipt is None) != (current_receipt is None):
+        raise ProviderReceiptError("receipt invalidation requires both contributor lineages or neither")
+    if previous_receipt is not None and current_receipt is not None:
+        prior_receipt = _validate_receipt_shape(previous_receipt)
+        next_receipt = _validate_receipt_shape(current_receipt)
+        if (
+            prior_receipt.input_identity_digest != next_receipt.input_identity_digest
+            or prior_receipt.provider_envelope_digest != next_receipt.provider_envelope_digest
+            or prior_receipt.provider_envelope_bytes_sha256
+            != next_receipt.provider_envelope_bytes_sha256
+        ):
+            return ReceiptInvalidationClass.PROVIDER_IDENTITY_CHANGED
+        if (
+            prior_receipt.coverage_union_digest != next_receipt.coverage_union_digest
+            or prior_receipt.coverage_union_bytes_sha256
+            != next_receipt.coverage_union_bytes_sha256
+            or prior_receipt.contributing_envelope_digests
+            != next_receipt.contributing_envelope_digests
+        ):
+            return ReceiptInvalidationClass.DEPENDENCY_CLOSURE_CHANGED
+    if before.transient_paths != after.transient_paths:
+        return ReceiptInvalidationClass.TRANSIENT_POLICY_CHANGED
+    if before.selected_paths != after.selected_paths or before.excluded_paths != after.excluded_paths:
+        return ReceiptInvalidationClass.SOURCE_TOPOLOGY_CHANGED
+    before_leaves = tuple((leaf.path, leaf.sha256, leaf.byte_count) for leaf in before.leaves)
+    after_leaves = tuple((leaf.path, leaf.sha256, leaf.byte_count) for leaf in after.leaves)
+    if before_leaves != after_leaves or before.merkle_root != after.merkle_root:
+        return ReceiptInvalidationClass.BYTE_CONTENT_CHANGED
+    if before.selection_digest != after.selection_digest:
+        return ReceiptInvalidationClass.SELECTION_DRIFT
+    return ReceiptInvalidationClass.REUSE_VALIDATED
+
+
 def _bindable_records(
     *,
     selection: SourceSelection,
@@ -613,7 +1190,14 @@ def _bindable_records(
     coverage_union: CoverageUnion,
     provider_artifact_path: str | os.PathLike[str],
     lifecycle_interval: ConservativeTimestampInterval | None,
-) -> tuple[TargetClosure, dict[str, Any], bytes, dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    TargetClosure,
+    dict[str, Any],
+    bytes,
+    dict[str, Any],
+    dict[str, Any] | None,
+    tuple[str, ...],
+]:
     if not isinstance(selection, SourceSelection):
         raise ProviderReceiptError("target receipt requires a typed source selection")
     selected = _selected_paths(selection)
@@ -660,7 +1244,14 @@ def _bindable_records(
         if not isinstance(lifecycle_interval, ConservativeTimestampInterval):
             raise ProviderReceiptError("target receipt lifecycle interval must be typed")
         interval_record = lifecycle_interval.to_record()
-    return normalized_closure, selection.to_record(), envelope_bytes, coverage_record, interval_record
+    return (
+        normalized_closure,
+        selection.to_record(),
+        envelope_bytes,
+        coverage_record,
+        interval_record,
+        coverage_union.contributing_envelope_digests,
+    )
 
 
 def bind_target_merkle_receipt(
@@ -683,7 +1274,14 @@ def bind_target_merkle_receipt(
     """
 
     identifier = _require_identifier(target_id, "target_id")
-    normalized, selection_record, envelope_bytes, coverage_record, interval_record = _bindable_records(
+    (
+        normalized,
+        selection_record,
+        envelope_bytes,
+        coverage_record,
+        interval_record,
+        contributors,
+    ) = _bindable_records(
         selection=selection,
         closure=closure,
         input_identity=input_identity,
@@ -724,6 +1322,7 @@ def bind_target_merkle_receipt(
         ),
         lineage=lineage,
         receipt_digest="",
+        contributing_envelope_digests=contributors,
     )
     receipt = TargetMerkleReceipt(
         target_id=provisional.target_id,
@@ -741,6 +1340,7 @@ def bind_target_merkle_receipt(
         lifecycle_interval_bytes_sha256=provisional.lifecycle_interval_bytes_sha256,
         lineage=provisional.lineage,
         receipt_digest=digest_value(provisional.authority_identity),
+        contributing_envelope_digests=provisional.contributing_envelope_digests,
     )
     return _validate_receipt_shape(receipt)
 

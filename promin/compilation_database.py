@@ -43,6 +43,11 @@ class CompilationDatabaseReport:
     pass_credit: bool = False
     acceptance_pass: bool = False
     product_acceptance_pass: bool = False
+    database_bytes: int | None = None
+    row_count: int = 0
+    max_database_bytes: int | None = None
+    max_rows: int | None = None
+    allowed_source_extensions: tuple[str, ...] = ()
 
     @property
     def command_count(self) -> int:
@@ -75,6 +80,29 @@ def _is_regular_file(path: Path) -> bool:
         return False
 
 
+def _optional_positive_limit(value: int | None, label: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise CompilationDatabaseError(f"{label} must be a positive integer or None")
+    return value
+
+
+def _normalized_source_extensions(value: Sequence[str] | None) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not value:
+        raise CompilationDatabaseError("allowed_source_extensions must be a non-empty extension sequence or None")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.startswith(".") or len(item) == 1 or "/" in item or "\\" in item:
+            raise CompilationDatabaseError("allowed_source_extensions contains an invalid extension")
+        normalized.append(item.casefold())
+    if len(normalized) != len(set(normalized)):
+        raise CompilationDatabaseError("allowed_source_extensions contains duplicate extensions")
+    return frozenset(normalized)
+
+
 def _resolve_directory(value: Any, root: Path) -> Path:
     if not isinstance(value, str) or not value:
         raise CompilationDatabaseError("compilation database row directory must be a non-empty string")
@@ -89,7 +117,12 @@ def _resolve_directory(value: Any, root: Path) -> Path:
     return resolved
 
 
-def _source_identity(value: Any, directory: Path, root: Path) -> tuple[Path, str, str]:
+def _source_identity(
+    value: Any,
+    directory: Path,
+    root: Path,
+    allowed_source_extensions: frozenset[str] | None,
+) -> tuple[Path, str, str]:
     if not isinstance(value, str) or not value:
         raise CompilationDatabaseError("compilation database row file must be a non-empty string")
     raw = Path(value)
@@ -106,6 +139,8 @@ def _source_identity(value: Any, directory: Path, root: Path) -> tuple[Path, str
         raise CompilationDatabaseError("compilation database source is outside project root") from exc
     if not relative or relative.startswith("../"):
         raise CompilationDatabaseError("compilation database source has an invalid canonical identity")
+    if allowed_source_extensions is not None and source.suffix.casefold() not in allowed_source_extensions:
+        raise CompilationDatabaseError("compilation database source extension is not selected for this analysis")
     return source, relative, _sha256_file(source)
 
 
@@ -188,7 +223,11 @@ def _canonical_argument(argument: str, source: Path, directory: Path, root: Path
     return argument
 
 
-def _row_command(row: Any, root: Path) -> CompilationCommand:
+def _row_command(
+    row: Any,
+    root: Path,
+    allowed_source_extensions: frozenset[str] | None,
+) -> CompilationCommand:
     if not isinstance(row, Mapping):
         raise CompilationDatabaseError("compilation database row must be an object")
     unknown = set(row) - _ROW_KEYS
@@ -197,7 +236,9 @@ def _row_command(row: Any, root: Path) -> CompilationCommand:
     if "directory" not in row or "file" not in row:
         raise CompilationDatabaseError("compilation database row requires directory and file")
     directory = _resolve_directory(row["directory"], root)
-    source, source_path, source_sha256 = _source_identity(row["file"], directory, root)
+    source, source_path, source_sha256 = _source_identity(
+        row["file"], directory, root, allowed_source_extensions
+    )
     arguments = _arguments_from_row(row)
     driver_identity = _driver_identity(arguments)
     if not _has_compile_intent(arguments):
@@ -225,9 +266,22 @@ def _row_command(row: Any, root: Path) -> CompilationCommand:
 def verify_compilation_database(
     database_path: Path | str,
     project_root: Path | str,
+    *,
+    max_database_bytes: int | None = None,
+    max_rows: int | None = None,
+    allowed_source_extensions: Sequence[str] | None = None,
 ) -> CompilationDatabaseReport:
-    """Validate a CompDB without falling back to handwritten compiler commands."""
+    """Validate a CompDB without falling back to handwritten compiler commands.
 
+    Optional size and row bounds are caller-owned analysis budgets.  Exceeding
+    one leaves the database ``UNAVAILABLE`` to this bounded run rather than
+    silently processing a partial input or constructing a guessed command.
+    """
+
+    byte_limit = _optional_positive_limit(max_database_bytes, "max_database_bytes")
+    row_limit = _optional_positive_limit(max_rows, "max_rows")
+    extensions = _normalized_source_extensions(allowed_source_extensions)
+    rendered_extensions = () if extensions is None else tuple(sorted(extensions))
     path = Path(database_path)
     root = Path(project_root)
     try:
@@ -239,6 +293,9 @@ def verify_compilation_database(
             digest=None,
             commands=(),
             errors=("project root is unavailable",),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
     if not root.is_dir():
         return CompilationDatabaseReport(
@@ -247,6 +304,9 @@ def verify_compilation_database(
             digest=None,
             commands=(),
             errors=("project root is not a directory",),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
     if not path.exists():
         return CompilationDatabaseReport(
@@ -255,6 +315,9 @@ def verify_compilation_database(
             digest=None,
             commands=(),
             errors=("canonical compilation database is absent",),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
     if not _is_regular_file(path):
         return CompilationDatabaseReport(
@@ -263,6 +326,34 @@ def verify_compilation_database(
             digest=None,
             commands=(),
             errors=("canonical compilation database must be a physical regular file",),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
+        )
+    try:
+        database_bytes = path.stat(follow_symlinks=False).st_size
+    except OSError as exc:
+        return CompilationDatabaseReport(
+            status=GateStatus.FAIL,
+            database_path=str(path),
+            digest=None,
+            commands=(),
+            errors=(f"canonical compilation database cannot be statted: {exc}",),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
+        )
+    if byte_limit is not None and database_bytes > byte_limit:
+        return CompilationDatabaseReport(
+            status=GateStatus.UNAVAILABLE,
+            database_path=str(path),
+            digest=None,
+            commands=(),
+            errors=("canonical compilation database exceeds the caller-supplied byte bound",),
+            database_bytes=database_bytes,
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
     try:
         raw_bytes = path.read_bytes()
@@ -274,14 +365,50 @@ def verify_compilation_database(
             digest=None,
             commands=(),
             errors=(f"canonical compilation database is invalid JSON: {exc}",),
+            database_bytes=database_bytes,
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
+        )
+    actual_database_bytes = len(raw_bytes)
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    if byte_limit is not None and actual_database_bytes > byte_limit:
+        return CompilationDatabaseReport(
+            status=GateStatus.UNAVAILABLE,
+            database_path=str(path),
+            digest=digest,
+            commands=(),
+            errors=("canonical compilation database exceeds the caller-supplied byte bound while reading",),
+            database_bytes=actual_database_bytes,
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
     if not isinstance(rows, list) or not rows:
         return CompilationDatabaseReport(
             status=GateStatus.FAIL,
             database_path=str(path),
-            digest=None,
+            digest=digest,
             commands=(),
             errors=("canonical compilation database must be a non-empty array",),
+            database_bytes=actual_database_bytes,
+            row_count=len(rows) if isinstance(rows, list) else 0,
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
+        )
+    if row_limit is not None and len(rows) > row_limit:
+        return CompilationDatabaseReport(
+            status=GateStatus.UNAVAILABLE,
+            database_path=str(path),
+            digest=digest,
+            commands=(),
+            errors=("canonical compilation database exceeds the caller-supplied row bound",),
+            database_bytes=actual_database_bytes,
+            row_count=len(rows),
+            max_database_bytes=byte_limit,
+            max_rows=row_limit,
+            allowed_source_extensions=rendered_extensions,
         )
 
     errors: list[str] = []
@@ -289,7 +416,7 @@ def verify_compilation_database(
     duplicates = 0
     for index, row in enumerate(rows):
         try:
-            command = _row_command(row, root)
+            command = _row_command(row, root, extensions)
         except CompilationDatabaseError as exc:
             errors.append(f"row {index}: {exc}")
             continue
@@ -301,7 +428,6 @@ def verify_compilation_database(
         else:
             errors.append(f"row {index}: conflicting commands for source identity {command.source_path}")
     commands = tuple(grouped[path] for path in sorted(grouped))
-    digest = hashlib.sha256(raw_bytes).hexdigest()
     return CompilationDatabaseReport(
         status=GateStatus.FAIL if errors else GateStatus.PASS,
         database_path=str(path),
@@ -309,6 +435,11 @@ def verify_compilation_database(
         commands=commands,
         errors=tuple(errors),
         duplicate_rows_collapsed=duplicates,
+        database_bytes=actual_database_bytes,
+        row_count=len(rows),
+        max_database_bytes=byte_limit,
+        max_rows=row_limit,
+        allowed_source_extensions=rendered_extensions,
     )
 
 

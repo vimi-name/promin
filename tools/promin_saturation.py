@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextvars
+import errno
+import functools
 import hashlib
 import io
 import json
@@ -9,6 +12,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -66,6 +70,11 @@ _PHYSICAL_RELATION_COUNT = (
 _PHYSICAL_RELATIONS_PER_TASK = 127
 _PHYSICAL_RELATION_TASK_PREFIX = "task:physical-relation-saturation:"
 _PHYSICAL_RELATION_PREFIX = "relation:physical-relation-saturation:"
+_GIBIBYTE = 1024**3
+_DEFAULT_STORAGE_HEADROOM_BYTES = 8 * _GIBIBYTE
+_STORAGE_FAILURE_RESERVE_BYTES = 2 * 1024 * 1024
+_STORAGE_SAMPLE_INTERVAL_SECONDS = 0.5
+_BOUND_STORAGE_CHECKPOINT_LIMIT = 10_000
 _REPRESENTATIVE_PHRASES = (
     "task workflow objective",
     "grant authority capability",
@@ -96,6 +105,12 @@ _SATURATION_CAPABILITY_CEILING = [
 
 class SaturationError(RuntimeError):
     pass
+
+
+class StorageBudgetError(SaturationError):
+    def __init__(self, message: str, *, failure_code: str) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
 
 
 def _plain(value: Any) -> Any:
@@ -238,6 +253,794 @@ def _platform_binding() -> dict[str, Any]:
     )
     value["binding_digest"] = "sha256:" + _sha256_bytes(_canonical_bytes(value))
     return value
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    selected = Path(os.path.abspath(path))
+    while not selected.exists():
+        parent = selected.parent
+        if parent == selected:
+            raise StorageBudgetError(
+                f"no existing filesystem ancestor is available for storage telemetry: {path}",
+                failure_code="storage-telemetry-unavailable",
+            )
+        selected = parent
+    if selected.is_file():
+        selected = selected.parent
+    if not selected.is_dir():
+        raise StorageBudgetError(
+            f"storage telemetry anchor is not a directory: {selected}",
+            failure_code="storage-telemetry-unavailable",
+        )
+    return selected
+
+
+def _disk_space_record(path: Path) -> dict[str, Any]:
+    try:
+        anchor = _nearest_existing_directory(path)
+        usage = shutil.disk_usage(anchor)
+        device = int(anchor.stat().st_dev)
+    except StorageBudgetError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise StorageBudgetError(
+            f"free-space telemetry is unavailable for {path}: {exc}",
+            failure_code="storage-telemetry-unavailable",
+        ) from exc
+    values = (int(usage.total), int(usage.used), int(usage.free))
+    if values[0] <= 0 or values[1] < 0 or values[2] < 0 or values[1] + values[2] > values[0]:
+        raise StorageBudgetError(
+            f"free-space telemetry returned inconsistent values for {path}",
+            failure_code="storage-telemetry-unavailable",
+        )
+    if os.name == "nt":
+        anchor_identity = anchor.anchor.casefold()
+    else:
+        anchor_identity = str(device)
+    return {
+        "volume_id": f"{platform.system().casefold()}:{anchor_identity}",
+        "total_bytes": values[0],
+        "used_bytes": values[1],
+        "free_bytes": values[2],
+    }
+
+
+def _tree_logical_measurement(root: Path) -> dict[str, int]:
+    if not root.exists():
+        return {
+            "logical_bytes": 0,
+            "regular_files": 0,
+            "directories": 0,
+            "reparse_entries_skipped": 0,
+        }
+    if root.is_symlink() or not root.is_dir():
+        raise StorageBudgetError(
+            f"storage telemetry root is not a physical directory: {root}",
+            failure_code="storage-telemetry-unavailable",
+        )
+    logical_bytes = 0
+    regular_files = 0
+    directories = 1
+    reparse_entries_skipped = 0
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    is_reparse = bool(
+                        getattr(metadata, "st_file_attributes", 0) & 0x400
+                    )
+                    if entry.is_symlink() or is_reparse:
+                        reparse_entries_skipped += 1
+                    elif stat.S_ISDIR(metadata.st_mode):
+                        directories += 1
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(metadata.st_mode):
+                        regular_files += 1
+                        logical_bytes += int(metadata.st_size)
+    except OSError as exc:
+        raise StorageBudgetError(
+            f"logical storage measurement failed under {root}: {exc}",
+            failure_code="storage-telemetry-unavailable",
+        ) from exc
+    return {
+        "logical_bytes": logical_bytes,
+        "regular_files": regular_files,
+        "directories": directories,
+        "reparse_entries_skipped": reparse_entries_skipped,
+    }
+
+
+def _is_database_payload_name(name: str) -> bool:
+    lowered = name.casefold()
+    return lowered.endswith(
+        (
+            ".db",
+            ".db-journal",
+            ".db-shm",
+            ".db-wal",
+            ".sqlite",
+            ".sqlite-journal",
+            ".sqlite-shm",
+            ".sqlite-wal",
+            ".sqlite3",
+            ".sqlite3-journal",
+            ".sqlite3-shm",
+            ".sqlite3-wal",
+        )
+    )
+
+
+def _database_storage_measurement(workspace: Path) -> dict[str, Any]:
+    state_root = workspace / ".promin" / "state"
+    directories = [
+        state_root / "projection",
+        state_root / "inventory",
+        state_root / "events",
+        state_root / "events" / "derived-rows",
+    ]
+    generation_root = state_root / "events" / "derived-index"
+    if generation_root.is_dir() and not generation_root.is_symlink():
+        try:
+            directories.extend(
+                path
+                for path in generation_root.iterdir()
+                if path.is_dir() and not path.is_symlink()
+            )
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"database storage discovery failed under {generation_root}: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        for directory in directories:
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not _is_database_payload_name(entry.name):
+                        continue
+                    metadata = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(metadata.st_mode):
+                        continue
+                    path = Path(entry.path)
+                    relative = path.relative_to(workspace).as_posix()
+                    if relative in seen:
+                        continue
+                    seen.add(relative)
+                    files.append({"path": relative, "logical_bytes": int(metadata.st_size)})
+    except OSError as exc:
+        raise StorageBudgetError(
+            f"database storage measurement failed under {state_root}: {exc}",
+            failure_code="storage-telemetry-unavailable",
+        ) from exc
+    files.sort(key=lambda value: value["path"])
+    journal_checkpoint_path = state_root / "events" / "journal-checkpoint.json"
+    journal_checkpoint_bytes = 0
+    if journal_checkpoint_path.is_file() and not journal_checkpoint_path.is_symlink():
+        try:
+            journal_checkpoint_bytes = int(journal_checkpoint_path.stat().st_size)
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"journal checkpoint storage measurement failed: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+    derived_state_root = state_root / "events" / "derived-state"
+    derived_state_files: list[dict[str, Any]] = []
+    if derived_state_root.is_dir() and not derived_state_root.is_symlink():
+        try:
+            with os.scandir(derived_state_root) as entries:
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    if stat.S_ISREG(metadata.st_mode) and entry.name.casefold().endswith(".json"):
+                        derived_state_files.append(
+                            {
+                                "path": Path(entry.path).relative_to(workspace).as_posix(),
+                                "logical_bytes": int(metadata.st_size),
+                            }
+                        )
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"derived-state storage measurement failed: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+    derived_state_files.sort(key=lambda value: value["path"])
+    runtime_checkpoint_name = hashlib.sha256(b"runtime").hexdigest() + ".sqlite3"
+    runtime_checkpoint_path = (
+        state_root / "events" / "derived-rows" / runtime_checkpoint_name
+    )
+    runtime_derived_checkpoint_bytes = 0
+    if runtime_checkpoint_path.is_file() and not runtime_checkpoint_path.is_symlink():
+        try:
+            runtime_derived_checkpoint_bytes = int(runtime_checkpoint_path.stat().st_size)
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"runtime derived checkpoint storage measurement failed: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+    database_bytes = sum(int(value["logical_bytes"]) for value in files)
+    derived_state_bytes = sum(
+        int(value["logical_bytes"]) for value in derived_state_files
+    )
+    return {
+        "database_files": files,
+        "database_file_count": len(files),
+        "database_logical_bytes": database_bytes,
+        "journal_checkpoint_logical_bytes": journal_checkpoint_bytes,
+        "derived_state_files": derived_state_files,
+        "derived_state_file_count": len(derived_state_files),
+        "derived_state_logical_bytes": derived_state_bytes,
+        "runtime_derived_checkpoint_path": runtime_checkpoint_path.relative_to(
+            workspace
+        ).as_posix(),
+        "runtime_derived_checkpoint_logical_bytes": runtime_derived_checkpoint_bytes,
+        "observed_control_storage_bytes": (
+            database_bytes + journal_checkpoint_bytes + derived_state_bytes
+        ),
+        "observed_control_storage_scope": (
+            "sqlite-databases-journal-checkpoint-and-derived-state"
+        ),
+    }
+
+
+def _storage_growth_plan(
+    performance_contract: Mapping[str, Any],
+    *,
+    files: int,
+    queries: int,
+    reuse_product: bool,
+) -> dict[str, Any]:
+    thresholds = performance_contract.get("thresholds")
+    if not isinstance(thresholds, Mapping):
+        raise StorageBudgetError(
+            "performance profile omitted storage planning thresholds",
+            failure_code="storage-telemetry-unavailable",
+        )
+    database_bytes = thresholds.get("database_bytes_max")
+    changed_record_bytes = thresholds.get("commit_bytes_per_changed_record_max")
+    if (
+        not isinstance(database_bytes, int)
+        or isinstance(database_bytes, bool)
+        or database_bytes < 1
+        or not isinstance(changed_record_bytes, int)
+        or isinstance(changed_record_bytes, bool)
+        or changed_record_bytes < 1
+    ):
+        raise StorageBudgetError(
+            "performance profile storage thresholds are invalid",
+            failure_code="storage-telemetry-unavailable",
+        )
+    physical_task_count = math.ceil(
+        _PHYSICAL_RELATION_COUNT / _PHYSICAL_RELATIONS_PER_TASK
+    )
+    semantic_changed_records = (
+        _EXACT_CORE_VALID_RELATIONS
+        + physical_task_count
+        + _SEARCH_FIXTURE_TASK_COUNT
+        + 8
+    )
+    event_and_derived_bytes = 2 * changed_record_bytes * semantic_changed_records
+    product_and_vcs_bytes = 0 if reuse_product else files * 24 * 1024
+    workspace_components = {
+        "canonical_projection_database_bytes": database_bytes,
+        "event_and_derived_state_bytes": event_and_derived_bytes,
+        "product_and_vcs_bytes": product_and_vcs_bytes,
+    }
+    ceiling = _load_ceiling()
+    output_components = {
+        "inventory_and_manifest_bytes": files * 2 * 1024,
+        "bounded_query_evidence_bytes": queries * ceiling["max_bytes"] * 2,
+        "publication_reserve_bytes": 256 * 1024 * 1024,
+    }
+    return {
+        "record_type": "SaturationStorageGrowthPlan",
+        "workload": {
+            "physical_files": files,
+            "runtime_queries": queries,
+            "core_valid_relations": _EXACT_CORE_VALID_RELATIONS,
+            "workload_reduced": False,
+        },
+        "workspace_components": workspace_components,
+        "workspace_planned_growth_bytes": sum(workspace_components.values()),
+        "output_components": output_components,
+        "output_planned_growth_bytes": sum(output_components.values()),
+        "planning_basis": (
+            "canonical performance ceilings plus exact workload and bounded raw evidence; "
+            "runtime headroom monitoring remains fail-closed if actual or external growth is larger"
+        ),
+    }
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    values: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        values.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return values
+
+
+def _storage_failure_code(error: BaseException) -> str | None:
+    messages: list[str] = []
+    for current in _exception_chain(error):
+        if isinstance(current, StorageBudgetError):
+            return current.failure_code
+        if isinstance(current, OSError) and current.errno in {errno.ENOSPC, errno.EDQUOT}:
+            return "storage-write-exhausted"
+        if isinstance(current, OSError) and getattr(current, "winerror", None) in {
+            39,
+            112,
+            1816,
+        }:
+            return "storage-write-exhausted"
+        messages.append(str(current).casefold())
+    joined = "\n".join(messages)
+    if any(
+        marker in joined
+        for marker in (
+            "database or disk is full",
+            "disk full",
+            "disk is full",
+            "no space left on device",
+            "not enough space on the disk",
+            "quota exceeded",
+        )
+    ):
+        return "storage-write-exhausted"
+    return None
+
+
+class _StorageRunTelemetry:
+    def __init__(
+        self,
+        workspace: Path,
+        output: Path,
+        *,
+        archive: Path | None,
+        performance_contract: Mapping[str, Any],
+        files: int,
+        queries: int,
+        reuse_product: bool,
+        headroom_bytes: int = _DEFAULT_STORAGE_HEADROOM_BYTES,
+    ) -> None:
+        if (
+            not isinstance(headroom_bytes, int)
+            or isinstance(headroom_bytes, bool)
+            or headroom_bytes < 1
+        ):
+            raise StorageBudgetError(
+                "storage headroom must be a positive integer",
+                failure_code="storage-telemetry-unavailable",
+            )
+        self.workspace = Path(os.path.abspath(workspace))
+        self.output = Path(os.path.abspath(output))
+        self.archive = archive
+        self.files = files
+        self.queries = queries
+        self.reuse_product = reuse_product
+        self.headroom_bytes = headroom_bytes
+        self.plan = _storage_growth_plan(
+            performance_contract,
+            files=files,
+            queries=queries,
+            reuse_product=reuse_product,
+        )
+        self.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        self.preflight: dict[str, Any] | None = None
+        self.phase_measurements: dict[str, dict[str, Any]] = {}
+        self.checkpoint_measurements: list[dict[str, Any]] = []
+        self._volume_roles: dict[str, list[str]] = {}
+        self._minimum_free_bytes: dict[str, int] = {}
+        self._breach: dict[str, Any] | None = None
+        self._sampling_error: str | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sampler: threading.Thread | None = None
+        self._reserve_path = self.output / ".storage-failure-reserve.bin"
+        self._output_created = False
+
+    def _role_space(self) -> dict[str, dict[str, Any]]:
+        return {
+            "workspace": _disk_space_record(self.workspace),
+            "output": _disk_space_record(self.output),
+        }
+
+    def _grouped_space(self) -> list[dict[str, Any]]:
+        records = self._role_space()
+        grouped: dict[str, dict[str, Any]] = {}
+        role_growth = {
+            "workspace": self.plan["workspace_planned_growth_bytes"],
+            "output": self.plan["output_planned_growth_bytes"],
+        }
+        for role, record in records.items():
+            volume_id = record["volume_id"]
+            current = grouped.setdefault(
+                volume_id,
+                {
+                    **record,
+                    "roles": [],
+                    "planned_growth_bytes": 0,
+                },
+            )
+            if current["total_bytes"] != record["total_bytes"]:
+                raise StorageBudgetError(
+                    f"same-volume telemetry disagrees for {volume_id}",
+                    failure_code="storage-telemetry-unavailable",
+                )
+            current["used_bytes"] = max(current["used_bytes"], record["used_bytes"])
+            current["free_bytes"] = min(current["free_bytes"], record["free_bytes"])
+            current["roles"].append(role)
+            current["planned_growth_bytes"] += role_growth[role]
+        result: list[dict[str, Any]] = []
+        for volume_id in sorted(grouped):
+            value = grouped[volume_id]
+            value["roles"].sort()
+            value["headroom_bytes"] = self.headroom_bytes
+            value["required_free_bytes"] = (
+                value["planned_growth_bytes"] + self.headroom_bytes
+            )
+            value["within_preflight_budget"] = (
+                value["free_bytes"] >= value["required_free_bytes"]
+            )
+            result.append(value)
+        return result
+
+    def _ensure_failure_destination(self) -> None:
+        if self._output_created:
+            return
+        if self.output.exists():
+            raise SaturationError("output directory already exists")
+        self.output.mkdir(parents=True, exist_ok=False)
+        self._output_created = True
+        try:
+            with self._reserve_path.open("xb") as handle:
+                block = bytes(64 * 1024)
+                remaining = _STORAGE_FAILURE_RESERVE_BYTES
+                while remaining:
+                    selected = block[: min(len(block), remaining)]
+                    handle.write(selected)
+                    remaining -= len(selected)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            self._reserve_path.unlink(missing_ok=True)
+            raise StorageBudgetError(
+                f"storage failure receipt reserve could not be allocated: {exc}",
+                failure_code="storage-preflight-insufficient",
+            ) from exc
+
+    def prepare(self) -> None:
+        if self.output.exists():
+            raise SaturationError("output directory already exists")
+        try:
+            volumes = self._grouped_space()
+            self._volume_roles = {
+                value["volume_id"]: list(value["roles"]) for value in volumes
+            }
+            self._minimum_free_bytes = {
+                value["volume_id"]: int(value["free_bytes"]) for value in volumes
+            }
+            self.preflight = {
+                "record_type": "SaturationStoragePreflight",
+                "status": "pass"
+                if all(value["within_preflight_budget"] for value in volumes)
+                else "fail",
+                "headroom_bytes": self.headroom_bytes,
+                "growth_plan": self.plan,
+                "volumes": volumes,
+                "telemetry_available": True,
+                "workload_reduced": False,
+            }
+        except StorageBudgetError as exc:
+            self.preflight = {
+                "record_type": "SaturationStoragePreflight",
+                "status": "fail",
+                "headroom_bytes": self.headroom_bytes,
+                "growth_plan": self.plan,
+                "volumes": [],
+                "telemetry_available": False,
+                "telemetry_error": str(exc),
+                "workload_reduced": False,
+            }
+            self._ensure_failure_destination()
+            raise
+        self._ensure_failure_destination()
+        if self.preflight["status"] != "pass":
+            raise StorageBudgetError(
+                "free-space preflight cannot preserve planned growth and storage headroom",
+                failure_code="storage-preflight-insufficient",
+            )
+        self.measure_phase("preflight")
+        self._sampler = threading.Thread(
+            target=self._sample_space,
+            name="promin-storage-sampler",
+            daemon=True,
+        )
+        self._sampler.start()
+
+    def _observe_free_space(self) -> list[dict[str, Any]]:
+        current = self._role_space()
+        by_volume: dict[str, dict[str, Any]] = {}
+        for role, record in current.items():
+            volume_id = record["volume_id"]
+            if volume_id not in self._volume_roles or role not in self._volume_roles[volume_id]:
+                raise StorageBudgetError(
+                    "workspace/output filesystem identity changed during saturation",
+                    failure_code="storage-telemetry-unavailable",
+                )
+            value = by_volume.setdefault(
+                volume_id,
+                {
+                    "volume_id": volume_id,
+                    "roles": [],
+                    "free_bytes": record["free_bytes"],
+                },
+            )
+            value["free_bytes"] = min(value["free_bytes"], record["free_bytes"])
+            value["roles"].append(role)
+        values = [by_volume[key] for key in sorted(by_volume)]
+        for value in values:
+            value["roles"].sort()
+            volume_id = value["volume_id"]
+            free_bytes = int(value["free_bytes"])
+            with self._lock:
+                previous = self._minimum_free_bytes.get(volume_id, free_bytes)
+                self._minimum_free_bytes[volume_id] = min(previous, free_bytes)
+                if free_bytes < self.headroom_bytes and self._breach is None:
+                    self._breach = {
+                        "volume_id": volume_id,
+                        "roles": list(value["roles"]),
+                        "free_bytes": free_bytes,
+                        "required_headroom_bytes": self.headroom_bytes,
+                    }
+        return values
+
+    def _sample_space(self) -> None:
+        while not self._stop.wait(_STORAGE_SAMPLE_INTERVAL_SECONDS):
+            try:
+                self._observe_free_space()
+            except Exception as exc:  # telemetry loss must fail the run at the next boundary
+                with self._lock:
+                    self._sampling_error = str(exc)
+                self._stop.set()
+                return
+
+    def _raise_if_unhealthy(self) -> None:
+        with self._lock:
+            sampling_error = self._sampling_error
+            breach = dict(self._breach) if self._breach is not None else None
+        if sampling_error is not None:
+            raise StorageBudgetError(
+                f"free-space telemetry became unavailable: {sampling_error}",
+                failure_code="storage-telemetry-unavailable",
+            )
+        if breach is not None:
+            raise StorageBudgetError(
+                "storage headroom was exhausted during the unchanged saturation workload: "
+                f"{breach['free_bytes']} < {breach['required_headroom_bytes']} bytes",
+                failure_code="storage-headroom-exhausted",
+            )
+
+    def measure_phase(self, phase: str) -> dict[str, Any]:
+        free_space = self._observe_free_space() if self._volume_roles else []
+        self._raise_if_unhealthy()
+        databases = _database_storage_measurement(self.workspace)
+        value = {
+            "record_type": "SaturationPhaseStorageMeasurement",
+            "phase": phase,
+            "free_space": free_space,
+            "workspace_tree": _tree_logical_measurement(self.workspace),
+            "control_state_tree": _tree_logical_measurement(
+                self.workspace / ".promin" / "state"
+            ),
+            "output_tree": _tree_logical_measurement(self.output),
+            **databases,
+        }
+        self.phase_measurements[phase] = value
+        return value
+
+    def record_commit(self, observation: Mapping[str, Any]) -> None:
+        if len(self.checkpoint_measurements) >= _BOUND_STORAGE_CHECKPOINT_LIMIT:
+            raise StorageBudgetError(
+                "storage checkpoint telemetry exceeded its fixed evidence bound",
+                failure_code="storage-telemetry-unavailable",
+            )
+        free_space = self._observe_free_space()
+        self._raise_if_unhealthy()
+        databases = _database_storage_measurement(self.workspace)
+        self.checkpoint_measurements.append(
+            {
+                "sequence": len(self.checkpoint_measurements) + 1,
+                "phase": observation["phase"],
+                "operation_sequence": observation["sequence"],
+                "checkpoint_written": observation["checkpoint_written"],
+                "runtime_checkpoint_bytes": observation["checkpoint_bytes"],
+                "physical_payload_bytes": observation["physical_payload_bytes"],
+                "database_logical_bytes": databases["database_logical_bytes"],
+                "journal_checkpoint_logical_bytes": databases[
+                    "journal_checkpoint_logical_bytes"
+                ],
+                "runtime_derived_checkpoint_logical_bytes": databases[
+                    "runtime_derived_checkpoint_logical_bytes"
+                ],
+                "observed_control_storage_bytes": databases[
+                    "observed_control_storage_bytes"
+                ],
+                "free_bytes_by_volume": [
+                    int(value["free_bytes"]) for value in free_space
+                ],
+            }
+        )
+
+    def stop_for_publication(self) -> None:
+        self._stop.set()
+        if self._sampler is not None:
+            self._sampler.join(timeout=2.0)
+            if self._sampler.is_alive():
+                raise StorageBudgetError(
+                    "storage sampler did not stop before evidence publication",
+                    failure_code="storage-telemetry-unavailable",
+                )
+        self._raise_if_unhealthy()
+        self.measure_phase("result")
+
+    def bound_phase_payload(self, phase: str) -> dict[str, Any]:
+        if phase not in self.phase_measurements:
+            raise StorageBudgetError(
+                f"storage phase measurement is missing: {phase}",
+                failure_code="storage-telemetry-unavailable",
+            )
+        value: dict[str, Any] = {
+            "measurement": self.phase_measurements[phase],
+            "headroom_bytes": self.headroom_bytes,
+        }
+        if phase == "physical-generation":
+            value["preflight"] = self.preflight
+        if phase == "semantic-ingestion":
+            value["commit_checkpoints"] = list(self.checkpoint_measurements)
+            value["commit_checkpoint_count"] = len(self.checkpoint_measurements)
+            value["commit_checkpoint_digest"] = _digest(self.checkpoint_measurements)
+            value["commit_checkpoint_volume_order"] = [
+                {
+                    "volume_id": volume_id,
+                    "roles": list(self._volume_roles[volume_id]),
+                }
+                for volume_id in sorted(self._volume_roles)
+            ]
+        if phase == "result":
+            with self._lock:
+                value["minimum_free_bytes_by_volume"] = dict(
+                    sorted(self._minimum_free_bytes.items())
+                )
+            value["workload_reduced"] = False
+        return value
+
+    def failure_code(self, error: BaseException) -> str | None:
+        direct = _storage_failure_code(error)
+        if direct is not None:
+            return direct
+        with self._lock:
+            if self._breach is not None:
+                return "storage-headroom-exhausted"
+            if self._sampling_error is not None:
+                return "storage-telemetry-unavailable"
+        return None
+
+    def _release_reserve(self) -> None:
+        if not self._output_created:
+            return
+        try:
+            self._reserve_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sampler is not None:
+            self._sampler.join(timeout=2.0)
+        self._release_reserve()
+
+    def publish_failure(self, error: BaseException, failure_code: str) -> Path | None:
+        self.stop()
+        if not self._output_created:
+            try:
+                self.output.mkdir(parents=True, exist_ok=False)
+                self._output_created = True
+            except OSError:
+                return None
+        (self.output / "saturation-result.json").unlink(missing_ok=True)
+        try:
+            terminal_space = self._observe_free_space() if self._volume_roles else []
+        except Exception as telemetry_error:
+            terminal_space = []
+            terminal_telemetry_error = str(telemetry_error)
+        else:
+            terminal_telemetry_error = None
+        archive_binding: dict[str, Any] | None = None
+        if self.archive is not None:
+            try:
+                archive_path = self.archive.resolve(strict=True)
+                payload = _read_stable_file(archive_path)
+                archive_binding = {
+                    "name": archive_path.name,
+                    "bytes": len(payload),
+                    "sha256": _sha256_bytes(payload),
+                }
+            except (OSError, SaturationError):
+                archive_binding = None
+        with self._lock:
+            minimum_free = dict(sorted(self._minimum_free_bytes.items()))
+            breach = dict(self._breach) if self._breach is not None else None
+            sampling_error = self._sampling_error
+        checkpoint_tail = self.checkpoint_measurements[-512:]
+        identity = {
+            "record_type": "SaturationStorageFailure",
+            "status": "fail",
+            "failure_code": failure_code,
+            "reason": str(error),
+            "exception_type": type(error).__name__,
+            "started_at": self.started_at,
+            "completed_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "pass_credit": False,
+            "acceptance_pass": False,
+            "product_acceptance_pass": False,
+            "public_release_approved": False,
+            "workload": {
+                "physical_files": self.files,
+                "runtime_queries": self.queries,
+                "core_valid_relations": _EXACT_CORE_VALID_RELATIONS,
+                "workload_reduced": False,
+            },
+            "archive_binding": archive_binding,
+            "tool_binding": {
+                "path": "tools/promin_saturation.py",
+                "sha256": _sha256_bytes(_read_stable_file(Path(__file__).resolve())),
+            },
+            "storage": {
+                "preflight": self.preflight,
+                "phase_measurements": [
+                    self.phase_measurements[key]
+                    for key in self.phase_measurements
+                ],
+                "commit_checkpoint_count": len(self.checkpoint_measurements),
+                "commit_checkpoint_digest": _digest(self.checkpoint_measurements),
+                "commit_checkpoint_tail": checkpoint_tail,
+                "minimum_free_bytes_by_volume": minimum_free,
+                "terminal_free_space": terminal_space,
+                "terminal_telemetry_error": terminal_telemetry_error,
+                "headroom_breach": breach,
+                "sampling_error": sampling_error,
+                "external_disk_pressure_attribution": "not-inferred-from-free-space",
+            },
+        }
+        receipt = {**identity, "receipt_digest": _digest(identity)}
+        path = self.output / "saturation-storage-failure.json"
+        try:
+            _write_json(path, receipt)
+        except OSError:
+            return None
+        return path
+
+
+_ACTIVE_STORAGE_TELEMETRY: contextvars.ContextVar[_StorageRunTelemetry | None] = (
+    contextvars.ContextVar("promin_saturation_storage_telemetry", default=None)
+)
+
+
+def _measure_storage_phase(phase: str) -> None:
+    telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
+    if telemetry is not None:
+        telemetry.measure_phase(phase)
 
 
 def _peak_rss_bytes() -> int:
@@ -486,6 +1289,9 @@ def _record_commit_observation(
     batch_digest = observation["batch_digest"]
     if not isinstance(batch_digest, str) or len(batch_digest) != 64:
         raise SaturationError("semantic commit omitted its batch digest")
+    storage_telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
+    if storage_telemetry is not None:
+        storage_telemetry.record_commit(observation)
     return batch_digest
 
 
@@ -2385,46 +3191,61 @@ def _snapshot_signal(inventory: Any, descriptor: Mapping[str, str]) -> dict[str,
         raise SaturationError("physical Candidate is observational and cannot receive scale credit")
     if candidate.get("snapshot_provider_id") != descriptor["provider_id"]:
         raise SaturationError("Candidate snapshot provider differs from selected adapter")
-    snapshot_digest = candidate.get("snapshot_digest")
-    if not isinstance(snapshot_digest, str) or not snapshot_digest:
-        raise SaturationError("creditable Candidate omitted snapshot_digest")
-    recipe_digest = candidate.get("candidate_recipe_digest")
-    if not isinstance(recipe_digest, str) or not recipe_digest:
-        raise SaturationError("Candidate omitted candidate_recipe_digest")
+    snapshot_digest = _hex_digest(
+        candidate.get("snapshot_digest"), "creditable Candidate snapshot_digest"
+    )
+    recipe_digest = _hex_digest(
+        candidate.get("candidate_recipe_digest"), "Candidate candidate_recipe_digest"
+    )
     invocations = _field(inventory, "provider_invocations", ())
     if not isinstance(invocations, (list, tuple)):
         raise SaturationError("inventory provider invocation evidence is not an array")
-    selected_invocations = [
-        invocation
-        for invocation in invocations
-        if isinstance(invocation, Mapping)
-        and invocation.get("capability_id") == "filesystem-inventory"
+    binding = _plain(_field(inventory, "immutable_vcs_binding"))
+    if not isinstance(binding, Mapping):
+        raise SaturationError("inventory omitted its immutable VCS snapshot binding")
+    if binding.get("source_roots") != ["product"]:
+        raise SaturationError("physical inventory immutable VCS binding selected unexpected roots")
+    entries = _field(inventory, "entries")
+    try:
+        entry_count = len(entries)
+    except TypeError as exc:
+        raise SaturationError("inventory entries do not expose a bounded count") from exc
+    try:
+        from promin import service
+
+        binding_arguments = {
+            "repository_tree_object": binding.get("repository_tree_object"),
+            "provider_invocations": invocations,
+            "candidate_recipe_digest": recipe_digest,
+            "source_roots": binding["source_roots"],
+            "inventory_digest": candidate.get("inventory_digest"),
+            "inventory_stream_digest": _field(inventory, "stream_digest"),
+            "inventory_stream_bytes": _field(inventory, "stream_bytes"),
+            "inventory_entry_count": entry_count,
+        }
+        rebuilt_binding = service._immutable_vcs_snapshot_binding(**binding_arguments)
+        expected_snapshot_digest = service._immutable_vcs_snapshot_digest(
+            **binding_arguments
+        )
+    except Exception as exc:
+        raise SaturationError(f"immutable VCS snapshot binding is invalid: {exc}") from exc
+    if dict(binding) != rebuilt_binding:
+        raise SaturationError("immutable VCS snapshot binding differs from inventory inputs")
+    if snapshot_digest != expected_snapshot_digest:
+        raise SaturationError("Candidate snapshot digest differs from immutable VCS binding")
+    receipts = [
+        dict(rebuilt_binding["tree_object_completion_receipt"]),
+        dict(rebuilt_binding["tree_stream_completion_receipt"]),
     ]
-    if len(selected_invocations) != 1:
-        raise SaturationError("inventory did not expose one filesystem-inventory adapter invocation")
-    invocation = selected_invocations[0]
-    required_invocation = {
-        "capability_id",
-        "provider_id",
-        "invocation_kind",
-        "identity_kind",
-        "identity_digest",
-        "adapter_id",
-    }
-    if set(invocation) != required_invocation:
-        raise SaturationError("filesystem-inventory invocation evidence has the wrong keyset")
-    if invocation.get("provider_id") != descriptor["provider_id"]:
-        raise SaturationError("invoked inventory provider differs from snapshot descriptor")
-    if not isinstance(invocation.get("adapter_id"), str) or not invocation["adapter_id"]:
-        raise SaturationError("inventory invocation omitted adapter_id")
-    _hex_digest(invocation.get("identity_digest"), "inventory provider identity digest")
+    if any(receipt["provider_id"] != descriptor["provider_id"] for receipt in receipts):
+        raise SaturationError("immutable VCS receipts differ from the selected snapshot provider")
     return {
         "consistency_mode": candidate["consistency_mode"],
         "creditable": True,
         "snapshot_provider_id": candidate["snapshot_provider_id"],
         "snapshot_digest": snapshot_digest,
         "candidate_recipe_digest": recipe_digest,
-        "provider_invocation": dict(invocation),
+        "provider_invocations": receipts,
         "vcs_commit": descriptor["commit_digest"],
         "vcs_tree_digest": descriptor["tree_digest"],
     }
@@ -2736,6 +3557,73 @@ def _performance_result(
     }
 
 
+def _guard_storage_run(operation: Any) -> Any:
+    @functools.wraps(operation)
+    def guarded(
+        workspace: Path,
+        output: Path,
+        *,
+        archive: Path | None = None,
+        files: int = _EXACT_PHYSICAL_FILES,
+        queries: int = _EXACT_RUNTIME_QUERIES,
+        reuse_product: bool = False,
+        performance_profile: str = "portable-local-v1",
+    ) -> dict[str, Any]:
+        if files != _EXACT_PHYSICAL_FILES:
+            raise SaturationError("physical saturation requires exactly 100000 files")
+        if queries != _EXACT_RUNTIME_QUERIES:
+            raise SaturationError("search saturation requires exactly 600 actual queries")
+        workspace = Path(workspace).resolve()
+        output = Path(output).resolve()
+        performance_contract = _load_performance_contract(performance_profile)
+        telemetry = _StorageRunTelemetry(
+            workspace,
+            output,
+            archive=archive,
+            performance_contract=performance_contract,
+            files=files,
+            queries=queries,
+            reuse_product=reuse_product,
+        )
+        token = _ACTIVE_STORAGE_TELEMETRY.set(telemetry)
+        try:
+            telemetry.prepare()
+            return operation(
+                workspace,
+                output,
+                archive=archive,
+                files=files,
+                queries=queries,
+                reuse_product=reuse_product,
+                performance_profile=performance_profile,
+            )
+        except BaseException as exc:
+            failure_code = telemetry.failure_code(exc)
+            if failure_code is not None:
+                receipt_path: Path | None = None
+                try:
+                    receipt_path = telemetry.publish_failure(exc, failure_code)
+                except Exception:
+                    pass
+                if not isinstance(exc, StorageBudgetError):
+                    receipt_suffix = (
+                        f"; terminal receipt: {receipt_path}"
+                        if receipt_path is not None
+                        else "; terminal receipt could not be persisted"
+                    )
+                    raise StorageBudgetError(
+                        f"saturation failed closed on {failure_code}: {exc}{receipt_suffix}",
+                        failure_code=failure_code,
+                    ) from exc
+            raise
+        finally:
+            telemetry.stop()
+            _ACTIVE_STORAGE_TELEMETRY.reset(token)
+
+    return guarded
+
+
+@_guard_storage_run
 def run(
     workspace: Path,
     output: Path,
@@ -2753,8 +3641,6 @@ def run(
         raise SaturationError("physical saturation requires exactly 100000 files")
     if queries != _EXACT_RUNTIME_QUERIES:
         raise SaturationError("search saturation requires exactly 600 actual queries")
-    if output.exists():
-        raise SaturationError("output directory already exists")
     performance_contract = _load_performance_contract(performance_profile)
     artifact_binding = build_artifact_binding(PACKAGE_ROOT, archive)
 
@@ -2781,6 +3667,7 @@ def run(
             f"immutable VCS tree contains {snapshot_descriptor['tree_file_count']} product files, "
             f"expected {files}"
         )
+    _measure_storage_phase("physical-generation")
 
     inventory_started = time.perf_counter()
     inventory, inventory_rss, inventory_rss_samples = _measure_rss(
@@ -2801,6 +3688,7 @@ def run(
     candidate_digest = _field(_field(inventory, "candidate", {}), "candidate_digest")
     if not isinstance(candidate_digest, str) or len(candidate_digest) != 64:
         raise SaturationError("InventoryResult omitted its Candidate digest")
+    _measure_storage_phase("inventory")
     semantic_commit_observations: list[dict[str, Any]] = []
     semantic_ingestion_started = time.perf_counter()
     search_corpus = _ensure_semantic_corpus(
@@ -2869,6 +3757,7 @@ def run(
         raise SaturationError(
             "physical saturation cannot reuse semantic corpus state"
         )
+    _measure_storage_phase("semantic-ingestion")
 
     rebuild_started = time.perf_counter()
     first_rebuild, rebuild_rss, rebuild_rss_samples = _measure_rss(
@@ -2973,6 +3862,7 @@ def run(
         != release_before["historical_release_decision_id"]
     ):
         raise SaturationError("inventory/rebuild improperly changed release eligibility/history")
+    _measure_storage_phase("projection")
 
     query_grant = semantic_corpus.get("query_grant")
     query_ids = semantic_corpus.get("query_ids")
@@ -3193,6 +4083,7 @@ def run(
     final_artifact_binding = build_artifact_binding(PACKAGE_ROOT, archive)
     if final_artifact_binding["binding_digest"] != artifact_binding["binding_digest"]:
         raise SaturationError("exact package/archive identity changed during saturation")
+    _measure_storage_phase("runtime-queries")
 
     p50_ms = _percentile(query_latencies_ms, 0.50)
     p95_ms = _percentile(query_latencies_ms, 0.95)
@@ -3289,6 +4180,13 @@ def run(
         if all(contract_predicates.values()) and performance["all_within_profile"]
         else "fail"
     )
+    storage_telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
+    if storage_telemetry is None:
+        raise StorageBudgetError(
+            "storage telemetry is unavailable before evidence publication",
+            failure_code="storage-telemetry-unavailable",
+        )
+    storage_telemetry.stop_for_publication()
     evidence = {
         "record_type": "SaturationEvidence",
         "status": status,
@@ -3524,7 +4422,6 @@ def run(
             platform_binding=artifact_binding["platform"]["binding_digest"][7:],
         ),
     }
-    output.mkdir(parents=True, exist_ok=False)
     inventory_stream_path = _field(inventory, "stream_path")
     inventory_stream_digest = _field(inventory, "stream_digest")
     if (
@@ -3572,30 +4469,35 @@ def run(
             "elapsed_ms": None
             if generation_seconds is None
             else round(generation_seconds * 1000),
+            "storage": storage_telemetry.bound_phase_payload("physical-generation"),
         },
         {
             "order": 2,
             "phase": "inventory",
             "status": "completed",
             "elapsed_ms": round(inventory_seconds * 1000),
+            "storage": storage_telemetry.bound_phase_payload("inventory"),
         },
         {
             "order": 3,
             "phase": "semantic-ingestion",
             "status": "completed",
             "elapsed_ms": round(semantic_ingestion_seconds * 1000),
+            "storage": storage_telemetry.bound_phase_payload("semantic-ingestion"),
         },
         {
             "order": 4,
             "phase": "projection",
             "status": "completed",
             "elapsed_ms": round(rebuild_seconds * 1000),
+            "storage": storage_telemetry.bound_phase_payload("projection"),
         },
         {
             "order": 5,
             "phase": "runtime-queries",
             "status": "completed",
             "elapsed_ms": round(search_seconds * 1000),
+            "storage": storage_telemetry.bound_phase_payload("runtime-queries"),
         },
         {
             "order": 6,
@@ -3604,6 +4506,7 @@ def run(
             "elapsed_ms": 0,
             "process_exit_code": 0 if status == "pass" else 1,
             "invocation_exit_code": evidence["invocation"]["exit_code"],
+            "storage": storage_telemetry.bound_phase_payload("result"),
         },
     ]
     _write_jsonl(output / "raw" / "phase-log.jsonl", phase_log)
@@ -3823,6 +4726,23 @@ def main(argv: list[str] | None = None) -> int:
             reuse_product=args.reuse_product,
             performance_profile=args.performance_profile,
         )
+    except StorageBudgetError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "fail",
+                    "failure_code": exc.failure_code,
+                    "reason": str(exc),
+                    "pass_credit": False,
+                    "acceptance_pass": False,
+                    "product_acceptance_pass": False,
+                    "workload_reduced": False,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except (OSError, ValueError, SaturationError) as exc:
         print(json.dumps({"status": "rejected", "reason": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2

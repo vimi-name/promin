@@ -81,17 +81,24 @@ def test_portability_workflow_declares_windows_runtime_and_static_other_platform
     assert "python: ['3.12', '3.13', '3.14']" in workflow
 
 
-def test_repository_checkout_policy_preserves_text_payload_lf() -> None:
+def test_repository_checkout_policy_preserves_text_payload_lf(tmp_path: Path) -> None:
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
 
     assert "* text=auto eol=lf" in attributes
     assert "human/*.pdf binary" in attributes
 
+    git_dir = tmp_path / "attribute-check.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(git_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     result = subprocess.run(
         [
             "git",
-            "-C",
-            str(ROOT),
+            f"--git-dir={git_dir}",
+            f"--work-tree={ROOT}",
             "check-attr",
             "text",
             "eol",
@@ -176,7 +183,16 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
     assert manifest["aggregate"] == {"timeout_seconds": 3600}
     assert validated["selector_count"] == manifest["selector_count"]
     shards = manifest["shards"]
-    assert len(shards) == 6
+    assert len(shards) == 7
+    assert {shard["id"] for shard in shards} == {
+        "core-state",
+        "experience-portability",
+        "reconciliation-paths",
+        "alpha4-policies",
+        "service-distribution",
+        "heavy-hardening",
+        "scale-search",
+    }
     for shard in shards:
         assert shard["selectors"]
         assert shard["limits"] == manifest["per_process"]

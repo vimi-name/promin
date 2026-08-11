@@ -16,6 +16,7 @@ from .authority import (
     AuthorityError,
     GATE_AUTHORIZATION_SCOPE_CONTRACT,
     canonical_digest,
+    derived_checkpoint_digest,
     parse_timestamp,
     validate_gate_authorization_scope,
 )
@@ -2934,9 +2935,9 @@ class DomainState:
             "head_digest": head_digest,
             "state_binding_digest": state_binding_digest,
             **state,
-            "domain_state_digest": canonical_digest(state),
+            "domain_state_digest": derived_checkpoint_digest(state),
         }
-        checkpoint["checkpoint_digest"] = canonical_digest(checkpoint)
+        checkpoint["checkpoint_digest"] = derived_checkpoint_digest(checkpoint)
         return checkpoint
 
     def restore_checkpoint(
@@ -3009,7 +3010,7 @@ class DomainState:
         expected_checkpoint_digest = value.pop("checkpoint_digest")
         if (
             not _valid_digest(expected_checkpoint_digest)
-            or canonical_digest(value) != expected_checkpoint_digest
+            or derived_checkpoint_digest(value) != expected_checkpoint_digest
         ):
             raise DomainError("Domain checkpoint digest mismatch")
         value["checkpoint_digest"] = expected_checkpoint_digest
@@ -3038,7 +3039,7 @@ class DomainState:
         state = {field: value[field] for field in list_fields}
         if (
             not _valid_digest(value["domain_state_digest"])
-            or canonical_digest(state) != value["domain_state_digest"]
+            or derived_checkpoint_digest(state) != value["domain_state_digest"]
         ):
             raise DomainError("Domain checkpoint state digest mismatch")
 

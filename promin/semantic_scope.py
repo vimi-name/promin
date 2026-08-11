@@ -8,11 +8,13 @@ from classifying the same change differently.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import hashlib
 import json
 import re
 from typing import Any, Iterable, Mapping, Sequence
+import unicodedata
 
 from .language_analysis import AnalysisError, GateStatus
 
@@ -57,6 +59,12 @@ def _safe_relative_path(value: str) -> str:
     return value
 
 
+def _portable_path_identity(value: str) -> str:
+    """Return the filesystem-portable identity used only for collision checks."""
+
+    return unicodedata.normalize("NFC", value).casefold()
+
+
 def _canonical_path_tuple(values: Iterable[str], label: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         raise AnalysisError(f"{label} must be an iterable of paths, not one string")
@@ -79,12 +87,27 @@ def build_module_graph(reverse_dependencies: Mapping[str, Iterable[str]]) -> Mod
     if not isinstance(reverse_dependencies, Mapping) or not reverse_dependencies:
         raise AnalysisError("module graph must be a non-empty reverse dependency mapping")
     normalized: dict[str, tuple[str, ...]] = {}
+    portable_identities: dict[str, str] = {}
+
+    def register_portable_path(path: str) -> None:
+        portable = _portable_path_identity(path)
+        previous = portable_identities.get(portable)
+        if previous is not None and previous != path:
+            raise AnalysisError(
+                "module graph contains a portable casefold/NFC path collision: "
+                f"{previous!r} and {path!r}"
+            )
+        portable_identities[portable] = path
+
     for source, dependents in reverse_dependencies.items():
         source_path = _safe_relative_path(source)
+        register_portable_path(source_path)
         if isinstance(dependents, (str, bytes)):
             raise AnalysisError("module graph dependents must be a path iterable")
         materialized = tuple(dependents)
         values = _canonical_path_tuple(materialized, f"dependents for {source_path}") if materialized else ()
+        for dependent in values:
+            register_portable_path(dependent)
         if source_path in values:
             raise AnalysisError("module graph must not contain a self reverse dependency")
         normalized[source_path] = values
@@ -179,10 +202,10 @@ def affected_semantic_scope(
         )
     database_sources = _canonical_path_tuple(compilation_database_sources, "compilation_database_sources")
     selected: set[str] = set(changed)
-    queue: list[tuple[str, int]] = [(path, 0) for path in changed]
+    queue = deque((path, 0) for path in changed)
     truncated = False
     while queue:
-        current, depth = queue.pop(0)
+        current, depth = queue.popleft()
         dependents = graph.reverse_edges.get(current)
         if dependents is None:
             return _scope_result(

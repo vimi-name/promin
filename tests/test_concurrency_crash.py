@@ -1064,17 +1064,20 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 ACTIVATION,
                 implementation_closure_digest=IMPLEMENTATION_CLOSURE,
             )
-            store.commit(command(1, None), created_at=ISSUED_AT)
+            try:
+                store.commit(command(1, None), created_at=ISSUED_AT)
 
-            with self.assertRaisesRegex(
-                ImplementationClosureMismatch,
-                "implementation closure mismatch",
-            ):
-                EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest="d" * 64,
-                )
+                with self.assertRaisesRegex(
+                    ImplementationClosureMismatch,
+                    "implementation closure mismatch",
+                ):
+                    EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest="d" * 64,
+                    )
+            finally:
+                store.close()
 
     def test_reconciliation_primary_event_is_crash_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1084,128 +1087,134 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 ACTIVATION,
                 implementation_closure_digest=IMPLEMENTATION_CLOSURE,
             )
-            initial = _lease(1)
-            store.commit(
-                lease_record_command(
+            recovered: _AuthoritativeEventStore | None = None
+            try:
+                initial = _lease(1)
+                store.commit(
+                    lease_record_command(
+                        initial,
+                        None,
+                        phase="acquire",
+                        issued_at=ISSUED_AT,
+                    ),
+                    created_at=ISSUED_AT,
+                )
+                expired = dict(
                     initial,
-                    None,
-                    phase="acquire",
-                    issued_at=ISSUED_AT,
-                ),
-                created_at=ISSUED_AT,
-            )
-            expired = dict(
-                initial,
-                state="EXPIRED",
-                termination={
-                    "state": "EXPIRED",
-                    "terminated_by": "subject:manager",
+                    state="EXPIRED",
+                    termination={
+                        "state": "EXPIRED",
+                        "terminated_by": "subject:manager",
+                        "grant_id": "grant:manager",
+                        "grant_claim_digest": "2" * 64,
+                        "terminated_at": "2026-07-17T12:10:00Z",
+                        "generation": 1,
+                        "fencing_token": 1,
+                    },
+                )
+                store.commit(
+                    lease_record_command(
+                        expired,
+                        store.head()["batch_digest"],
+                        phase="expire",
+                        issued_at="2026-07-17T12:10:00Z",
+                    ),
+                    created_at="2026-07-17T12:10:00Z",
+                )
+                reconciled = dict(expired)
+                reconciled["capacity_reconciliation"] = {
+                    "reconciled_by": "subject:manager",
                     "grant_id": "grant:manager",
                     "grant_claim_digest": "2" * 64,
-                    "terminated_at": "2026-07-17T12:10:00Z",
+                    "reconciled_at": "2026-07-17T12:11:00Z",
                     "generation": 1,
                     "fencing_token": 1,
-                },
-            )
-            store.commit(
-                lease_record_command(
-                    expired,
+                }
+                value = reconciliation_command(
+                    reconciled,
                     store.head()["batch_digest"],
-                    phase="expire",
-                    issued_at="2026-07-17T12:10:00Z",
-                ),
-                created_at="2026-07-17T12:10:00Z",
-            )
-            reconciled = dict(expired)
-            reconciled["capacity_reconciliation"] = {
-                "reconciled_by": "subject:manager",
-                "grant_id": "grant:manager",
-                "grant_claim_digest": "2" * 64,
-                "reconciled_at": "2026-07-17T12:11:00Z",
-                "generation": 1,
-                "fencing_token": 1,
-            }
-            value = reconciliation_command(
-                reconciled,
-                store.head()["batch_digest"],
-            )
-            with self.assertRaises(SimulatedCrash):
-                store.commit(
+                )
+                with self.assertRaises(SimulatedCrash):
+                    store.commit(
+                        value,
+                        created_at="2026-07-17T12:11:00Z",
+                        crash_hook=lambda point: point == "after_head",
+                    )
+                recovered = EventStore(
+                    root,
+                    ACTIVATION,
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                )
+                result = recovered.commit(
                     value,
                     created_at="2026-07-17T12:11:00Z",
-                    crash_hook=lambda point: point == "after_head",
                 )
-            recovered = EventStore(
-                root,
-                ACTIVATION,
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            )
-            result = recovered.commit(
-                value,
-                created_at="2026-07-17T12:11:00Z",
-            )
-            self.assertEqual(result["outcome"], "idempotent-replay")
-            envelopes = list(recovered.iter_envelopes(validate=True))
-            self.assertEqual(len(envelopes), 3)
-            self.assertEqual(envelopes[-1]["command"]["payload"], reconciled)
-            self.assertEqual(
-                envelopes[-1]["batch"]["events"][0]["payload"],
-                reconciled,
-            )
+                self.assertEqual(result["outcome"], "idempotent-replay")
+                envelopes = list(recovered.iter_envelopes(validate=True))
+                self.assertEqual(len(envelopes), 3)
+                self.assertEqual(envelopes[-1]["command"]["payload"], reconciled)
+                self.assertEqual(
+                    envelopes[-1]["batch"]["events"][0]["payload"],
+                    reconciled,
+                )
 
-            authority = _LeaseAuthority()
-            policy = _parallelism_policy(1)
-            replayed = DomainState(
-                authority,
-                EvidenceStore(Path(temporary) / "replay-cas"),
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            )
-            _ready_task(replayed, authority, 1, policy)
-            for envelope in envelopes:
-                replayed_command = envelope["command"]
-                issued_at = replayed_command["issued_at"]
-                _apply_lease(
-                    replayed,
+                authority = _LeaseAuthority()
+                policy = _parallelism_policy(1)
+                replayed = DomainState(
                     authority,
-                    replayed_command["payload"],
-                    _authorization(authority, "manager", issued_at),
-                    issued_at,
-                    parallelism_policy=policy,
+                    EvidenceStore(Path(temporary) / "replay-cas"),
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                 )
-            self.assertEqual(replayed.leases["lease:parallel:1"], reconciled)
-            first_checkpoint = replayed.checkpoint(
-                head_sequence=recovered.head()["sequence"],
-                head_digest=recovered.head()["batch_digest"],
-                state_binding_digest="f" * 64,
-                runtime_policy=policy,
-            )
-
-            replayed_again = DomainState(
-                authority,
-                EvidenceStore(Path(temporary) / "second-replay-cas"),
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            )
-            _ready_task(replayed_again, authority, 1, policy)
-            for envelope in envelopes:
-                replayed_command = envelope["command"]
-                issued_at = replayed_command["issued_at"]
-                _apply_lease(
-                    replayed_again,
-                    authority,
-                    replayed_command["payload"],
-                    _authorization(authority, "manager", issued_at),
-                    issued_at,
-                    parallelism_policy=policy,
-                )
-            self.assertEqual(
-                replayed_again.checkpoint(
+                _ready_task(replayed, authority, 1, policy)
+                for envelope in envelopes:
+                    replayed_command = envelope["command"]
+                    issued_at = replayed_command["issued_at"]
+                    _apply_lease(
+                        replayed,
+                        authority,
+                        replayed_command["payload"],
+                        _authorization(authority, "manager", issued_at),
+                        issued_at,
+                        parallelism_policy=policy,
+                    )
+                self.assertEqual(replayed.leases["lease:parallel:1"], reconciled)
+                first_checkpoint = replayed.checkpoint(
                     head_sequence=recovered.head()["sequence"],
                     head_digest=recovered.head()["batch_digest"],
                     state_binding_digest="f" * 64,
                     runtime_policy=policy,
-                ),
-                first_checkpoint,
-            )
+                )
+
+                replayed_again = DomainState(
+                    authority,
+                    EvidenceStore(Path(temporary) / "second-replay-cas"),
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                )
+                _ready_task(replayed_again, authority, 1, policy)
+                for envelope in envelopes:
+                    replayed_command = envelope["command"]
+                    issued_at = replayed_command["issued_at"]
+                    _apply_lease(
+                        replayed_again,
+                        authority,
+                        replayed_command["payload"],
+                        _authorization(authority, "manager", issued_at),
+                        issued_at,
+                        parallelism_policy=policy,
+                    )
+                self.assertEqual(
+                    replayed_again.checkpoint(
+                        head_sequence=recovered.head()["sequence"],
+                        head_digest=recovered.head()["batch_digest"],
+                        state_binding_digest="f" * 64,
+                        runtime_policy=policy,
+                    ),
+                    first_checkpoint,
+                )
+            finally:
+                if recovered is not None:
+                    recovered.close()
+                store.close()
 
     def test_writer_timeout_configuration_is_finite_and_positive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1272,23 +1281,31 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                     ACTIVATION,
                     implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                 )
-                barrier.wait(timeout=10)
                 try:
-                    return store.commit(command(index, None), created_at=ISSUED_AT)["outcome"]
-                except CommandConflict:
-                    return "conflict"
+                    barrier.wait(timeout=10)
+                    try:
+                        return store.commit(command(index, None), created_at=ISSUED_AT)["outcome"]
+                    except CommandConflict:
+                        return "conflict"
+                finally:
+                    store.close()
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                outcomes = list(pool.map(attempt, range(workers)))
-            self.assertEqual(outcomes.count("committed"), 1)
-            self.assertEqual(outcomes.count("conflict"), workers - 1)
-            recovered = EventStore(
-                root,
-                ACTIVATION,
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            )
-            self.assertEqual(recovered.head()["sequence"], 1)
-            self.assertEqual(len(list(recovered.iter_envelopes(validate=True))), 1)
+            recovered: _AuthoritativeEventStore | None = None
+            try:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    outcomes = list(pool.map(attempt, range(workers)))
+                self.assertEqual(outcomes.count("committed"), 1)
+                self.assertEqual(outcomes.count("conflict"), workers - 1)
+                recovered = EventStore(
+                    root,
+                    ACTIVATION,
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                )
+                self.assertEqual(recovered.head()["sequence"], 1)
+                self.assertEqual(len(list(recovered.iter_envelopes(validate=True))), 1)
+            finally:
+                if recovered is not None:
+                    recovered.close()
 
     def test_crash_points_recover_without_duplicate_primary_event(self) -> None:
         for point in (
@@ -1300,54 +1317,65 @@ class EventConcurrencyCrashTests(unittest.TestCase):
         ):
             with self.subTest(point=point), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary) / "state"
-                baseline = EventStore(
-                    Path(temporary) / "baseline",
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
-                baseline.commit(command(1, None), created_at=ISSUED_AT)
-                baseline_replay = baseline.replay(collect_event_ids, [])
-                store = EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
-                value = command(1, None)
-                with self.assertRaises(SimulatedCrash):
-                    store.commit(
-                        value,
-                        created_at=ISSUED_AT,
-                        crash_hook=lambda current, target=point: current == target,
+                baseline: _AuthoritativeEventStore | None = None
+                store: _AuthoritativeEventStore | None = None
+                recovered: _AuthoritativeEventStore | None = None
+                try:
+                    baseline = EventStore(
+                        Path(temporary) / "baseline",
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                     )
-                recovered = EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
-                recovery_status = recovered.checkpoint_status()
-                result = recovered.commit(value, created_at=ISSUED_AT)
-                expected = "committed" if point == "after_pending" else "idempotent-replay"
-                self.assertEqual(result["outcome"], expected)
-                envelopes = list(recovered.iter_envelopes(validate=True))
-                self.assertEqual(len(envelopes), 1)
-                primary = [
-                    event
-                    for event in envelopes[0]["batch"]["events"]
-                    if event["event_kind"] == "task.recorded"
-                ]
-                self.assertEqual(len(primary), 1)
-                self.assertEqual(recovered.head()["sequence"], 1)
-                self.assertEqual(list(recovered.pending.glob("*.json")), [])
-                recovered_replay = recovered.replay(collect_event_ids, [])
-                self.assertEqual(recovered_replay, baseline_replay)
-                self.assertEqual(
-                    recovered.checkpoint_status()["semantic_digest"],
-                    recovered_replay.semantic_digest,
-                )
-                self.assertEqual(
-                    recovery_status["open_mode"], "full-replay-fallback"
-                )
-                self.assertIsNotNone(recovery_status["fallback_reason"])
+                    baseline.commit(command(1, None), created_at=ISSUED_AT)
+                    baseline_replay = baseline.replay(collect_event_ids, [])
+                    store = EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                    )
+                    value = command(1, None)
+                    with self.assertRaises(SimulatedCrash):
+                        store.commit(
+                            value,
+                            created_at=ISSUED_AT,
+                            crash_hook=lambda current, target=point: current == target,
+                        )
+                    recovered = EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                    )
+                    recovery_status = recovered.checkpoint_status()
+                    result = recovered.commit(value, created_at=ISSUED_AT)
+                    expected = "committed" if point == "after_pending" else "idempotent-replay"
+                    self.assertEqual(result["outcome"], expected)
+                    envelopes = list(recovered.iter_envelopes(validate=True))
+                    self.assertEqual(len(envelopes), 1)
+                    primary = [
+                        event
+                        for event in envelopes[0]["batch"]["events"]
+                        if event["event_kind"] == "task.recorded"
+                    ]
+                    self.assertEqual(len(primary), 1)
+                    self.assertEqual(recovered.head()["sequence"], 1)
+                    self.assertEqual(list(recovered.pending.glob("*.json")), [])
+                    recovered_replay = recovered.replay(collect_event_ids, [])
+                    self.assertEqual(recovered_replay, baseline_replay)
+                    self.assertEqual(
+                        recovered.checkpoint_status()["semantic_digest"],
+                        recovered_replay.semantic_digest,
+                    )
+                    self.assertEqual(
+                        recovery_status["open_mode"], "full-replay-fallback"
+                    )
+                    self.assertIsNotNone(recovery_status["fallback_reason"])
+                finally:
+                    if recovered is not None:
+                        recovered.close()
+                    if store is not None:
+                        store.close()
+                    if baseline is not None:
+                        baseline.close()
 
     def test_missing_or_corrupt_journal_checkpoint_falls_back_to_equal_replay(self) -> None:
         for damage in ("missing", "corrupt"):
@@ -1358,38 +1386,47 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                     ACTIVATION,
                     implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                 )
-                for index in range(3):
-                    store.commit(
-                        command(index, store.head()["batch_digest"]),
-                        created_at=ISSUED_AT,
+                recovered: _AuthoritativeEventStore | None = None
+                verified: _AuthoritativeEventStore | None = None
+                try:
+                    for index in range(3):
+                        store.commit(
+                            command(index, store.head()["batch_digest"]),
+                            created_at=ISSUED_AT,
+                        )
+                    expected = store.replay(collect_event_ids, [])
+                    if damage == "missing":
+                        store.checkpoint_path.unlink()
+                    else:
+                        store.checkpoint_path.write_bytes(canonical_bytes({"tampered": True}))
+
+                    recovered = EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                     )
-                expected = store.replay(collect_event_ids, [])
-                if damage == "missing":
-                    store.checkpoint_path.unlink()
-                else:
-                    store.checkpoint_path.write_bytes(canonical_bytes({"tampered": True}))
+                    status = recovered.checkpoint_status()
+                    actual = recovered.replay(collect_event_ids, [])
+                    self.assertEqual(status["open_mode"], "full-replay-fallback")
+                    self.assertIsNotNone(status["fallback_reason"])
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(status["semantic_digest"], actual.semantic_digest)
 
-                recovered = EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
-                status = recovered.checkpoint_status()
-                actual = recovered.replay(collect_event_ids, [])
-                self.assertEqual(status["open_mode"], "full-replay-fallback")
-                self.assertIsNotNone(status["fallback_reason"])
-                self.assertEqual(actual, expected)
-                self.assertEqual(status["semantic_digest"], actual.semantic_digest)
-
-                verified = EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
-                self.assertEqual(
-                    verified.checkpoint_status()["open_mode"], "verified-checkpoint"
-                )
-                self.assertEqual(verified.replay(collect_event_ids, []), expected)
+                    verified = EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                    )
+                    self.assertEqual(
+                        verified.checkpoint_status()["open_mode"], "verified-checkpoint"
+                    )
+                    self.assertEqual(verified.replay(collect_event_ids, []), expected)
+                finally:
+                    if verified is not None:
+                        verified.close()
+                    if recovered is not None:
+                        recovered.close()
+                    store.close()
 
     def test_derived_checkpoint_crash_and_delta_replay_match_full_replay(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1399,38 +1436,41 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 ACTIVATION,
                 implementation_closure_digest=IMPLEMENTATION_CLOSURE,
             )
-            for index in range(3):
-                store.commit(
-                    command(index, store.head()["batch_digest"]),
-                    created_at=ISSUED_AT,
-                )
-            initial = store.replay(collect_event_ids, [])
+            try:
+                for index in range(3):
+                    store.commit(
+                        command(index, store.head()["batch_digest"]),
+                        created_at=ISSUED_AT,
+                    )
+                initial = store.replay(collect_event_ids, [])
 
-            with self.assertRaises(SimulatedCrash):
-                store.write_derived_state(
-                    "before-write",
-                    initial.state,
-                    crash_hook=lambda point: point == "before_derived_checkpoint",
-                )
-            self.assertIsNone(store.read_derived_state("before-write"))
-            self.assertIsNotNone(store.derived_state_issue("before-write"))
-            self.assertEqual(store.replay(collect_event_ids, []), initial)
+                with self.assertRaises(SimulatedCrash):
+                    store.write_derived_state(
+                        "before-write",
+                        initial.state,
+                        crash_hook=lambda point: point == "before_derived_checkpoint",
+                    )
+                self.assertIsNone(store.read_derived_state("before-write"))
+                self.assertIsNotNone(store.derived_state_issue("before-write"))
+                self.assertEqual(store.replay(collect_event_ids, []), initial)
 
-            with self.assertRaises(SimulatedCrash):
-                store.write_derived_state(
-                    "after-write",
-                    initial.state,
-                    crash_hook=lambda point: point == "after_derived_checkpoint",
-                )
-            durable_after_crash = store.read_derived_state("after-write")
-            self.assertIsNotNone(durable_after_crash)
-            self.assertIsNone(store.derived_state_issue("after-write"))
+                with self.assertRaises(SimulatedCrash):
+                    store.write_derived_state(
+                        "after-write",
+                        initial.state,
+                        crash_hook=lambda point: point == "after_derived_checkpoint",
+                    )
+                durable_after_crash = store.read_derived_state("after-write")
+                self.assertIsNotNone(durable_after_crash)
+                self.assertIsNone(store.derived_state_issue("after-write"))
 
-            checkpoint = store.write_derived_state("delta", initial.state)
-            store.commit(command(3, store.head()["batch_digest"]), created_at=ISSUED_AT)
-            delta = store.replay_delta(collect_event_ids, checkpoint)
-            full = store.replay(collect_event_ids, [])
-            self.assertEqual(delta, full)
+                checkpoint = store.write_derived_state("delta", initial.state)
+                store.commit(command(3, store.head()["batch_digest"]), created_at=ISSUED_AT)
+                delta = store.replay_delta(collect_event_ids, checkpoint)
+                full = store.replay(collect_event_ids, [])
+                self.assertEqual(delta, full)
+            finally:
+                store.close()
 
     def test_missing_or_corrupt_derived_checkpoint_is_non_authoritative(self) -> None:
         for damage in ("missing", "corrupt"):
@@ -1441,21 +1481,24 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                     ACTIVATION,
                     implementation_closure_digest=IMPLEMENTATION_CLOSURE,
                 )
-                store.commit(command(1, None), created_at=ISSUED_AT)
-                expected = store.replay(collect_event_ids, [])
-                before = set(store.derived_state_root.glob("*.json"))
-                store.write_derived_state("domain", expected.state)
-                created = set(store.derived_state_root.glob("*.json")) - before
-                self.assertEqual(len(created), 1)
-                checkpoint_path = created.pop()
-                if damage == "missing":
-                    checkpoint_path.unlink()
-                else:
-                    checkpoint_path.write_bytes(canonical_bytes({"tampered": True}))
+                try:
+                    store.commit(command(1, None), created_at=ISSUED_AT)
+                    expected = store.replay(collect_event_ids, [])
+                    before = set(store.derived_state_root.glob("*.json"))
+                    store.write_derived_state("domain", expected.state)
+                    created = set(store.derived_state_root.glob("*.json")) - before
+                    self.assertEqual(len(created), 1)
+                    checkpoint_path = created.pop()
+                    if damage == "missing":
+                        checkpoint_path.unlink()
+                    else:
+                        checkpoint_path.write_bytes(canonical_bytes({"tampered": True}))
 
-                self.assertIsNone(store.read_derived_state("domain"))
-                self.assertIsNotNone(store.derived_state_issue("domain"))
-                self.assertEqual(store.replay(collect_event_ids, []), expected)
+                    self.assertIsNone(store.read_derived_state("domain"))
+                    self.assertIsNotNone(store.derived_state_issue("domain"))
+                    self.assertEqual(store.replay(collect_event_ids, []), expected)
+                finally:
+                    store.close()
 
     def test_replay_is_event_time_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1465,25 +1508,36 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 ACTIVATION,
                 implementation_closure_digest=IMPLEMENTATION_CLOSURE,
             )
-            for index in range(3):
-                store.commit(command(index, store.head()["batch_digest"]), created_at=ISSUED_AT)
+            first_store: _AuthoritativeEventStore | None = None
+            second_store: _AuthoritativeEventStore | None = None
+            try:
+                for index in range(3):
+                    store.commit(command(index, store.head()["batch_digest"]), created_at=ISSUED_AT)
 
-            reducer = lambda state, event: state + [event["event_id"]]
-            first = EventStore(
-                root,
-                ACTIVATION,
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            ).replay(reducer, [])
-            second = EventStore(
-                root,
-                ACTIVATION,
-                implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-            ).replay(reducer, [])
-            self.assertEqual(first.state, second.state)
-            self.assertEqual(first.semantic_digest, second.semantic_digest)
-            self.assertEqual(first.head, second.head)
-            self.assertEqual(first.batch_count, 3)
-            self.assertEqual(first.event_count, 3)
+                reducer = lambda state, event: state + [event["event_id"]]
+                first_store = EventStore(
+                    root,
+                    ACTIVATION,
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                )
+                first = first_store.replay(reducer, [])
+                second_store = EventStore(
+                    root,
+                    ACTIVATION,
+                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                )
+                second = second_store.replay(reducer, [])
+                self.assertEqual(first.state, second.state)
+                self.assertEqual(first.semantic_digest, second.semantic_digest)
+                self.assertEqual(first.head, second.head)
+                self.assertEqual(first.batch_count, 3)
+                self.assertEqual(first.event_count, 3)
+            finally:
+                if second_store is not None:
+                    second_store.close()
+                if first_store is not None:
+                    first_store.close()
+                store.close()
 
     def test_canonical_journal_tamper_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1493,17 +1547,24 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 ACTIVATION,
                 implementation_closure_digest=IMPLEMENTATION_CLOSURE,
             )
-            store.commit(command(1, None), created_at=ISSUED_AT)
-            journal = next(store.journal.glob("*.json"))
-            envelope = json.loads(journal.read_text(encoding="utf-8"))
-            envelope["batch"]["command_id"] = "command:attacker"
-            journal.write_bytes(canonical_bytes(envelope))
-            with self.assertRaises(JournalCorruption):
-                EventStore(
-                    root,
-                    ACTIVATION,
-                    implementation_closure_digest=IMPLEMENTATION_CLOSURE,
-                )
+            try:
+                store.commit(command(1, None), created_at=ISSUED_AT)
+                journal = next(store.journal.glob("*.json"))
+                envelope = json.loads(journal.read_text(encoding="utf-8"))
+                envelope["batch"]["command_id"] = "command:attacker"
+                if os.name == "nt":
+                    with self.assertRaises(PermissionError):
+                        journal.write_bytes(canonical_bytes(envelope))
+                store.close()
+                journal.write_bytes(canonical_bytes(envelope))
+                with self.assertRaises(JournalCorruption):
+                    EventStore(
+                        root,
+                        ACTIVATION,
+                        implementation_closure_digest=IMPLEMENTATION_CLOSURE,
+                    )
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

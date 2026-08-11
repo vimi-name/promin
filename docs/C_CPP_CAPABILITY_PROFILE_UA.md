@@ -67,3 +67,35 @@ truncation завжди явний і не дає credit. `BODY_ONLY`, `IMPORT_S
 з input digest та scope count. Невирішений дешевий invariant блокує дорожчий
 етап. Цей profile surface є pure/static: він не запускає provider, build,
 runtime або product acceptance route.
+
+## Масштабована C/C++ static-перевірка
+
+Reverse module graph залишається окремою canonical surface. Перед обходом він
+відхиляє portable aliases: два шляхи, що збігаються після NFC-normalization та
+casefold, не можуть бути двома node identities. Це стосується і `Case.cpp`/
+`case.cpp`, і NFC/NFD-варіантів того самого імені. Reverse closure має явні
+`max_depth` та `max_files`; truncation повертає `UNAVAILABLE`, а не partial `PASS`.
+
+`SemanticScopeAssessment` не відтворює graph і не вигадує imports. Вона лише
+прив'язує вже обчислений scope до digest канонічного graph і до digest canonical
+CompDB. Невалідний digest, відсутнє CompDB binding, вихід за file bound або
+відсутній changed path у selected scope fail-closed.
+
+CompDB може мати caller-owned `max_database_bytes`, `max_rows` та
+`allowed_source_extensions`. Жоден з них не має project-specific default. Перевищення
+будь-якої межі повертає `UNAVAILABLE`: аналіз не підміняє собою лише
+частину бази або guessed command line. У report залишаються фактичні bytes/rows
+та застосовані межі, але вони не дають pass credit.
+
+Зовнішні static tools обираються лише явним caller-переліком з profile. Їхні
+structured receipts містять identity, status, input/configuration digests, scope count і elapsed
+seconds. Ця surface не запускає executable; відсутній, skipped або timed-out tool
+залишається `UNAVAILABLE`/`SKIPPED`/`TIMEOUT`, не `PASS`.
+
+Послідовні ownership/value transfers обробляються streaming-способом із
+caller-owned `max_transfers`, `max_recorded_findings` та `max_identity_length`. Для кожного
+transfer діють вже описані value-category та postcondition rules; reuse source,
+destination або transfer identity є `PROVEN` violation. Перевищення sequence bound не
+дозволяє далі доводити безпеку: результат `UNAVAILABLE`. Навіть `SAFE`/
+`PASS` цих static receipts завжди мають `pass_credit=false`, product acceptance
+та release approval false.

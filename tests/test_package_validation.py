@@ -141,6 +141,21 @@ def repair_core_manifest(root: Path) -> None:
     write_json(path, manifest)
 
 
+def copy_canonical_payload_tree(root: Path) -> None:
+    """Materialize exactly the declared payload, excluding live worktree noise."""
+
+    root.mkdir(parents=True)
+    for relative in sorted(CANONICAL_PAYLOAD_FILES, key=lambda value: value.encode("utf-8")):
+        source = PACKAGE_ROOT / relative
+        if not source.is_file():
+            raise AssertionError(f"canonical payload source is unavailable: {relative}")
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    repair_core_manifest(root)
+    sync_version(root)
+
+
 FABRICATED_EVIDENCE_ROLES = {
     "linux": "PlatformVerificationResult",
     "windows": "PlatformVerificationResult",
@@ -271,9 +286,41 @@ class PackageValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationFailure):
             verify_package_integrity(self.root)
 
+    def test_root_git_worktree_file_is_host_metadata_but_nested_git_is_rejected(self) -> None:
+        root = self.base / "linked-worktree"
+        copy_canonical_payload_tree(root)
+        write_integrity(root)
+
+        # Linked Git worktrees use this root-level regular file instead of a
+        # `.git` directory.  It is host metadata and cannot alter payload
+        # manifest/checksum closure after baseline integrity was generated.
+        (root / ".git").write_text(
+            "gitdir: C:/host/worktrees/promin/.git/worktrees/linked\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        inventory = verify_package_inventory(root)
+        integrity = verify_package_integrity(root)
+        self.assertTrue(inventory["exact"])
+        self.assertTrue(integrity["closure"])
+
+        write_integrity(root)
+        manifest = json.loads((root / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertNotIn(".git", {entry["path"] for entry in manifest["files"]})
+
+        # This is nested package content, not worktree metadata.  It remains
+        # subject to the normal exact-inventory rejection path.
+        nested = root / "docs" / ".git"
+        nested.write_text("must remain package-visible\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValidationFailure,
+            r"canonical package file inventory mismatch: .*docs/\.git",
+        ):
+            verify_package_inventory(root)
+
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 187)
-        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 16)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 231)
+        self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
             len(CANONICAL_PACKAGE_DIRECTORIES),
@@ -281,7 +328,7 @@ class PackageValidationTests(unittest.TestCase):
         )
         self.assertEqual(
             CANONICAL_PACKAGE_DIRECTORIES,
-            {".github", ".github/workflows", "capability_profiles", "core", "docs", "examples", "human", "language_profiles", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
+            {".github", ".github/workflows", "capability_profiles", "core", "docs", "docs/audit", "examples", "human", "language_profiles", "presets", "profiles", "promin", "prompts", "skills", "skills/example", "tests", "tools"},
         )
         self.assertEqual(CANONICAL_PACKAGE_FILES - CANONICAL_PAYLOAD_FILES, GENERATED_SURFACES)
         for required in (
@@ -298,6 +345,7 @@ class PackageValidationTests(unittest.TestCase):
             "core/policy-set.json",
             "core/promin.manifest.json",
             "core/semantic-model.json",
+            "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
             "presets/semantic-standard.json",
         ):
             self.assertIn(required, CANONICAL_PACKAGE_FILES)
@@ -313,6 +361,7 @@ class PackageValidationTests(unittest.TestCase):
             "promin/refresh.py",
             "promin/skills.py",
             "promin/system_check.py",
+            "promin/windows_event_history.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
             "tools/compile_schema.py",
@@ -328,6 +377,15 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_alpha_portability.py",
             "tests/test_alpha_skills.py",
             "tests/test_alpha_skills_checklist.py",
+        }.issubset(CANONICAL_PACKAGE_FILES))
+        self.assertTrue({
+            "tests/test_heavy_derived_storage.py",
+            "tests/test_heavy_event_batching.py",
+            "tests/test_heavy_eventstore_lifecycle.py",
+            "tests/test_heavy_eventstore_postcommit_index_failure.py",
+            "tests/test_heavy_saturation_storage_budget.py",
+            "tests/test_heavy_state_binding_storage.py",
+            "tests/test_heavy_windows_event_history.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
 
     def test_every_canonical_payload_file_is_mandatory(self) -> None:

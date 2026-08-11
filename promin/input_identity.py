@@ -18,6 +18,7 @@ import os
 import re
 import stat
 import unicodedata
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -32,6 +33,7 @@ class InputIdentityError(ValueError):
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTITY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+_MODULE_ID = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9@._:/+~-]{0,511}$")
 _FORBIDDEN_CLAIM_KEYS = frozenset(
     {
         "acceptance_pass",
@@ -521,5 +523,288 @@ def source_selection_identity(
         attributes={
             "entry_count": len(selection.entries),
             "content_hashed": False,
+        },
+    )
+
+
+def _canonical_module_ids(
+    values: Iterable[str], *, label: str, allow_empty: bool = False
+) -> tuple[str, ...]:
+    """Normalize portable logical module IDs without reading source bytes."""
+
+    if isinstance(values, (str, bytes)):
+        raise InputIdentityError(f"{label} must be an iterable of module identifiers")
+    try:
+        materialized = tuple(values)
+    except TypeError as exc:
+        raise InputIdentityError(f"{label} must be an iterable of module identifiers") from exc
+    normalized = tuple(
+        _require_text(value, label=label, pattern=_MODULE_ID) for value in materialized
+    )
+    if not normalized and not allow_empty:
+        raise InputIdentityError(f"{label} must not be empty")
+    if len(set(normalized)) != len(normalized):
+        raise InputIdentityError(f"{label} contains duplicate module identifiers")
+    folded = [value.casefold() for value in normalized]
+    if len(set(folded)) != len(folded):
+        raise InputIdentityError(f"{label} contains portable case-colliding module identifiers")
+    return tuple(sorted(normalized, key=lambda value: value.encode("utf-8")))
+
+
+@dataclass(frozen=True)
+class ModuleDependencies:
+    """One canonical direct-dependency row for a bounded module graph."""
+
+    module_id: str
+    dependencies: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "module_id",
+            _require_text(self.module_id, label="module_id", pattern=_MODULE_ID),
+        )
+        object.__setattr__(
+            self,
+            "dependencies",
+            _canonical_module_ids(self.dependencies, label="module dependencies", allow_empty=True),
+        )
+        if self.module_id in self.dependencies:
+            raise InputIdentityError("module graph must not contain a self dependency")
+
+    def to_record(self) -> dict[str, Any]:
+        return {"module_id": self.module_id, "dependencies": list(self.dependencies)}
+
+
+@dataclass(frozen=True)
+class BoundedModuleClosure:
+    """A deterministic dependency closure with explicit resource bounds.
+
+    ``UNAVAILABLE`` means that the caller did not obtain an exact closure under
+    its declared bound.  The deterministic partial prefix is diagnostic only;
+    it cannot be turned into a target identity or provider pass.
+    """
+
+    roots: tuple[str, ...]
+    modules: tuple[str, ...]
+    dependency_rows: tuple[ModuleDependencies, ...]
+    graph_digest: str
+    max_modules: int
+    max_edges: int
+    traversed_edge_count: int
+    status: str
+    truncated: bool
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roots", _canonical_module_ids(self.roots, label="closure roots"))
+        object.__setattr__(self, "modules", _canonical_module_ids(self.modules, label="closure modules"))
+        if any(not isinstance(row, ModuleDependencies) for row in self.dependency_rows):
+            raise InputIdentityError("module closure contains an invalid dependency row")
+        rows = tuple(
+            sorted(self.dependency_rows, key=lambda row: row.module_id.encode("utf-8"))
+        )
+        row_ids = tuple(row.module_id for row in rows)
+        if len(set(row_ids)) != len(row_ids):
+            raise InputIdentityError("module closure contains duplicate dependency rows")
+        if not set(row_ids).issubset(self.modules):
+            raise InputIdentityError("module closure dependency row is outside selected modules")
+        if not isinstance(self.graph_digest, str) or _SHA256.fullmatch(self.graph_digest) is None:
+            raise InputIdentityError("module closure graph_digest must be a SHA-256 digest")
+        for label, value in (
+            ("max_modules", self.max_modules),
+            ("max_edges", self.max_edges),
+            ("traversed_edge_count", self.traversed_edge_count),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise InputIdentityError(f"module closure {label} must be a non-negative integer")
+        if self.max_modules < 1 or self.max_edges < 1:
+            raise InputIdentityError("module closure bounds must be positive")
+        if self.traversed_edge_count > self.max_edges:
+            raise InputIdentityError("module closure traversed_edge_count exceeds its edge bound")
+        if self.status not in {"PASS", "UNAVAILABLE"}:
+            raise InputIdentityError("module closure status is invalid")
+        if self.status == "PASS" and (self.truncated or self.reason is not None):
+            raise InputIdentityError("passing module closure must be complete and reason-free")
+        if self.status == "UNAVAILABLE" and not self.truncated:
+            raise InputIdentityError("unavailable module closure must declare truncation")
+        if not set(self.roots).issubset(self.modules):
+            raise InputIdentityError("module closure must retain every requested root")
+        object.__setattr__(self, "dependency_rows", rows)
+
+    @property
+    def authority_identity(self) -> dict[str, Any]:
+        return {
+            "record_type": "BoundedModuleClosure",
+            "schema": "promin.bounded-module-closure.v1",
+            "roots": list(self.roots),
+            "modules": list(self.modules),
+            "dependency_rows": [row.to_record() for row in self.dependency_rows],
+            "graph_digest": self.graph_digest,
+            "max_modules": self.max_modules,
+            "max_edges": self.max_edges,
+            "traversed_edge_count": self.traversed_edge_count,
+            "status": self.status,
+            "truncated": self.truncated,
+            "reason": self.reason,
+        }
+
+    @property
+    def closure_digest(self) -> str:
+        return digest_value(self.authority_identity)
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "PASS" and not self.truncated
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            **self.authority_identity,
+            "closure_digest": self.closure_digest,
+            "acceptance_pass": False,
+            "pass_credit": False,
+        }
+
+
+def _canonical_module_graph(
+    graph: Mapping[str, Iterable[str]],
+) -> tuple[ModuleDependencies, ...]:
+    if not isinstance(graph, Mapping) or not graph:
+        raise InputIdentityError("module graph must be a non-empty mapping")
+    rows: list[ModuleDependencies] = []
+    for module_id, dependencies in graph.items():
+        if isinstance(dependencies, (str, bytes)):
+            raise InputIdentityError("module graph dependencies must be an iterable of module IDs")
+        try:
+            materialized = tuple(dependencies)
+        except TypeError as exc:
+            raise InputIdentityError("module graph dependencies must be an iterable of module IDs") from exc
+        rows.append(ModuleDependencies(module_id, materialized))
+    rows.sort(key=lambda row: row.module_id.encode("utf-8"))
+    identifiers = tuple(row.module_id for row in rows)
+    if len(set(identifiers)) != len(identifiers):
+        raise InputIdentityError("module graph contains duplicate module identifiers")
+    folded = [value.casefold() for value in identifiers]
+    if len(set(folded)) != len(folded):
+        raise InputIdentityError("module graph contains portable case-colliding module identifiers")
+    declared = set(identifiers)
+    unknown = sorted(
+        {
+            dependency
+            for row in rows
+            for dependency in row.dependencies
+            if dependency not in declared
+        },
+        key=lambda value: value.encode("utf-8"),
+    )
+    if unknown:
+        raise InputIdentityError(
+            "module graph must declare every dependency node: " + ", ".join(unknown)
+        )
+    return tuple(rows)
+
+
+def bounded_module_closure(
+    roots: Iterable[str],
+    graph: Mapping[str, Iterable[str]],
+    *,
+    max_modules: int,
+    max_edges: int,
+) -> BoundedModuleClosure:
+    """Walk an exact direct-dependency graph in deterministic bounded order.
+
+    The graph must explicitly declare every dependency node.  This avoids the
+    unsafe convention that an omitted node silently means a leaf.  A bound hit
+    returns a deterministic partial diagnostic with ``UNAVAILABLE`` rather than
+    pretending that a partial closure can authorize provider reuse.
+    """
+
+    root_ids = _canonical_module_ids(roots, label="closure roots")
+    if not isinstance(max_modules, int) or isinstance(max_modules, bool) or max_modules < 1:
+        raise InputIdentityError("max_modules must be a positive integer")
+    if not isinstance(max_edges, int) or isinstance(max_edges, bool) or max_edges < 1:
+        raise InputIdentityError("max_edges must be a positive integer")
+    if len(root_ids) > max_modules:
+        raise InputIdentityError("max_modules must retain every requested root")
+    rows = _canonical_module_graph(graph)
+    row_by_id = {row.module_id: row for row in rows}
+    missing_roots = tuple(root for root in root_ids if root not in row_by_id)
+    if missing_roots:
+        raise InputIdentityError(
+            "module graph does not declare requested roots: " + ", ".join(missing_roots)
+        )
+    graph_identity = {
+        "record_type": "ModuleDependencyGraph",
+        "schema": "promin.module-dependency-graph.v1",
+        "rows": [row.to_record() for row in rows],
+    }
+    graph_digest = digest_value(graph_identity)
+
+    pending: deque[str] = deque(root_ids)
+    selected: set[str] = set()
+    selected_rows: list[ModuleDependencies] = []
+    traversed_edges = 0
+    truncated = False
+    reason: str | None = None
+    while pending:
+        module_id = pending.popleft()
+        if module_id in selected:
+            continue
+        if len(selected) >= max_modules:
+            truncated = True
+            reason = "module bound reached"
+            break
+        row = row_by_id[module_id]
+        if traversed_edges + len(row.dependencies) > max_edges:
+            truncated = True
+            reason = "edge bound reached"
+            break
+        selected.add(module_id)
+        selected_rows.append(row)
+        traversed_edges += len(row.dependencies)
+        for dependency in row.dependencies:
+            if dependency not in selected:
+                pending.append(dependency)
+
+    module_ids = tuple(sorted(selected, key=lambda value: value.encode("utf-8")))
+    selected_rows.sort(key=lambda row: row.module_id.encode("utf-8"))
+    # More work may remain after the final successful node even when neither
+    # guard tripped inside the loop yet (for example, a queued next root).
+    if pending and not truncated:
+        truncated = True
+        reason = "module closure is incomplete"
+    status = "UNAVAILABLE" if truncated else "PASS"
+    return BoundedModuleClosure(
+        roots=root_ids,
+        modules=module_ids,
+        dependency_rows=tuple(selected_rows),
+        graph_digest=graph_digest,
+        max_modules=max_modules,
+        max_edges=max_edges,
+        traversed_edge_count=traversed_edges,
+        status=status,
+        truncated=truncated,
+        reason=reason,
+    )
+
+
+def module_closure_identity(
+    closure: BoundedModuleClosure, *, identity_id: str = "target-module-closure"
+) -> IdentityRecord:
+    """Expose only a complete closure as a target identity partition input."""
+
+    if not isinstance(closure, BoundedModuleClosure):
+        raise InputIdentityError("module closure must be typed")
+    if not closure.complete:
+        raise InputIdentityError("truncated module closure cannot become an authority identity")
+    return identity_record(
+        identity_id,
+        "module-closure",
+        closure.closure_digest,
+        attributes={
+            "module_count": len(closure.modules),
+            "traversed_edge_count": closure.traversed_edge_count,
+            "graph_digest": closure.graph_digest,
+            "complete": True,
         },
     )

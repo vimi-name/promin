@@ -43,6 +43,34 @@ excluded path set та всі включені leaves. Transient може бут
 як явний шлях, що реально належить selected closure; порожній closure
 fail-closed.
 
+## H14: bounded Merkle reuse для великих closure
+
+`capture_target_closure(...)` робить рівно **один physical traversal** для
+одного capture. Він не запускає окремий metadata revalidation pass: для
+кожного `SourceEntry` containment, preflight metadata witness і відкриття
+regular file перевіряються в тому ж проході, у якому обчислюється SHA-256.
+Тому зміна байта зі збереженим size/mtime на Windows не може стати cache hit.
+
+`MerkleLeafCache` — тільки process-local bounded LRU. Ключ містить portable
+path, fresh byte SHA-256 і byte count; leaf можна взяти з cache лише **після**
+нового physical read та порівняння цього SHA-256. Metadata не є ключем або
+authority. Cache не зберігає host path, має `max_entries` і conservative
+`max_bytes`, а eviction/uncacheable leaf фіксуються лише як diagnostic
+observation.
+
+`TargetClosureLimits` за замовчуванням допускає 250 000 selected files (тобто
+100k+ closure), але обмежує file count, total hashed bytes і conservative
+materialized-leaf accounting. Merkle folding для already canonical leaves
+використовує O(log n) intermediate hashes; сам receipt усе одно зберігає exact
+leaf list, тому memory limit є fail-closed, а не прихованим скороченням scope.
+
+`TargetClosureCapture` чесно показує `physical_traversal_passes=1`, кількість
+байтово перевірених файлів, bytes, hits/misses та eviction. Це diagnostic
+receipt без pass credit. `benchmark_target_closure_capture(...)` має максимум
+2 warmup і 5 measured samples, приймає лише preselected real target, не
+генерує/не змінює source і завжди повертає `DIAGNOSTIC_ONLY`,
+`performance_acceptance=false`, `acceptance_pass=false`.
+
 ## Rebinding та lineage
 
 `bind_target_merkle_receipt(...)` вимагає рівність між:
@@ -55,6 +83,12 @@ Coverage union має бути `PASS`, без missing modules, містити mo
 envelope і реально включати його subset/covered modules. Перед bind повторно
 перевіряється фізичний artifact через canonical `ProviderEnvelope` seal.
 
+Coverage union також містить exact sorted `contributing_envelope_digests` і
+required driver roles. `TargetMerkleReceipt` rebind-ить цей contributor
+lineage, не вигадуючи власну provider/coverage schema. Різниця contributor
+lineage класифікується як dependency-closure change і не може бути зведена до
+leaf-cache reuse.
+
 `FullScan` формує лише root lineage. `Reuse` обов'язково містить
 `parent_target_receipt_digest`; він не успадковує незафіксовані лічильники або
 metadata-only стан. Lifecycle interval, якщо наданий, лишається canonical
@@ -64,6 +98,47 @@ bytes SHA-256.
 Усі receipt і closure records мають `acceptance_pass=false` та
 `pass_credit=false`. Навіть успішний rebind є лише доказом цілісності inputs,
 не релізним або продуктовим acceptance.
+
+## Windows physical EventStore history seal
+
+`promin.windows_event_history` додає вузький фізичний seal лише для Windows
+history EventStore на томі **NTFS** або **ReFS**. До вже наявної повної
+EventStore-перевірки він утримує immutable journal та authority files відкритими
+no-write/no-delete handles, а також утримує handles обох history directories.
+Seal прив'язується лише після успішної повної byte verification; він не створює
+окремий metadata-only шлях довіри.
+
+Fast validation вимагає одночасно:
+
+- exact closure імен та кількості файлів у journal і authority directories;
+- незмінні held immutable file witnesses під утримуваними handles;
+- точну рівність mutable control digests для HEAD payload, authority-root
+  payload і checkpoint payload, а також authority generation.
+
+`ChangeTime` є лише witness/hint зміни, а не джерелом істини для reuse: writer
+з `FILE_WRITE_ATTRIBUTES` може відновити timestamp на NTFS. Тому ChangeTime не
+замінює exact filename/count closure, утримувані handles або byte verification.
+
+Якщо том або Windows capability не підтримується, є конфліктний writer,
+неможливо утримати directory/file handle, перевищено cap held files або
+спостереження конфліктують, seal не дає часткового результату: використовується
+звичайний повний scan / EventStore verification. POSIX-маршрут не змінюється і не
+отримує Windows physical seal.
+
+Цей механізм не є acceptance або performance claim: `acceptance_pass=false` і
+`pass_credit=false` залишаються незмінними.
+
+## Core event batch ceiling: 128
+
+Core ceiling для одного atomic EventStore batch дорівнює **128 events** і
+**128 state-binding updates**. Це дозволяє одну `Task` разом максимум зі
+127 `Relation` в одному atomic batch. Спроба додати 128 Relations до однієї
+Task створила б 129 events і відхиляється до commit.
+
+Ця межа не змінює semantic workload, не скорочує scope і не дозволяє тихо
+відкинути або підмінити Relations. Вона визначає лише atomic commit shape:
+1 Task + 127 Relations. Ліміт не є performance claim і не надає acceptance чи
+pass credit.
 
 ## Typed invalidation і gate admission
 
@@ -84,6 +159,17 @@ input digest, scope count, availability, status, elapsed seconds і завжди
 
 Навіть повністю passing admission plan має лише `admission_pass=true`:
 `pass_credit=false` і `acceptance_pass=false` лишаються обов'язковими.
+
+`ReceiptInvalidationClass` уточнює причину без створення другого gate policy:
+
+- `REUSE_VALIDATED`, `BYTE_CONTENT_CHANGED` → bounded `BODY_ONLY` plan;
+- `SOURCE_TOPOLOGY_CHANGED`, `TRANSIENT_POLICY_CHANGED`, `SELECTION_DRIFT` →
+  `IMPORT_SURFACE` plan;
+- `DEPENDENCY_CLOSURE_CHANGED`, `PROVIDER_IDENTITY_CHANGED` →
+  `CMAKE_TOPOLOGY` plan.
+
+Це лише вибір найменш дорогого достатнього вже існуючого plan. Усі gate
+receipts, benchmark і cache statistics лишаються non-crediting.
 
 ## Межа Wave 1
 

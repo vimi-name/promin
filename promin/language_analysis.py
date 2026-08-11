@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import unicodedata
@@ -111,6 +112,73 @@ class AnalysisFinding:
 class GateOutcome:
     status: GateStatus
     findings: tuple[AnalysisFinding, ...]
+    pass_credit: bool = False
+    acceptance_pass: bool = False
+    product_acceptance_pass: bool = False
+    release_approved: bool = False
+
+
+@dataclass(frozen=True)
+class ToolingAssessment:
+    """Bounded, receipt-only assessment of profile-selected analysis tools.
+
+    This is deliberately not a tool runner.  A ``PASS`` therefore means that
+    supplied, complete receipts satisfy the selected profile capabilities; it
+    does not claim that the tool was launched by this module or grant credit.
+    """
+
+    status: GateStatus
+    required_tools: tuple[str, ...]
+    observed_tools: tuple[str, ...]
+    unavailable_tools: tuple[str, ...]
+    receipt_count: int
+    truncated: bool
+    observed_digest: str
+    errors: tuple[str, ...]
+    pass_credit: bool = False
+    acceptance_pass: bool = False
+    product_acceptance_pass: bool = False
+    release_approved: bool = False
+
+
+@dataclass(frozen=True)
+class SemanticScopeAssessment:
+    """Admission view over an already-computed, bounded semantic scope.
+
+    Graph traversal remains owned by the semantic-scope surface.  This type
+    merely binds its declared bounds, graph identity, and CompDB identity
+    before a static C/C++ tool can be considered.
+    """
+
+    status: GateStatus
+    graph_digest: str | None
+    compilation_database_digest: str | None
+    scope_digest: str
+    changed_count: int
+    selected_count: int
+    max_depth: int
+    max_files: int
+    truncated: bool
+    errors: tuple[str, ...]
+    pass_credit: bool = False
+    acceptance_pass: bool = False
+    product_acceptance_pass: bool = False
+    release_approved: bool = False
+
+
+@dataclass(frozen=True)
+class OwnershipSequenceAssessment:
+    """Streaming assessment for a bounded series of ownership transfers."""
+
+    status: GateStatus
+    transfer_count: int
+    safe_transfer_count: int
+    review_transfer_count: int
+    proven_transfer_count: int
+    findings: tuple[AnalysisFinding, ...]
+    findings_truncated: bool
+    input_digest: str
+    errors: tuple[str, ...]
     pass_credit: bool = False
     acceptance_pass: bool = False
     product_acceptance_pass: bool = False
@@ -991,4 +1059,530 @@ def interface_weight_review(profile: LanguageProfile, metrics: Mapping[str, int]
         proof_kind=ProofKind.SOURCE_CANDIDATE,
         message="bounded structural metrics are below the selected review threshold",
         evidence=(str(score), str(threshold)),
+    )
+
+
+_TOOL_RECEIPT_KEYS = frozenset(
+    {
+        "tool_id",
+        "status",
+        "input_digest",
+        "configuration_digest",
+        "scope_count",
+        "elapsed_seconds",
+        "reason",
+    }
+)
+_TRANSFER_KEYS = frozenset(
+    {
+        "transfer_id",
+        "source_id",
+        "destination_id",
+        "source_category",
+        "destination_category",
+        "source_observable_after_transfer",
+        "postcondition",
+        "source_scope",
+        "destination_scope",
+    }
+)
+_TOOL_RECEIPT_STATUSES = frozenset(
+    {
+        GateStatus.PASS,
+        GateStatus.SAFE,
+        GateStatus.FAIL,
+        GateStatus.REVIEW,
+        GateStatus.UNAVAILABLE,
+        GateStatus.SKIPPED,
+        GateStatus.TIMEOUT,
+    }
+)
+_SCOPE_TRAVERSAL_STATUSES = frozenset(
+    {GateStatus.PASS, GateStatus.FAIL, GateStatus.UNAVAILABLE, GateStatus.TIMEOUT}
+)
+
+
+def _bounded_integer(value: Any, label: str, *, minimum: int = 0) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise AnalysisError(f"{label} must be an integer no smaller than {minimum}")
+    return value
+
+
+def _bounded_seconds(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AnalysisError(f"{label} must be a finite non-negative number")
+    rendered = float(value)
+    if not math.isfinite(rendered) or rendered < 0:
+        raise AnalysisError(f"{label} must be a finite non-negative number")
+    return rendered
+
+
+def _coerce_gate_status(value: GateStatus | str, label: str) -> GateStatus:
+    try:
+        return value if isinstance(value, GateStatus) else GateStatus(value)
+    except ValueError as exc:
+        raise AnalysisError(f"{label} is not a known gate status") from exc
+
+
+def _canonical_identifier_tuple(values: Iterable[str], label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise AnalysisError(f"{label} must be an identifier iterable, not one string")
+    try:
+        materialized = tuple(values)
+    except TypeError as exc:
+        raise AnalysisError(f"{label} must be an identifier iterable") from exc
+    normalized = tuple(unicodedata.normalize("NFC", item) if isinstance(item, str) else "" for item in materialized)
+    if any(not _ID.fullmatch(item) for item in normalized):
+        raise AnalysisError(f"{label} contains an invalid generic identifier")
+    if len(normalized) != len(set(normalized)):
+        raise AnalysisError(f"{label} contains duplicate identifiers")
+    if not normalized and not allow_empty:
+        raise AnalysisError(f"{label} must not be empty")
+    return tuple(sorted(normalized))
+
+
+def _canonical_scope_paths(values: Iterable[str], label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise AnalysisError(f"{label} must be a path iterable, not one string")
+    try:
+        materialized = tuple(values)
+    except TypeError as exc:
+        raise AnalysisError(f"{label} must be a path iterable") from exc
+    normalized: list[str] = []
+    for item in materialized:
+        if not isinstance(item, str) or not item:
+            raise AnalysisError(f"{label} contains a non-empty path requirement")
+        path = unicodedata.normalize("NFC", item)
+        if path.startswith("/") or "\\" in path or "\x00" in path:
+            raise AnalysisError(f"{label} contains a non-canonical relative path")
+        pieces = path.split("/")
+        if any(piece in {"", ".", ".."} for piece in pieces):
+            raise AnalysisError(f"{label} contains an invalid relative path segment")
+        normalized.append(path)
+    if len(normalized) != len(set(normalized)):
+        raise AnalysisError(f"{label} contains duplicate paths")
+    if not normalized and not allow_empty:
+        raise AnalysisError(f"{label} must not be empty")
+    return tuple(sorted(normalized))
+
+
+def _valid_digest(value: Any) -> str | None:
+    return value if isinstance(value, str) and _HEX64.fullmatch(value) else None
+
+
+def _declared_verification_capabilities(profile: LanguageProfile) -> frozenset[str]:
+    verification = profile.verification
+    return frozenset(
+        item
+        for group in ("cheapRequired", "recommended", "optional")
+        for item in verification[group]
+    )
+
+
+def _parse_tool_receipt(value: Any) -> tuple[dict[str, Any], GateStatus]:
+    if not isinstance(value, Mapping) or set(value) != _TOOL_RECEIPT_KEYS:
+        raise AnalysisError("configured tool receipt has an invalid exact shape")
+    tool_id = value["tool_id"]
+    if not isinstance(tool_id, str) or not _ID.fullmatch(tool_id):
+        raise AnalysisError("configured tool receipt has an invalid tool_id")
+    status = _coerce_gate_status(value["status"], "configured tool receipt status")
+    if status not in _TOOL_RECEIPT_STATUSES:
+        raise AnalysisError("configured tool receipt status is not permitted")
+    input_digest = value["input_digest"]
+    configuration_digest = value["configuration_digest"]
+    reason = value["reason"]
+    if status in {GateStatus.PASS, GateStatus.SAFE}:
+        if _valid_digest(input_digest) is None or _valid_digest(configuration_digest) is None or reason is not None:
+            raise AnalysisError("successful configured tool receipts require two digests and no reason")
+    else:
+        if input_digest is not None and _valid_digest(input_digest) is None:
+            raise AnalysisError("configured tool receipt input_digest is invalid")
+        if configuration_digest is not None and _valid_digest(configuration_digest) is None:
+            raise AnalysisError("configured tool receipt configuration_digest is invalid")
+        if not isinstance(reason, str) or not reason:
+            raise AnalysisError("non-successful configured tool receipts require a reason")
+    parsed = {
+        "tool_id": tool_id,
+        "status": status.value,
+        "input_digest": input_digest,
+        "configuration_digest": configuration_digest,
+        "scope_count": _bounded_integer(value["scope_count"], "configured tool receipt scope_count"),
+        "elapsed_seconds": _bounded_seconds(value["elapsed_seconds"], "configured tool receipt elapsed_seconds"),
+        "reason": reason,
+    }
+    return parsed, status
+
+
+def assess_configured_tools(
+    profile: LanguageProfile,
+    *,
+    tool_receipts: Iterable[Mapping[str, Any]],
+    required_tools: Iterable[str],
+    max_receipts: int,
+) -> ToolingAssessment:
+    """Assess bounded external-tool receipts without launching an executable.
+
+    The caller explicitly selects a subset of capabilities declared by the
+    loaded language profile.  Receipt exhaustion and unavailable tools remain
+    non-crediting states; there is no guessed tool command or implicit tool
+    selection.
+    """
+
+    if not isinstance(profile, LanguageProfile):
+        raise AnalysisError("configured tool assessment requires a LanguageProfile")
+    maximum = _bounded_integer(max_receipts, "max_receipts", minimum=1)
+    requested = _canonical_identifier_tuple(required_tools, "required_tools", allow_empty=True)
+    declared = _declared_verification_capabilities(profile)
+    unknown_requested = tuple(item for item in requested if item not in declared)
+    if unknown_requested:
+        raise AnalysisError(f"required_tools are not declared by the selected profile: {list(unknown_requested)}")
+    if isinstance(tool_receipts, (str, bytes)):
+        raise AnalysisError("tool_receipts must be a receipt iterable, not one string")
+    try:
+        iterator = iter(tool_receipts)
+    except TypeError as exc:
+        raise AnalysisError("tool_receipts must be a receipt iterable") from exc
+
+    observed: dict[str, GateStatus] = {}
+    observed_digest = hashlib.sha256()
+    receipt_count = 0
+    truncated = False
+    errors: list[str] = []
+    for raw in iterator:
+        if receipt_count >= maximum:
+            truncated = True
+            errors.append("configured tool receipt bound exceeded")
+            break
+        parsed, status = _parse_tool_receipt(raw)
+        tool_id = str(parsed["tool_id"])
+        observed_digest.update(_canonical_bytes(parsed))
+        observed_digest.update(b"\n")
+        receipt_count += 1
+        if tool_id in observed:
+            errors.append(f"duplicate configured tool receipt: {tool_id}")
+            continue
+        observed[tool_id] = status
+
+    observed_tools = tuple(sorted(observed))
+    unknown_observed = tuple(item for item in observed_tools if item not in declared)
+    if unknown_observed:
+        errors.append(f"configured tools are not declared by the selected profile: {list(unknown_observed)}")
+    missing = tuple(item for item in requested if item not in observed)
+    unavailable = set(missing)
+    for item in requested:
+        if observed.get(item) is GateStatus.UNAVAILABLE:
+            unavailable.add(item)
+    selected_statuses = tuple(observed[item] for item in requested if item in observed)
+    if any(status is GateStatus.FAIL for status in selected_statuses) or any(
+        error.startswith("duplicate configured tool receipt") for error in errors
+    ):
+        status = GateStatus.FAIL
+    elif any(status is GateStatus.TIMEOUT for status in selected_statuses):
+        status = GateStatus.TIMEOUT
+    elif truncated or missing or any(item is GateStatus.UNAVAILABLE for item in selected_statuses):
+        status = GateStatus.UNAVAILABLE
+    elif any(item is GateStatus.SKIPPED for item in selected_statuses):
+        status = GateStatus.SKIPPED
+    elif unknown_observed or any(item is GateStatus.REVIEW for item in selected_statuses):
+        status = GateStatus.REVIEW
+    elif any(item is GateStatus.SAFE for item in selected_statuses):
+        status = GateStatus.SAFE
+    else:
+        status = GateStatus.PASS
+    return ToolingAssessment(
+        status=status,
+        required_tools=requested,
+        observed_tools=observed_tools,
+        unavailable_tools=tuple(sorted(unavailable)),
+        receipt_count=receipt_count,
+        truncated=truncated,
+        observed_digest=observed_digest.hexdigest(),
+        errors=tuple(errors),
+    )
+
+
+def assess_bounded_semantic_scope(
+    *,
+    traversal_status: GateStatus | str,
+    graph_digest: str | None,
+    compilation_database_digest: str | None,
+    changed_paths: Iterable[str],
+    selected_paths: Iterable[str],
+    max_depth: int,
+    max_files: int,
+    truncated: bool,
+    errors: Iterable[str] = (),
+) -> SemanticScopeAssessment:
+    """Fail closed on an externally-computed reverse-closure receipt.
+
+    This function intentionally does not reconstruct imports or traverse a
+    graph.  It verifies the bounded semantic-scope facts emitted by the graph
+    authority and binds them to a specific canonical compilation database.
+    """
+
+    status_from_traversal = _coerce_gate_status(traversal_status, "semantic scope traversal status")
+    if status_from_traversal not in _SCOPE_TRAVERSAL_STATUSES:
+        raise AnalysisError("semantic scope traversal status is not permitted")
+    changed = _canonical_scope_paths(changed_paths, "changed_paths")
+    selected = _canonical_scope_paths(selected_paths, "selected_paths")
+    depth = _bounded_integer(max_depth, "max_depth")
+    files = _bounded_integer(max_files, "max_files", minimum=len(changed))
+    if not isinstance(truncated, bool):
+        raise AnalysisError("semantic scope truncated must be boolean")
+    if isinstance(errors, (str, bytes)):
+        raise AnalysisError("semantic scope errors must be an iterable, not one string")
+    try:
+        reported_errors = tuple(errors)
+    except TypeError as exc:
+        raise AnalysisError("semantic scope errors must be iterable") from exc
+    if any(not isinstance(item, str) or not item for item in reported_errors):
+        raise AnalysisError("semantic scope errors must contain non-empty strings")
+    if len(reported_errors) != len(set(reported_errors)):
+        raise AnalysisError("semantic scope errors must be unique")
+
+    normalized_graph_digest = _valid_digest(graph_digest)
+    normalized_database_digest = _valid_digest(compilation_database_digest)
+    output_errors = list(reported_errors)
+    if normalized_graph_digest is None:
+        output_errors.append("canonical module graph digest is invalid")
+        result_status = GateStatus.FAIL
+    elif compilation_database_digest is None:
+        output_errors.append("canonical compilation database binding is unavailable")
+        result_status = GateStatus.UNAVAILABLE
+    elif normalized_database_digest is None:
+        output_errors.append("canonical compilation database digest is invalid")
+        result_status = GateStatus.FAIL
+    elif not set(changed).issubset(selected):
+        output_errors.append("selected semantic scope omits one or more changed paths")
+        result_status = GateStatus.FAIL
+    elif len(selected) > files:
+        output_errors.append("selected semantic scope exceeds its declared file bound")
+        result_status = GateStatus.FAIL
+    elif status_from_traversal is GateStatus.FAIL:
+        if not output_errors:
+            output_errors.append("semantic scope traversal failed without a reason")
+        result_status = GateStatus.FAIL
+    elif status_from_traversal is GateStatus.TIMEOUT:
+        if not output_errors:
+            output_errors.append("semantic scope traversal timed out")
+        result_status = GateStatus.TIMEOUT
+    elif truncated:
+        output_errors.append("semantic scope was explicitly truncated")
+        result_status = GateStatus.UNAVAILABLE
+    elif status_from_traversal is GateStatus.UNAVAILABLE:
+        if not output_errors:
+            output_errors.append("semantic scope traversal is unavailable")
+        result_status = GateStatus.UNAVAILABLE
+    elif output_errors:
+        result_status = GateStatus.FAIL
+    else:
+        result_status = GateStatus.PASS
+    scope_digest = hashlib.sha256(
+        _canonical_bytes({"changed_paths": changed, "selected_paths": selected})
+    ).hexdigest()
+    return SemanticScopeAssessment(
+        status=result_status,
+        graph_digest=normalized_graph_digest,
+        compilation_database_digest=normalized_database_digest,
+        scope_digest=scope_digest,
+        changed_count=len(changed),
+        selected_count=len(selected),
+        max_depth=depth,
+        max_files=files,
+        truncated=truncated,
+        errors=tuple(output_errors),
+    )
+
+
+def _transfer_identity(value: Any, label: str, max_identity_length: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise AnalysisError(f"{label} must be a non-empty identity")
+    identity = unicodedata.normalize("NFC", value)
+    if "\x00" in identity or len(identity) > max_identity_length:
+        raise AnalysisError(f"{label} exceeds the declared identity bound")
+    return identity
+
+
+def _record_sequence_finding(
+    target: list[AnalysisFinding],
+    finding: AnalysisFinding,
+    *,
+    maximum: int,
+) -> bool:
+    if finding.classification is FindingClassification.SAFE:
+        return False
+    if len(target) < maximum:
+        target.append(finding)
+        return False
+    return True
+
+
+def assess_ownership_transfer_sequence(
+    profile: LanguageProfile,
+    *,
+    transfers: Iterable[Mapping[str, Any]],
+    max_transfers: int,
+    max_recorded_findings: int,
+    max_identity_length: int,
+) -> OwnershipSequenceAssessment:
+    """Stream a bounded ownership-transfer sequence without retaining all rows.
+
+    Each source and destination identity may occur once in its respective role.
+    A later transfer may use an earlier destination as its source, which models
+    a value hand-off without allowing duplicate ownership of the same identity.
+    """
+
+    if not isinstance(profile, LanguageProfile):
+        raise AnalysisError("ownership transfer sequence requires a LanguageProfile")
+    maximum = _bounded_integer(max_transfers, "max_transfers", minimum=1)
+    finding_limit = _bounded_integer(max_recorded_findings, "max_recorded_findings")
+    identity_limit = _bounded_integer(max_identity_length, "max_identity_length", minimum=1)
+    if isinstance(transfers, (str, bytes)):
+        raise AnalysisError("transfers must be a transfer iterable, not one string")
+    try:
+        iterator = iter(transfers)
+    except TypeError as exc:
+        raise AnalysisError("transfers must be a transfer iterable") from exc
+
+    seen_transfer_ids: set[str] = set()
+    seen_source_ids: set[str] = set()
+    seen_destination_ids: set[str] = set()
+    recorded: list[AnalysisFinding] = []
+    input_digest = hashlib.sha256()
+    errors: list[str] = []
+    transfer_count = 0
+    safe_count = 0
+    review_count = 0
+    proven_count = 0
+    findings_truncated = False
+    sequence_truncated = False
+
+    for raw in iterator:
+        if transfer_count >= maximum:
+            sequence_truncated = True
+            errors.append("ownership transfer bound exceeded")
+            break
+        if not isinstance(raw, Mapping) or set(raw) != _TRANSFER_KEYS:
+            raise AnalysisError("ownership transfer has an invalid exact shape")
+        transfer_id = _transfer_identity(raw["transfer_id"], "transfer_id", identity_limit)
+        source_id = _transfer_identity(raw["source_id"], "source_id", identity_limit)
+        destination_id = _transfer_identity(raw["destination_id"], "destination_id", identity_limit)
+        for field in (
+            "source_category",
+            "destination_category",
+            "postcondition",
+            "source_scope",
+            "destination_scope",
+        ):
+            if not isinstance(raw[field], str) or not raw[field]:
+                raise AnalysisError(f"ownership transfer {field} must be a non-empty string")
+        if not isinstance(raw["source_observable_after_transfer"], bool):
+            raise AnalysisError("ownership transfer source_observable_after_transfer must be boolean")
+        normalized = {
+            "transfer_id": transfer_id,
+            "source_id": source_id,
+            "destination_id": destination_id,
+            "source_category": raw["source_category"],
+            "destination_category": raw["destination_category"],
+            "source_observable_after_transfer": raw["source_observable_after_transfer"],
+            "postcondition": raw["postcondition"],
+            "source_scope": raw["source_scope"],
+            "destination_scope": raw["destination_scope"],
+        }
+        input_digest.update(_canonical_bytes(normalized))
+        input_digest.update(b"\n")
+        transfer_count += 1
+        event_findings: list[AnalysisFinding] = []
+        if transfer_id in seen_transfer_ids:
+            event_findings.append(
+                classify_finding(
+                    rule_id="duplicate-transfer-identity",
+                    classification=FindingClassification.PROVEN,
+                    proof_kind=ProofKind.CONTRACT_PROVEN,
+                    message="ownership transfer sequence reuses a transfer identity",
+                    evidence=(transfer_id,),
+                )
+            )
+        seen_transfer_ids.add(transfer_id)
+        if source_id in seen_source_ids:
+            event_findings.append(
+                classify_finding(
+                    rule_id="duplicate-transfer-source",
+                    classification=FindingClassification.PROVEN,
+                    proof_kind=ProofKind.CONTRACT_PROVEN,
+                    message="ownership transfer sequence reuses a consumed source identity",
+                    evidence=(source_id,),
+                )
+            )
+        seen_source_ids.add(source_id)
+        if destination_id in seen_destination_ids:
+            event_findings.append(
+                classify_finding(
+                    rule_id="duplicate-transfer-destination",
+                    classification=FindingClassification.PROVEN,
+                    proof_kind=ProofKind.CONTRACT_PROVEN,
+                    message="ownership transfer sequence reuses a destination identity",
+                    evidence=(destination_id,),
+                )
+            )
+        seen_destination_ids.add(destination_id)
+        if source_id == destination_id:
+            event_findings.append(
+                classify_finding(
+                    rule_id="self-transfer-identity",
+                    classification=FindingClassification.PROVEN,
+                    proof_kind=ProofKind.CONTRACT_PROVEN,
+                    message="ownership transfer sequence cannot use one identity as both source and destination",
+                    evidence=(source_id,),
+                )
+            )
+        event_findings.append(
+            assess_transfer(
+                profile,
+                source_category=str(raw["source_category"]),
+                destination_category=str(raw["destination_category"]),
+                source_observable_after_transfer=bool(raw["source_observable_after_transfer"]),
+                postcondition=str(raw["postcondition"]),
+                source_scope=str(raw["source_scope"]),
+                destination_scope=str(raw["destination_scope"]),
+            )
+        )
+        event_classification = FindingClassification.SAFE
+        if any(item.classification is FindingClassification.PROVEN for item in event_findings):
+            event_classification = FindingClassification.PROVEN
+            proven_count += 1
+        elif any(item.classification is FindingClassification.REVIEW for item in event_findings):
+            event_classification = FindingClassification.REVIEW
+            review_count += 1
+        else:
+            safe_count += 1
+        for finding in event_findings:
+            findings_truncated = _record_sequence_finding(
+                recorded,
+                finding,
+                maximum=finding_limit,
+            ) or findings_truncated
+        if event_classification is FindingClassification.SAFE:
+            continue
+
+    if proven_count:
+        status = GateStatus.FAIL
+    elif sequence_truncated:
+        status = GateStatus.UNAVAILABLE
+    elif review_count:
+        status = GateStatus.REVIEW
+    elif transfer_count:
+        status = GateStatus.SAFE
+    else:
+        status = GateStatus.PASS
+    return OwnershipSequenceAssessment(
+        status=status,
+        transfer_count=transfer_count,
+        safe_transfer_count=safe_count,
+        review_transfer_count=review_count,
+        proven_transfer_count=proven_count,
+        findings=tuple(recorded),
+        findings_truncated=findings_truncated,
+        input_digest=input_digest.hexdigest(),
+        errors=tuple(errors),
     )

@@ -1018,7 +1018,7 @@
               "activation_digest",
               "payload"
             ],
-            "events_per_batch_max": 20,
+            "events_per_batch_max": 128,
             "genesis_event_semantic_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "genesis_previous_authority_commitment": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "lease_bound_command_kinds_source": "command_mutation_claim_rule.lease_bound_command_kinds",
@@ -1118,7 +1118,7 @@
               }
             },
             "state_binding_leaf_type_source": "Activation plus SemanticModel.persistent_entities.kind plus Relation",
-            "state_binding_updates_per_batch_max": 20,
+            "state_binding_updates_per_batch_max": 128,
             "state_binding_value_rules": {
               "Activation": {
                 "event_kinds": [],
@@ -5617,6 +5617,66 @@
                         "compacted_tail_bytes"
                       ],
                       "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "authoritative": {
+                          "const": false
+                        },
+                        "batch_threshold": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "byte_threshold": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "checkpoint_bytes": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "checkpoint_count": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "error_type": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "issue": {
+                          "const": "derived-checkpoint-unavailable"
+                        },
+                        "status": {
+                          "const": "unavailable"
+                        },
+                        "tail_batches": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "tail_bytes": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "written": {
+                          "const": false
+                        }
+                      },
+                      "required": [
+                        "authoritative",
+                        "batch_threshold",
+                        "byte_threshold",
+                        "checkpoint_bytes",
+                        "checkpoint_count",
+                        "tail_batches",
+                        "tail_bytes",
+                        "written",
+                        "status",
+                        "issue",
+                        "error_type"
+                      ],
+                      "type": "object"
                     }
                   ]
                 },
@@ -6000,7 +6060,7 @@
           "items": {
             "$ref": "#/$defs/Event"
           },
-          "maxItems": 20,
+          "maxItems": 128,
           "minItems": 1,
           "type": "array"
         },
@@ -6032,7 +6092,7 @@
           "items": {
             "$ref": "#/$defs/StateBindingUpdate"
           },
-          "maxItems": 20,
+          "maxItems": 128,
           "minItems": 1,
           "type": "array",
           "uniqueItems": true
@@ -6226,7 +6286,7 @@
           "type": "integer"
         },
         "max_events_per_batch": {
-          "const": 20,
+          "const": 128,
           "type": "integer"
         },
         "max_requested_scope_items": {
@@ -6238,7 +6298,7 @@
           "type": "integer"
         },
         "max_state_binding_updates_per_batch": {
-          "const": 20,
+          "const": 128,
           "type": "integer"
         },
         "policy_digest": {
@@ -10297,6 +10357,66 @@
                 "written",
                 "compacted_tail_batches",
                 "compacted_tail_bytes"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "authoritative": {
+                  "const": false
+                },
+                "batch_threshold": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "byte_threshold": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "checkpoint_bytes": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "checkpoint_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "error_type": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "issue": {
+                  "const": "derived-checkpoint-unavailable"
+                },
+                "status": {
+                  "const": "unavailable"
+                },
+                "tail_batches": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_bytes": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "written": {
+                  "const": false
+                }
+              },
+              "required": [
+                "authoritative",
+                "batch_threshold",
+                "byte_threshold",
+                "checkpoint_bytes",
+                "checkpoint_count",
+                "tail_batches",
+                "tail_bytes",
+                "written",
+                "status",
+                "issue",
+                "error_type"
               ],
               "type": "object"
             }

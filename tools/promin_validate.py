@@ -78,8 +78,8 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 187
-CANONICAL_PACKAGE_DIRECTORY_COUNT = 16
+CANONICAL_PACKAGE_FILE_COUNT = 231
+CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
         '.gitattributes',
@@ -98,27 +98,40 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/ARTIFACT_TAXONOMY_UA.md',
         'docs/C_CPP_CAPABILITY_PROFILE_UA.md',
         'docs/CLEAN_REINITIALIZATION_UA.md',
+        'docs/COMPARATIVE_BENCHMARK_UA.md',
         'docs/EXPERT_CONFIG_UA.md',
         'docs/INIT_CAPABILITIES_UA.md',
+        'docs/LANGUAGE_CAPABILITIES_UA.md',
+        'docs/LINUX_MODEL_VALIDATION_UA.md',
         'docs/MIGRATION_ALPHA3_TO_ALPHA4_UA.md',
         'docs/MODEL_ROUTING_UA.md',
         'docs/PORTABILITY_UA.md',
         'docs/PORTABLE_CONTEXT_ARCHITECTURE_UA.md',
         'docs/PRODUCT_DOCTRINE_UA.md',
         'docs/PROFILE_CATALOG_UA.md',
+        'docs/PRODUCT_INSPECTION_UA.md',
         'docs/PROVIDER_IDENTITIES_UA.md',
         'docs/QUICKSTART_IF_THEN_UA.md',
         'docs/RECEIPTS_AND_INVALIDATION_UA.md',
+        'docs/REVALIDATION_AND_REPORTING_UA.md',
         'docs/RUNTIME_AUDIT_UA.md',
         'docs/SKILLS_UA.md',
         'docs/STATIC_ADMISSION_UA.md',
         'docs/SYSTEM_CHECKLIST_UA.md',
+        'docs/WEAK_MODEL_EXECUTION_UA.md',
+        'docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
         'human/promin_appendices_ua.pdf',
         'human/promin_main_en.pdf',
         'human/promin_main_ua.pdf',
         'language_profiles/c-family-semantic.json',
+        'language_profiles/csharp-semantic.json',
+        'language_profiles/javascript-typescript-semantic.json',
+        'language_profiles/jvm-semantic.json',
+        'language_profiles/open-source-tooling.json',
+        'language_profiles/python-semantic.json',
+        'language_profiles/weak-host-fallback.json',
         'LICENSE',
         'MACHINE_README.md',
         'MANIFEST.json',
@@ -164,17 +177,20 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/init_profiles.py',
         'promin/input_identity.py',
         'promin/language_analysis.py',
+        'promin/language_catalog.py',
         'promin/limits.py',
         'promin/mutation_suite.py',
         'promin/platform_paths.py',
         'promin/portability.py',
         'promin/project_package.py',
         'promin/projection.py',
+        'promin/product_inspection.py',
         'promin/provider_envelope.py',
         'promin/provider_receipts.py',
         'promin/provider_store.py',
         'promin/publication.py',
         'promin/recovery.py',
+        'promin/revalidation.py',
         'promin/refresh.py',
         'promin/resources.py',
         'promin/selector_shards.py',
@@ -187,6 +203,8 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/version.py',
         'promin/workspace.py',
         'promin/writer_identity.py',
+        'promin/weak_model_execution.py',
+        'promin/windows_event_history.py',
         'prompts/INIT_PROMPT_EN.txt',
         'prompts/INIT_PROMPT_UA.txt',
         'pyproject.toml',
@@ -246,6 +264,30 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_concurrency_crash.py',
         'tests/test_contract_mutations.py',
         'tests/test_events_projection.py',
+        'tests/test_heavy_artifact_minimality.py',
+        'tests/test_heavy_comparative_bench.py',
+        'tests/test_heavy_derived_storage.py',
+        'tests/test_heavy_event_batching.py',
+        'tests/test_heavy_eventstore_lifecycle.py',
+        'tests/test_heavy_eventstore_postcommit_index_failure.py',
+        'tests/test_heavy_eventstore_prefix_witness.py',
+        'tests/test_heavy_failclosed_adversarial.py',
+        'tests/test_heavy_init_profiles.py',
+        'tests/test_heavy_language_analysis.py',
+        'tests/test_heavy_language_catalog.py',
+        'tests/test_heavy_language_profile_catalog.py',
+        'tests/test_heavy_linux_model.py',
+        'tests/test_heavy_product_inspection.py',
+        'tests/test_heavy_provider_identity.py',
+        'tests/test_heavy_receipt_cache.py',
+        'tests/test_heavy_recovery_stress.py',
+        'tests/test_heavy_relation_ledger_hotpath.py',
+        'tests/test_heavy_revalidation.py',
+        'tests/test_heavy_saturation_storage_budget.py',
+        'tests/test_heavy_state_binding_storage.py',
+        'tests/test_heavy_weak_model_execution.py',
+        'tests/test_heavy_windows_event_history.py',
+        'tests/test_heavy_windows_publication.py',
         'tests/test_installed_distribution.py',
         'tests/test_package_validation.py',
         'tests/test_platform_paths_hotpath.py',
@@ -259,7 +301,9 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tools/promin.py',
         'tools/promin_alpha_check.py',
         'tools/promin_command_bench.py',
+        'tools/promin_comparative_bench.py',
         'tools/promin_init.py',
+        'tools/promin_linux_model.py',
         'tools/promin_no_degradation.py',
         'tools/promin_package.py',
         'tools/promin_runtime.py',
@@ -278,6 +322,7 @@ CANONICAL_PACKAGE_DIRECTORIES = frozenset(
         'capability_profiles',
         'core',
         'docs',
+        'docs/audit',
         'examples',
         'human',
         'language_profiles',
@@ -747,7 +792,9 @@ def _module_origin_digest(module_name: str) -> dict[str, str]:
 def implementation_closure(root: Path) -> dict[str, Any]:
     runtime_rows = [
         {"path": f"promin/{rel}", "sha256": sha256_file(path), "size": path.stat().st_size}
-        for rel, path in iter_regular_files(root / "promin")
+        for rel, path in iter_regular_files(
+            root / "promin", exclude_root_git_metadata=False
+        )
     ]
     if not runtime_rows:
         raise ValidationFailure("promin runtime implementation is empty")
@@ -878,7 +925,21 @@ def _is_link_or_reparse(path: Path) -> bool:
     return bool(attributes & reparse_flag)
 
 
-def iter_regular_files(root: Path, *, include_generated: bool = True) -> list[tuple[str, Path]]:
+def iter_regular_files(
+    root: Path,
+    *,
+    include_generated: bool = True,
+    exclude_root_git_metadata: bool = True,
+) -> list[tuple[str, Path]]:
+    """Return candidate files while classifying only root worktree metadata out-of-band.
+
+    A linked Git worktree owns a root-level regular ``.git`` file outside the
+    package payload.  A nested ``.git`` path remains ordinary candidate content
+    and is therefore subject to the usual inventory/path policy.  Callers that
+    scan a package subtree must opt out, so e.g. ``promin/.git`` is never
+    mistaken for root worktree metadata.
+    """
+
     if _is_link_or_reparse(root) or not root.is_dir():
         raise ValidationFailure(f"standard root must be a real directory: {root}")
     found: list[tuple[str, Path]] = []
@@ -891,7 +952,7 @@ def iter_regular_files(root: Path, *, include_generated: bool = True) -> list[tu
             # Repository metadata is outside the candidate tree.  It is not a
             # packaged artifact and must never be scanned as one merely
             # because validation is invoked from a checkout.
-            if rel == ".git":
+            if exclude_root_git_metadata and rel == ".git":
                 dirnames.remove(name)
                 continue
             if _is_transient_directory(name):
@@ -904,12 +965,16 @@ def iter_regular_files(root: Path, *, include_generated: bool = True) -> list[tu
         for name in filenames:
             path = current / name
             rel = path.relative_to(root).as_posix()
+            mode = path.lstat().st_mode
+            if exclude_root_git_metadata and rel == ".git":
+                if not stat.S_ISREG(mode) or _is_link_or_reparse(path):
+                    raise ValidationFailure("root Git metadata file must be a real regular file")
+                continue
             validate_relative_path(rel)
             key = normalized_path_key(rel)
             if key in seen:
                 raise ValidationFailure(f"normalized path collision: {seen[key]} vs {rel}")
             seen[key] = rel
-            mode = path.lstat().st_mode
             if not stat.S_ISREG(mode) or _is_link_or_reparse(path):
                 raise ValidationFailure(f"non-regular file rejected: {rel}")
             if include_generated or rel not in GENERATED_SURFACES:
@@ -961,7 +1026,7 @@ def verify_package_inventory(
     _validate_canonical_package_definition()
     # A linked Git worktree represents its administrative directory with a
     # root-level .git file.  It is host metadata, not package payload.
-    actual_files = {rel for rel, _ in iter_regular_files(root) if rel != ".git"}
+    actual_files = {rel for rel, _ in iter_regular_files(root)}
     required_files = (
         CANONICAL_PACKAGE_FILES if require_generated else CANONICAL_PAYLOAD_FILES
     )
@@ -1313,7 +1378,12 @@ def verify_human_documents(
         from pypdf import PdfReader
     except ImportError as exc:
         raise ValidationFailure("pypdf dependency is required for typed human document verification") from exc
-    actual = {f"human/{rel}" for rel, _ in iter_regular_files(root / "human")}
+    actual = {
+        f"human/{rel}"
+        for rel, _ in iter_regular_files(
+            root / "human", exclude_root_git_metadata=False
+        )
+    }
     if actual != HUMAN_PDFS:
         raise ValidationFailure(f"human PDF set mismatch: expected={sorted(HUMAN_PDFS)} actual={sorted(actual)}")
     details: list[dict[str, Any]] = []
@@ -1440,7 +1510,9 @@ def verify_human_documents(
         for role in FONT_ROLES:
             if not isinstance(evidence_fonts[role], dict) or evidence_fonts[role].get("sha256") != font_bindings[role][1]:
                 raise ValidationFailure(f"human document build evidence font digest mismatch: {role}")
-        generated_files = iter_regular_files(regenerated)
+        generated_files = iter_regular_files(
+            regenerated, exclude_root_git_metadata=False
+        )
         generated_rel = {f"human/{rel}" for rel, _ in generated_files}
         if generated_rel != HUMAN_PDFS:
             raise ValidationFailure("human document generator output set is not exact")

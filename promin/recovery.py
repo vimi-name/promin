@@ -22,7 +22,11 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 from .canonical import digest_bytes, digest_value, fsync_directory
-from .platform_paths import filesystem_path
+from .platform_paths import (
+    PlatformPathError,
+    filesystem_path,
+    physical_rename_directory_create_only,
+)
 from .writer_identity import (
     WriterIdentityError,
     WriterLivenessReport,
@@ -40,6 +44,20 @@ class RecoveryUnavailable(RecoveryError):
 
 class RecoveryIntentMismatch(RecoveryError):
     """Raised when a completed result belongs to another clean-init intent."""
+
+
+class RecoveryInterruption(RecoveryError):
+    """An explicit, pre-publication interruption of one clean-init phase.
+
+    The bounded restart driver retries only this typed condition.  It must not
+    turn arbitrary implementation errors into a new destructive attempt.
+    """
+
+    def __init__(self, phase: str) -> None:
+        if phase not in _RESTARTABLE_CLEAN_PHASES:
+            raise RecoveryError("clean reinitialization interruption phase is invalid")
+        self.phase = phase
+        super().__init__(f"clean reinitialization interrupted during {phase}")
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -61,6 +79,16 @@ _OPERATIONAL_CONTROL_CHILDREN = frozenset(
 )
 _TRACKED_CONTROL_CHILDREN = frozenset({"docs"})
 _REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+_RESTARTABLE_CLEAN_PHASES = frozenset(
+    {
+        "standard-init",
+        "extension-overlay",
+        "task-import",
+        "minimal-postcheck",
+        "activation-verify",
+        "activation-publish",
+    }
+)
 
 
 def _require_digest(value: object, label: str) -> str:
@@ -681,26 +709,6 @@ def _quarantine_parent(project_root: Path) -> Path:
     return _mkdir_real_child(host_root, "recovery", "host-local recovery root")
 
 
-def _windows_move_no_replace(source: Path, destination: Path) -> None:
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    move_file = kernel32.MoveFileExW
-    move_file.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
-    move_file.restype = wintypes.BOOL
-    movefile_write_through = 0x00000008
-    if move_file(
-        filesystem_path(source),
-        filesystem_path(destination),
-        movefile_write_through,
-    ):
-        return
-    error = ctypes.get_last_error()
-    if error in {80, 183}:  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
-        raise RecoveryError(f"atomic move destination already exists: {destination}")
-    raise OSError(error, "MoveFileExW without replacement failed", str(destination))
-
-
 def _linux_move_no_replace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
@@ -727,14 +735,41 @@ def _linux_move_no_replace(source: Path, destination: Path) -> None:
     raise OSError(error, "renameat2(RENAME_NOREPLACE) failed", str(destination))
 
 
-def _atomic_move_no_replace(source: Path, destination: Path) -> None:
-    """Move a whole root without replacement API semantics."""
+def _atomic_move_no_replace(
+    source: Path,
+    destination: Path,
+    *,
+    after_reservation: Callable[[], None] | None = None,
+) -> None:
+    """Move a real root only through a platform no-replace primitive.
 
+    On Windows the public held-handle primitive invokes ``after_reservation``
+    while both source and destination parent identities are pinned.  Linux
+    keeps its ``renameat2(RENAME_NOREPLACE)`` path and performs the same
+    authoritative recheck immediately before the no-replace syscall.  There
+    is deliberately no replacement, merge, copy, or delete fallback.
+    """
+
+    if after_reservation is not None and not callable(after_reservation):
+        raise RecoveryError("atomic move post-reservation recheck must be callable")
     _require_absent(destination, "atomic move destination")
     if os.name == "nt":
-        _windows_move_no_replace(source, destination)
+        try:
+            physical_rename_directory_create_only(
+                source,
+                destination,
+                after_reservation=(
+                    None
+                    if after_reservation is None
+                    else lambda _reservation: after_reservation()
+                ),
+            )
+        except PlatformPathError as exc:
+            raise RecoveryError(f"cannot perform create-only directory move: {exc}") from exc
         return
     if sys.platform.startswith("linux"):
+        if after_reservation is not None:
+            after_reservation()
         _linux_move_no_replace(source, destination)
         return
     raise RecoveryUnavailable(
@@ -801,20 +836,38 @@ def quarantine_previous_control_root(
     _require_absent(target, "quarantine target")
 
     # All cheap path, type and destination checks above precede this first
-    # output mutation. Re-read after making the recovery parent to close its
-    # local TOCTOU window before the no-replace move.
+    # output mutation.  The last authoritative recheck is passed into the
+    # platform primitive: on Windows it runs with the source and destination
+    # parent held, rather than in an unprotected pre-move gap.
     quarantine_parent = _quarantine_parent(project)
     if not _same_lexical_path(quarantine_parent, configured_quarantine_parent):
         raise RecoveryError("configured quarantine parent changed during admission")
-    _require_absent(target, "quarantine target")
-    refreshed_active = _require_real_directory(active, "previous active control root")
-    if _file_identity(active_stat) != _file_identity(refreshed_active):
-        raise RecoveryError("previous active control root changed before quarantine")
     parent_stat = _require_real_directory(quarantine_parent, "host-local recovery root")
     if int(active_stat.st_dev) != int(parent_stat.st_dev):
         raise RecoveryError("quarantine root must share the active control root filesystem")
+
+    def _revalidate_quarantine_reservation() -> None:
+        _require_absent(target, "quarantine target")
+        _reject_previous_control_extension_source(admission.extension_admission, active)
+        verify_tracked_extension_admission(admission.extension_admission)
+        refreshed_active = _require_real_directory(active, "previous active control root")
+        if _file_identity(active_stat) != _file_identity(refreshed_active):
+            raise RecoveryError("previous active control root changed before quarantine")
+        refreshed_parent = _require_real_directory(
+            quarantine_parent,
+            "host-local recovery root",
+        )
+        if _file_identity(parent_stat) != _file_identity(refreshed_parent):
+            raise RecoveryError("host-local recovery root changed before quarantine")
+        if int(refreshed_active.st_dev) != int(refreshed_parent.st_dev):
+            raise RecoveryError("quarantine root must share the active control root filesystem")
+
     try:
-        _atomic_move_no_replace(active, target)
+        _atomic_move_no_replace(
+            active,
+            target,
+            after_reservation=_revalidate_quarantine_reservation,
+        )
     except OSError as exc:
         raise RecoveryError(f"cannot quarantine prior active control root: {exc}") from exc
     fsync_directory(active.parent)
@@ -849,8 +902,29 @@ def rollback_quarantined_control_root(receipt: QuarantinedControlRoot) -> None:
         raise RecoveryError("quarantined root filesystem changed before rollback")
     if int(quarantined_stat.st_dev) != receipt.source_device:
         raise RecoveryError("quarantined root device does not match its receipt")
+    def _revalidate_rollback_reservation() -> None:
+        _require_absent(active, "active root before rollback")
+        refreshed_quarantined = _require_real_directory(
+            receipt.quarantine_root,
+            "quarantined control root",
+        )
+        if _file_identity(quarantined_stat) != _file_identity(refreshed_quarantined):
+            raise RecoveryError("quarantined control root changed before rollback")
+        refreshed_parent = _require_real_directory(
+            configured_quarantine_parent,
+            "host-local recovery root",
+        )
+        if _file_identity(parent_stat) != _file_identity(refreshed_parent):
+            raise RecoveryError("host-local recovery root changed before rollback")
+        if int(refreshed_quarantined.st_dev) != int(refreshed_parent.st_dev):
+            raise RecoveryError("quarantined root filesystem changed before rollback")
+
     try:
-        _atomic_move_no_replace(receipt.quarantine_root, active)
+        _atomic_move_no_replace(
+            receipt.quarantine_root,
+            active,
+            after_reservation=_revalidate_rollback_reservation,
+        )
     except OSError as exc:
         raise RecoveryError(f"cannot roll back quarantined control root: {exc}") from exc
     fsync_directory(receipt.quarantine_root.parent)
@@ -941,9 +1015,394 @@ class CleanReinitializationTransaction:
         return verified
 
 
+class CleanReinitializationRestartOutcome(str, Enum):
+    """One terminal or per-attempt outcome from bounded clean recovery."""
+
+    REUSED_EXISTING = "REUSED_EXISTING"
+    PUBLISHED = "PUBLISHED"
+    INTERRUPTED_ROLLED_BACK = "INTERRUPTED_ROLLED_BACK"
+    RESTART_LIMIT_REACHED = "RESTART_LIMIT_REACHED"
+    ADMISSION_BLOCKED = "ADMISSION_BLOCKED"
+    OPERATION_FAILED_ROLLED_BACK = "OPERATION_FAILED_ROLLED_BACK"
+    ROLLBACK_BLOCKED = "ROLLBACK_BLOCKED"
+
+
+_RESTART_REPORT_STAGES = frozenset(
+    {
+        "existing-result",
+        "quarantine",
+        "operation",
+        "rollback",
+        *_RESTARTABLE_CLEAN_PHASES,
+    }
+)
+_MAX_CLEAN_RESTART_ATTEMPTS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class CleanReinitializationRestartAttempt:
+    """A stable account of one bounded clean reinitialization attempt."""
+
+    ordinal: int
+    stage: str
+    outcome: CleanReinitializationRestartOutcome
+    transaction_phase: CleanReinitializationPhase
+
+    def __post_init__(self) -> None:
+        _require_positive(self.ordinal, "clean reinitialization restart ordinal")
+        if self.stage not in _RESTART_REPORT_STAGES:
+            raise RecoveryError("clean reinitialization restart stage is invalid")
+        if not isinstance(self.outcome, CleanReinitializationRestartOutcome):
+            raise RecoveryError("clean reinitialization restart outcome is invalid")
+        if not isinstance(self.transaction_phase, CleanReinitializationPhase):
+            raise RecoveryError("clean reinitialization transaction phase is invalid")
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "ordinal": self.ordinal,
+            "stage": self.stage,
+            "outcome": self.outcome.value,
+            "transaction_phase": self.transaction_phase.value,
+        }
+
+
+def _published_clean_reinitialization_record(
+    value: PublishedCleanReinitialization,
+) -> dict[str, object]:
+    return {
+        "intent_digest": value.intent_digest,
+        "package_digest": value.package_digest,
+        "extension_admission_digest": value.extension_admission_digest,
+        "activation_digest": value.activation_digest,
+        "published": True,
+        "state_migration_supported": False,
+        "previous_progress_imported": False,
+        "product_credit": False,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class CleanReinitializationRestartReport:
+    """Deterministic result of a bounded, no-replay clean recovery run.
+
+    A report may say that a candidate was verified and published by the
+    supplied integration callback, but it is never an acceptance or product
+    credit surface.  Interruptions are eligible for another attempt only once
+    their whole quarantined root has been restored.
+    """
+
+    intent_digest: str
+    writer_liveness: WriterLivenessReport
+    max_attempts: int
+    attempts: tuple[CleanReinitializationRestartAttempt, ...]
+    terminal_outcome: CleanReinitializationRestartOutcome
+    published_result: PublishedCleanReinitialization | None = None
+
+    def __post_init__(self) -> None:
+        _require_digest(self.intent_digest, "clean reinitialization report intent_digest")
+        if not isinstance(self.writer_liveness, WriterLivenessReport):
+            raise RecoveryError("clean reinitialization report writer liveness is required")
+        if (
+            not isinstance(self.max_attempts, int)
+            or isinstance(self.max_attempts, bool)
+            or not 1 <= self.max_attempts <= _MAX_CLEAN_RESTART_ATTEMPTS
+        ):
+            raise RecoveryError("clean reinitialization restart limit is invalid")
+        if not isinstance(self.attempts, tuple) or not self.attempts:
+            raise RecoveryError("clean reinitialization restart report needs attempts")
+        if len(self.attempts) > self.max_attempts:
+            raise RecoveryError("clean reinitialization restart report exceeds its limit")
+        for expected_ordinal, attempt in enumerate(self.attempts, start=1):
+            if not isinstance(attempt, CleanReinitializationRestartAttempt):
+                raise RecoveryError("clean reinitialization restart attempt is invalid")
+            if attempt.ordinal != expected_ordinal:
+                raise RecoveryError("clean reinitialization restart ordinals are not contiguous")
+        if not isinstance(self.terminal_outcome, CleanReinitializationRestartOutcome):
+            raise RecoveryError("clean reinitialization terminal outcome is invalid")
+        if self.published_result is not None:
+            if not isinstance(self.published_result, PublishedCleanReinitialization):
+                raise RecoveryError("clean reinitialization published result is invalid")
+            if self.published_result.intent_digest != self.intent_digest:
+                raise RecoveryIntentMismatch(
+                    "clean reinitialization published result belongs to another intent"
+                )
+            if self.terminal_outcome not in {
+                CleanReinitializationRestartOutcome.REUSED_EXISTING,
+                CleanReinitializationRestartOutcome.PUBLISHED,
+            }:
+                raise RecoveryError(
+                    "only a reused or published terminal outcome can carry a result"
+                )
+        elif self.terminal_outcome in {
+            CleanReinitializationRestartOutcome.REUSED_EXISTING,
+            CleanReinitializationRestartOutcome.PUBLISHED,
+        }:
+            raise RecoveryError("a successful clean reinitialization outcome needs a result")
+
+    @property
+    def published(self) -> bool:
+        return self.published_result is not None
+
+    @property
+    def restart_limit_reached(self) -> bool:
+        return (
+            self.terminal_outcome
+            is CleanReinitializationRestartOutcome.RESTART_LIMIT_REACHED
+        )
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "schema": "promin.clean-reinitialization-restart-report.v1",
+            "record_type": "CleanReinitializationRestartReport",
+            "intent_digest": self.intent_digest,
+            "writer_liveness": self.writer_liveness.to_record(),
+            "max_attempts": self.max_attempts,
+            "attempts": [attempt.to_record() for attempt in self.attempts],
+            "terminal_outcome": self.terminal_outcome.value,
+            "published": self.published,
+            "published_result": (
+                None
+                if self.published_result is None
+                else _published_clean_reinitialization_record(self.published_result)
+            ),
+            "restart_limit_reached": self.restart_limit_reached,
+            "state_migration_supported": False,
+            "previous_progress_replay_supported": False,
+            "previous_progress_imported": False,
+            "acceptance_pass": False,
+            "pass_credit": False,
+            "product_credit": False,
+            "authoritative": False,
+        }
+
+    @property
+    def report_digest(self) -> str:
+        return digest_value(self._payload())
+
+    def to_record(self) -> dict[str, object]:
+        return {**self._payload(), "report_digest": self.report_digest}
+
+
+CleanReinitializationAttempt = Callable[
+    [CleanReinitializationTransaction, int],
+    PublishedCleanReinitialization,
+]
+
+
+def _restart_report(
+    admission: CleanStateAdmission,
+    writer_liveness: WriterLivenessReport,
+    max_attempts: int,
+    attempts: list[CleanReinitializationRestartAttempt],
+    terminal_outcome: CleanReinitializationRestartOutcome,
+    published_result: PublishedCleanReinitialization | None = None,
+) -> CleanReinitializationRestartReport:
+    return CleanReinitializationRestartReport(
+        intent_digest=admission.intent.intent_digest,
+        writer_liveness=writer_liveness,
+        max_attempts=max_attempts,
+        attempts=tuple(attempts),
+        terminal_outcome=terminal_outcome,
+        published_result=published_result,
+    )
+
+
+def run_bounded_clean_reinitialization(
+    project_root: str | os.PathLike[str],
+    admission: CleanStateAdmission,
+    writer_liveness: WriterLivenessReport,
+    *,
+    max_attempts: int,
+    existing: PublishedCleanReinitialization | None,
+    verifier: PublishedResultVerifier,
+    attempt: CleanReinitializationAttempt,
+) -> CleanReinitializationRestartReport:
+    """Run a real clean-init callback with exact reuse and bounded rollback.
+
+    ``attempt`` owns the real standard initialization, extension overlay, task
+    import and postcheck work.  It receives a transaction that is already in
+    ``QUARANTINED`` phase and returns a candidate result; this driver verifies
+    and publishes it.  Only :class:`RecoveryInterruption` causes another try.
+    Every other failure stops after attempting a full-root rollback, and a
+    rollback failure stops immediately without another destructive attempt.
+    """
+
+    if not isinstance(admission, CleanStateAdmission):
+        raise RecoveryError("clean state admission is required")
+    if not isinstance(writer_liveness, WriterLivenessReport):
+        raise RecoveryError("writer liveness report is required")
+    if (
+        not isinstance(max_attempts, int)
+        or isinstance(max_attempts, bool)
+        or not 1 <= max_attempts <= _MAX_CLEAN_RESTART_ATTEMPTS
+    ):
+        raise RecoveryError("clean reinitialization restart limit is invalid")
+    if not callable(verifier):
+        raise RecoveryError("a published-result verifier is required")
+    if not callable(attempt):
+        raise RecoveryError("a clean reinitialization attempt callback is required")
+
+    reused = reuse_verified_clean_reinitialization(
+        admission.intent,
+        existing,
+        verifier=verifier,
+    )
+    if reused is not None:
+        return _restart_report(
+            admission,
+            writer_liveness,
+            max_attempts,
+            [
+                CleanReinitializationRestartAttempt(
+                    ordinal=1,
+                    stage="existing-result",
+                    outcome=CleanReinitializationRestartOutcome.REUSED_EXISTING,
+                    transaction_phase=CleanReinitializationPhase.PUBLISHED,
+                )
+            ],
+            CleanReinitializationRestartOutcome.REUSED_EXISTING,
+            reused,
+        )
+
+    attempts: list[CleanReinitializationRestartAttempt] = []
+    for ordinal in range(1, max_attempts + 1):
+        transaction: CleanReinitializationTransaction | None = None
+        try:
+            transaction = CleanReinitializationTransaction(
+                project_root,
+                admission,
+                writer_liveness,
+            )
+            transaction.quarantine_previous_root()
+        except RecoveryError:
+            attempts.append(
+                CleanReinitializationRestartAttempt(
+                    ordinal=ordinal,
+                    stage="quarantine",
+                    outcome=CleanReinitializationRestartOutcome.ADMISSION_BLOCKED,
+                    transaction_phase=(
+                        CleanReinitializationPhase.ADMITTED
+                        if transaction is None
+                        else transaction.phase
+                    ),
+                )
+            )
+            return _restart_report(
+                admission,
+                writer_liveness,
+                max_attempts,
+                attempts,
+                CleanReinitializationRestartOutcome.ADMISSION_BLOCKED,
+            )
+
+        try:
+            if transaction is None:
+                raise AssertionError("clean reinitialization transaction was not created")
+            candidate = attempt(transaction, ordinal)
+            if not isinstance(candidate, PublishedCleanReinitialization):
+                raise RecoveryError(
+                    "clean reinitialization attempt must return a published result"
+                )
+            published = transaction.mark_published(candidate, verifier=verifier)
+        except RecoveryInterruption as interruption:
+            try:
+                transaction.rollback_before_publication()
+            except RecoveryError:
+                attempts.append(
+                    CleanReinitializationRestartAttempt(
+                        ordinal=ordinal,
+                        stage="rollback",
+                        outcome=CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
+                        transaction_phase=transaction.phase,
+                    )
+                )
+                return _restart_report(
+                    admission,
+                    writer_liveness,
+                    max_attempts,
+                    attempts,
+                    CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
+                )
+            attempts.append(
+                CleanReinitializationRestartAttempt(
+                    ordinal=ordinal,
+                    stage=interruption.phase,
+                    outcome=CleanReinitializationRestartOutcome.INTERRUPTED_ROLLED_BACK,
+                    transaction_phase=transaction.phase,
+                )
+            )
+            if ordinal == max_attempts:
+                return _restart_report(
+                    admission,
+                    writer_liveness,
+                    max_attempts,
+                    attempts,
+                    CleanReinitializationRestartOutcome.RESTART_LIMIT_REACHED,
+                )
+            continue
+        except Exception:
+            try:
+                transaction.rollback_before_publication()
+            except RecoveryError:
+                attempts.append(
+                    CleanReinitializationRestartAttempt(
+                        ordinal=ordinal,
+                        stage="rollback",
+                        outcome=CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
+                        transaction_phase=transaction.phase,
+                    )
+                )
+                return _restart_report(
+                    admission,
+                    writer_liveness,
+                    max_attempts,
+                    attempts,
+                    CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
+                )
+            attempts.append(
+                CleanReinitializationRestartAttempt(
+                    ordinal=ordinal,
+                    stage="operation",
+                    outcome=(
+                        CleanReinitializationRestartOutcome.OPERATION_FAILED_ROLLED_BACK
+                    ),
+                    transaction_phase=transaction.phase,
+                )
+            )
+            return _restart_report(
+                admission,
+                writer_liveness,
+                max_attempts,
+                attempts,
+                CleanReinitializationRestartOutcome.OPERATION_FAILED_ROLLED_BACK,
+            )
+        attempts.append(
+            CleanReinitializationRestartAttempt(
+                ordinal=ordinal,
+                stage="activation-publish",
+                outcome=CleanReinitializationRestartOutcome.PUBLISHED,
+                transaction_phase=transaction.phase,
+            )
+        )
+        return _restart_report(
+            admission,
+            writer_liveness,
+            max_attempts,
+            attempts,
+            CleanReinitializationRestartOutcome.PUBLISHED,
+            published,
+        )
+
+    raise AssertionError("bounded clean reinitialization loop did not terminate")
+
+
 __all__ = [
     "CleanReinitializationIntent",
+    "CleanReinitializationAttempt",
     "CleanReinitializationPhase",
+    "CleanReinitializationRestartAttempt",
+    "CleanReinitializationRestartOutcome",
+    "CleanReinitializationRestartReport",
     "CleanReinitializationTransaction",
     "CleanStateAdmission",
     "ExtensionMember",
@@ -951,6 +1410,7 @@ __all__ = [
     "PublishedCleanReinitialization",
     "QuarantinedControlRoot",
     "RecoveryError",
+    "RecoveryInterruption",
     "RecoveryIntentMismatch",
     "RecoveryUnavailable",
     "TrackedExtensionAdmission",
@@ -960,6 +1420,7 @@ __all__ = [
     "quarantine_previous_control_root",
     "reuse_verified_clean_reinitialization",
     "rollback_quarantined_control_root",
+    "run_bounded_clean_reinitialization",
     "validate_tracked_extension_roots",
     "verify_tracked_extension_admission",
 ]

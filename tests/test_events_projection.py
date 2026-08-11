@@ -588,6 +588,7 @@ class EventsProjectionTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.store.close()
         self.temp.cleanup()
 
     def commit_tasks(self, count: int) -> list[dict]:
@@ -778,9 +779,17 @@ class EventsProjectionTests(unittest.TestCase):
         path = next(self.store.journal.glob("*.json"))
         envelope = json.loads(path.read_text(encoding="utf-8"))
         envelope["command"]["payload"]["token_key_material"] = "must-not-persist"
+        self.store.close()
         path.write_bytes(canonical_owner_bytes(envelope))
         with self.assertRaisesRegex(JournalCorruption, "reserved operational key material field"):
-            list(self.store.iter_envelopes(validate=True))
+            reopened = EventStore(
+                self.root / "events",
+                active_activation_digest=ACTIVATION,
+                activation_record_digest=ACTIVATION_RECORD_DIGEST,
+                implementation_closure_digest=IMPLEMENTATION,
+                **event_store_runtime_options(),
+            )
+            list(reopened.iter_envelopes(validate=True))
 
     def test_journal_secret_path_guard_cannot_be_bypassed_by_validate_false(self) -> None:
         self.store.commit(
@@ -790,9 +799,17 @@ class EventsProjectionTests(unittest.TestCase):
         path = next(self.store.journal.glob("*.json"))
         envelope = json.loads(path.read_text(encoding="utf-8"))
         envelope["command"]["payload"]["path"] = ".promin/state/secrets/continuation.key"
+        self.store.close()
         path.write_bytes(canonical_owner_bytes(envelope))
         with self.assertRaisesRegex(JournalCorruption, "reserved operational key path"):
-            list(self.store.iter_envelopes(validate=True))
+            reopened = EventStore(
+                self.root / "events",
+                active_activation_digest=ACTIVATION,
+                activation_record_digest=ACTIVATION_RECORD_DIGEST,
+                implementation_closure_digest=IMPLEMENTATION,
+                **event_store_runtime_options(),
+            )
+            list(reopened.iter_envelopes(validate=True))
 
     def test_derived_state_rejects_operational_key_fields_and_paths(self) -> None:
         with self.assertRaisesRegex(EventStoreError, "reserved operational key material field"):
@@ -1441,6 +1458,7 @@ class EventsProjectionTests(unittest.TestCase):
         first_path = sorted((self.root / "events" / "journal").glob("*.json"))[0]
         tampered = json.loads(first_path.read_text(encoding="utf-8"))
         tampered["batch"]["events"][0]["payload"]["title"] = "forged"
+        self.store.close()
         first_path.write_bytes(canonical_owner_bytes(tampered))
         with self.assertRaises(JournalCorruption):
             EventStore(
@@ -1453,6 +1471,7 @@ class EventsProjectionTests(unittest.TestCase):
 
     def test_missing_historical_journal_prefix_is_rejected_before_mutation(self) -> None:
         self.commit_tasks(3)
+        self.store.close()
         sorted(self.store.journal.glob("*.json"))[0].unlink()
         with self.assertRaises(JournalCorruption):
             EventStore(
@@ -1476,8 +1495,6 @@ class EventsProjectionTests(unittest.TestCase):
         checkpoint["authority_state_binding_digest"] = checkpoint["state_digest"]
         checkpoint.pop("checkpoint_digest")
         checkpoint["checkpoint_digest"] = digest_value(checkpoint)
-        state_path.write_bytes(canonical_owner_bytes(checkpoint))
-
         root = json.loads(self.store.authority_head_path.read_text(encoding="utf-8"))
         generation = root["generation"]
         segment_path = self.store._authority_segment_path(generation, 2)
@@ -1485,11 +1502,9 @@ class EventsProjectionTests(unittest.TestCase):
         segment["state_binding_digest"] = checkpoint["state_digest"]
         segment.pop("segment_digest")
         segment["segment_digest"] = digest_value(segment)
-        segment_path.write_bytes(canonical_owner_bytes(segment))
         root["state_binding_digest"] = checkpoint["state_digest"]
         root.pop("root_digest")
         root["root_digest"] = digest_value(root)
-        self.store.authority_head_path.write_bytes(canonical_owner_bytes(root))
         journal_checkpoint = json.loads(
             self.store.checkpoint_path.read_text(encoding="utf-8")
         )
@@ -1497,6 +1512,10 @@ class EventsProjectionTests(unittest.TestCase):
         journal_checkpoint["authority_root_digest"] = root["root_digest"]
         journal_checkpoint.pop("checkpoint_digest")
         journal_checkpoint["checkpoint_digest"] = digest_value(journal_checkpoint)
+        self.store.close()
+        state_path.write_bytes(canonical_owner_bytes(checkpoint))
+        segment_path.write_bytes(canonical_owner_bytes(segment))
+        self.store.authority_head_path.write_bytes(canonical_owner_bytes(root))
         self.store.checkpoint_path.write_bytes(canonical_owner_bytes(journal_checkpoint))
 
         reopened = EventStore(
@@ -1517,6 +1536,7 @@ class EventsProjectionTests(unittest.TestCase):
         path = next((self.root / "events" / "journal").glob("*.json"))
         value = json.loads(path.read_text(encoding="utf-8"))
         value["batch"]["events"][0]["payload"]["title"] = "tampered"
+        self.store.close()
         path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         with self.assertRaises(JournalCorruption):
             EventStore(
@@ -1534,6 +1554,7 @@ class EventsProjectionTests(unittest.TestCase):
         path = next((self.root / "events" / "journal").glob("*.json"))
         envelope = json.loads(path.read_text(encoding="utf-8"))
         envelope["batch"]["events"][1]["payload"]["target_id"] = "task:attacker"
+        self.store.close()
         path.write_bytes(canonical_owner_bytes(envelope))
         with self.assertRaisesRegex(
             JournalCorruption,
@@ -1574,6 +1595,7 @@ class EventsProjectionTests(unittest.TestCase):
         path = next((self.root / "events" / "journal").glob("*.json"))
         tampered = json.loads(path.read_text(encoding="utf-8"))
         tampered["batch"]["events"][0]["payload"]["status"] = "pass"
+        self.store.close()
         path.write_text(json.dumps(tampered, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         with self.assertRaises(JournalCorruption):
             EventStore(
@@ -1605,6 +1627,7 @@ class EventsProjectionTests(unittest.TestCase):
         envelope["command"]["intent_digest"] = digest_value(
             command_intent_identity(envelope["command"])
         )
+        self.store.close()
         path.write_bytes(canonical_owner_bytes(envelope))
         with self.assertRaisesRegex(JournalCorruption, "definition_digest differs"):
             EventStore(

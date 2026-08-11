@@ -1,0 +1,81 @@
+{
+  "schema": "promin.language-capability-profile.v1",
+  "profileId": "jvm-semantic",
+  "languages": ["java", "kotlin", "scala", "groovy"],
+  "sourceExtensions": [".java", ".kt", ".kts", ".scala", ".groovy"],
+  "documentation": {
+    "recommended": true,
+    "userChoice": "ask",
+    "primary": ["public-contract-index", "api-documentation"],
+    "optional": ["reference-documentation-generator"]
+  },
+  "verification": {
+    "cheapRequired": ["syntax-and-project-structure"],
+    "recommended": ["compiler-diagnostics", "static-analysis"],
+    "optional": ["format-check", "documentation-check"]
+  },
+  "artifactPolicy": {
+    "defaultMode": "minimal",
+    "trackedSummary": true,
+    "diagnosticRoot": "host-local-diagnostics",
+    "forensicRoot": "host-local-forensics"
+  },
+  "valueCategories": {
+    "by-value": {"unknownClassification": "REVIEW", "observablePostconditions": ["explicit-empty", "explicit-reset", "transactional-exchange"], "allowedDestinations": ["owned-value", "member", "result", "external-owner"]},
+    "rvalue-reference": {"unknownClassification": "REVIEW", "observablePostconditions": ["explicit-empty", "explicit-reset", "transactional-exchange"], "allowedDestinations": ["owned-value", "member", "result", "external-owner"]},
+    "borrowed-reference": {"unknownClassification": "REVIEW", "observablePostconditions": ["explicit-reset"], "allowedDestinations": ["owned-value", "member", "result", "external-owner"]},
+    "member": {"unknownClassification": "REVIEW", "observablePostconditions": ["explicit-empty", "explicit-reset", "transactional-exchange"], "allowedDestinations": ["owned-value", "member", "result", "external-owner"]},
+    "result-extraction": {"unknownClassification": "REVIEW", "observablePostconditions": ["explicit-empty", "explicit-reset", "transactional-exchange"], "allowedDestinations": ["owned-value", "member", "result", "external-owner"]}
+  },
+  "binaryBoundary": {
+    "explicitConstCorrectConversion": true,
+    "exactSizeRequired": true,
+    "ownershipPreservationRequired": true,
+    "forbidCompatibilityHelper": true,
+    "allowedSourceRepresentations": ["byte-storage"],
+    "allowedDestinationRepresentations": ["const-unsigned-byte-view"]
+  },
+  "directVisibility": {
+    "uniqueOwnerRequired": true,
+    "routes": ["direct-import", "explicit-export-import-closure", "same-named-module"],
+    "maskedRegions": ["comments", "preprocessor", "ordinary-strings", "raw-strings", "character-literals", "embedded-language-payloads"],
+    "excludedSymbols": ["template-parameters", "local-declarations", "member-access", "qualified-namespace-components"]
+  },
+  "compilerFailureProfiles": [
+    {"id": "source-candidate", "classification": "REVIEW", "expression": "(?i)(candidate|suspicious)", "message": "A source-only candidate requires independent review.", "toolchainPredicate": null, "requiresCompilerDiagnostic": false},
+    {"id": "compiler-invalid-contract", "classification": "PROVEN", "expression": "(?i)(error|invalid|cannot find)", "message": "A compiler diagnostic reports an invalid contract.", "toolchainPredicate": null, "requiresCompilerDiagnostic": true}
+  ],
+  "semanticRoles": {
+    "roles": {
+      "COMMAND": {"effect": "mutation", "allowedResults": ["command-result", "explicit-status"]},
+      "QUERY": {"effect": "read", "allowedResults": ["query-result", "value"]},
+      "VALUE_QUERY": {"effect": "read", "allowedResults": ["value"]}
+    },
+    "classificationSources": ["annotation", "project-mapping", "configurable-naming-rule"],
+    "forbidden": ["command-returning-query-result", "query-returning-command-result"]
+  },
+  "documentationQuality": {
+    "priorities": ["high-fanout", "ownership", "lifetime", "failure-semantics", "transaction", "configuration-boundary"],
+    "meaningfulFields": ["purpose", "ownership", "lifetime", "failure", "configuration"],
+    "forbiddenCredit": ["empty-comment", "filename-only-comment", "generated-boilerplate", "host-local-html-presence"],
+    "generatedDetail": "host-local",
+    "initModes": ["off", "minimal", "standard", "diagnostic"],
+    "userOverrideRequired": true
+  },
+  "interfaceWeight": {
+    "classification": "REVIEW_ONLY",
+    "metrics": ["line-count", "public-member-count", "branch-count", "allocation-token-count"],
+    "automaticDefect": false,
+    "automaticDecomposition": false,
+    "generatedDetailRoot": "host-local",
+    "thresholdsAreProfileOverrides": true,
+    "truncationMustBeExplicit": true
+  },
+  "gateAdmission": {
+    "ordering": "cheapest-sufficient-first",
+    "gitHeadAloneInvalidates": false,
+    "invalidationClasses": ["BODY_ONLY", "IMPORT_SURFACE", "CMAKE_TOPOLOGY", "TOOLING_ONLY"],
+    "requiredReceiptFields": ["elapsed-seconds", "input-digest", "scope-count", "status", "credit"]
+  },
+  "claims": {"acceptancePass": false, "passCredit": false, "productAcceptancePass": false, "releaseApproved": false}
+}

@@ -64,6 +64,18 @@ defaults without a questionnaire or hidden full repository scan. Review the
 resolved plan, confirm it, or repeat init with a natural-language goal/profile
 override. Full expert plans remain available but are not required.
 
+`--yes` without capability flags is the deterministic one-click `minimal`
+experience. An explicit expert capability selection uses registered generic
+language IDs and one strict JSON file; unknown, incomplete, or conflicting
+selections fail before project state is written:
+
+```text
+promin init --init-experience expert --capability-language python --capability-selections expert-selections.json --yes
+```
+
+The exact expert JSON shape and precedence rules are documented in
+`docs/INIT_CAPABILITIES_UA.md`.
+
 ## Canonical owners
 
 The six files in `core/` are the complete Core:
@@ -96,7 +108,7 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 187 regular files under 16 declared
+The canonical alpha tree contains exactly 226 regular files under 16 declared
 directories, including the nested `skills/example` package. `MANIFEST.json`
 enumerates all payload files; `SHA256SUMS.txt` closes those payloads together
 with the manifest.
@@ -107,17 +119,17 @@ with the manifest.
 | `.github/` | 1 |
 | `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 19 |
+| `docs/` | 25 |
 | `examples/` | 1 |
 | `human/` | 4 |
-| `language_profiles/` | 1 |
+| `language_profiles/` | 7 |
 | `presets/` | 1 |
 | `profiles/` | 12 |
-| `promin/` | 51 |
+| `promin/` | 55 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 56 |
-| `tools/` | 13 |
+| `tests/` | 71 |
+| `tools/` | 15 |
 
 The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `MACHINE_README.md`, `MANIFEST.json`, `NOTICE`, `pyproject.toml`, `README.md`,
@@ -540,7 +552,8 @@ python -m pytest -q -m "not scale"
 ```
 
 Physical scale validation uses the production route and a dedicated workspace.
-The scale selection fails when `PROMIN_SCALE_WORKSPACE` is absent; it must never
+The scale selection fails when `PROMIN_SCALE_WORKSPACE` or
+`PROMIN_SCALE_ARCHIVE` is absent; it must never
 be converted to a skip.
 
 The physical lane requires exactly 100,000 raw files and derived Artifact
@@ -559,13 +572,16 @@ Windows PowerShell:
 
 ```powershell
 $env:PROMIN_SCALE_WORKSPACE = 'C:\promin-scale'
+$env:PROMIN_SCALE_ARCHIVE = 'C:\evidence\promin.zip'
 python -m pytest -q -m scale
 ```
 
 Linux:
 
 ```sh
-PROMIN_SCALE_WORKSPACE=/tmp/promin-scale python -m pytest -q -m scale
+PROMIN_SCALE_WORKSPACE=/tmp/promin-scale \
+PROMIN_SCALE_ARCHIVE=/tmp/evidence/promin.zip \
+python -m pytest -q -m scale
 ```
 
 No-degradation and saturation evidence bind the exact candidate archive:

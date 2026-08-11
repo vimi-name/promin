@@ -17,10 +17,18 @@ import unicodedata
 
 from .canonical import (
     CanonicalError,
+    ParseLimits,
     canonical_bytes,
     digest_value as _digest_value,
+    digest_value_streaming as _digest_value_streaming,
     format_utc_second,
     parse_utc_second,
+)
+
+
+_DERIVED_CHECKPOINT_DIGEST_LIMITS = ParseLimits(
+    max_bytes=512 * 1024 * 1024,
+    max_items=5_000_000,
 )
 
 
@@ -247,6 +255,12 @@ def canonical_digest(value: Any) -> str:
     """Return the Promin canonical JSON digest for a JSON-compatible value."""
 
     return _digest_value(value)
+
+
+def derived_checkpoint_digest(value: Any) -> str:
+    """Digest a large derived checkpoint with exact bounded canonical identity."""
+
+    return _digest_value_streaming(value, limits=_DERIVED_CHECKPOINT_DIGEST_LIMITS)
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -1157,7 +1171,7 @@ class AuthorityEngine:
             "last_live_evaluation": timestamp(self._last_live_evaluation),
             "last_replay_evaluation": timestamp(self._last_replay_evaluation),
         }
-        return {**identity, "checkpoint_digest": canonical_digest(identity)}
+        return {**identity, "checkpoint_digest": derived_checkpoint_digest(identity)}
 
     def restore_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
         """Strictly validate then atomically restore a derived authority snapshot."""
@@ -1198,7 +1212,7 @@ class AuthorityEngine:
             for key, value in checkpoint.items()
             if key != "checkpoint_digest"
         }
-        if checkpoint.get("checkpoint_digest") != canonical_digest(identity):
+        if checkpoint.get("checkpoint_digest") != derived_checkpoint_digest(identity):
             raise AuthorityError("authority checkpoint digest mismatch")
 
         list_fields = (
