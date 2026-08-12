@@ -83,6 +83,32 @@ class WindowsHistoryControl:
     checkpoint_digest: str
 
 
+@dataclass(frozen=True)
+class WindowsHistorySealCounters:
+    """Bounded diagnostic counts for one live physical history seal.
+
+    These values describe work performed by this process only.  They are not
+    authority, health, or acceptance evidence and are never consulted by the
+    EventStore verifier.  In particular, ``native_handles_live`` makes the
+    exact one-handle-per-immutable-file cost visible instead of attributing a
+    whole-process handle sample to this seal.
+    """
+
+    immutable_handles_live: int
+    long_lived_directory_handles_live: int
+    admission_guard_handles_live: int
+    native_handles_live: int
+    immutable_handle_opens: int
+    immutable_witness_queries: int
+    immutable_payload_bytes_hashed: int
+    directory_closure_checks: int
+    journal_index_build_visits: int
+    journal_path_lookups: int
+    journal_path_candidates_examined: int
+    fast_validations: int
+    control_advances: int
+
+
 class _FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
@@ -407,6 +433,31 @@ class WindowsEventHistorySeal:
         self._authority_directory = authority_directory
         self._held = held
         self._max_held_files = max_held_files
+        # A journal replay asks for every sequence in order.  Scanning
+        # ``_held`` for each request used to inspect both journal and authority
+        # members B * (2B) times for B batches.  The index is derived only from
+        # already held paths, retains every collision, and therefore preserves
+        # the previous missing/ambiguous fail-closed behavior in O(1) lookup.
+        self._journal_paths_by_sequence: dict[int, Path | None] = {}
+        self._journal_index_build_visits = 0
+        self._journal_path_lookups = 0
+        self._journal_path_candidates_examined = 0
+        for item in held.values():
+            if item.kind == "journal":
+                self._index_journal_path(item.path)
+
+        # Operation counters are deliberately a fixed-cardinality set of
+        # scalars and retain no per-operation/path records.  Initial
+        # acquisition sampled every immutable handle before and after hashing
+        # its exact bytes.
+        self._immutable_handle_opens = len(held)
+        self._immutable_witness_queries = 2 * len(held)
+        self._immutable_payload_bytes_hashed = sum(
+            item.witness.size for item in held.values()
+        )
+        self._directory_closure_checks = 0
+        self._fast_validations = 0
+        self._control_advances = 0
         # Kept from provisional acquisition until EventStore finishes its
         # pathname-based full verifier and binds controls.  They deny DELETE
         # sharing so a directory cannot be renamed/rebound between those two
@@ -422,6 +473,29 @@ class WindowsEventHistorySeal:
     @property
     def maximum_held_files(self) -> int:
         return self._max_held_files
+
+    @property
+    def performance_counters(self) -> WindowsHistorySealCounters:
+        """Return non-authoritative bounded operation and handle counts."""
+
+        immutable_handles = 0 if self._closed else len(self._held)
+        directory_handles = 0 if self._closed else 3
+        admission_handles = 0 if self._closed else len(self._admission_guards)
+        return WindowsHistorySealCounters(
+            immutable_handles_live=immutable_handles,
+            long_lived_directory_handles_live=directory_handles,
+            admission_guard_handles_live=admission_handles,
+            native_handles_live=immutable_handles + directory_handles + admission_handles,
+            immutable_handle_opens=self._immutable_handle_opens,
+            immutable_witness_queries=self._immutable_witness_queries,
+            immutable_payload_bytes_hashed=self._immutable_payload_bytes_hashed,
+            directory_closure_checks=self._directory_closure_checks,
+            journal_index_build_visits=self._journal_index_build_visits,
+            journal_path_lookups=self._journal_path_lookups,
+            journal_path_candidates_examined=self._journal_path_candidates_examined,
+            fast_validations=self._fast_validations,
+            control_advances=self._control_advances,
+        )
 
     def has_capacity_for(self, immutable_file_count: int) -> bool:
         """Return whether one atomic append can reserve its whole file pair.
@@ -457,17 +531,21 @@ class WindowsEventHistorySeal:
 
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
             raise WindowsEventHistoryViolation("journal sequence is invalid")
-        prefix = f"{sequence:020d}-"
-        paths = [
-            item.path
-            for item in self._held.values()
-            if item.kind == "journal" and item.path.name.startswith(prefix)
-        ]
-        if len(paths) != 1:
+        self._journal_path_lookups += 1
+        if sequence not in self._journal_paths_by_sequence:
             raise WindowsEventHistoryViolation(
                 f"sealed journal sequence is missing or ambiguous: {sequence}"
             )
-        return paths[0]
+        path = self._journal_paths_by_sequence[sequence]
+        if path is None:
+            # Two candidates are sufficient to establish ambiguity; all held
+            # colliders remain in ``_held`` and under their physical handles.
+            self._journal_path_candidates_examined += 2
+            raise WindowsEventHistoryViolation(
+                f"sealed journal sequence is missing or ambiguous: {sequence}"
+            )
+        self._journal_path_candidates_examined += 1
+        return path
 
     def read_held_bytes(self, path: Path) -> bytes:
         """Read one exact sealed immutable payload by handle, not pathname."""
@@ -479,12 +557,14 @@ class WindowsEventHistorySeal:
                 f"path is not a held immutable history file: {path}"
             )
         current = _query_witness(item.handle, item.path)
+        self._immutable_witness_queries += 1
         _require_regular_witness(current, item.path)
         if current != item.witness:
             raise WindowsEventHistoryViolation(
                 f"held immutable history file identity changed: {item.path}"
             )
         raw = _read_exact_bytes_from_handle(item.handle, item.path, item.witness.size)
+        self._immutable_payload_bytes_hashed += len(raw)
         if hashlib.sha256(raw).hexdigest() != item.digest:
             raise WindowsEventHistoryViolation(
                 f"held immutable history file digest changed: {item.path}"
@@ -723,6 +803,7 @@ class WindowsEventHistorySeal:
         """Validate only physical/incremental facts; never rehash old files."""
 
         self._ensure_live()
+        self._fast_validations += 1
         control = self._control
         if control is None:
             raise WindowsEventHistoryViolation("Windows history hold was never fully verified")
@@ -817,6 +898,11 @@ class WindowsEventHistorySeal:
                     "new immutable history file differs from its canonical payload"
                 )
             self._held[absolute] = item
+            self._immutable_handle_opens += 1
+            self._immutable_witness_queries += 2
+            self._immutable_payload_bytes_hashed += item.witness.size
+            if kind == "journal":
+                self._index_journal_path(absolute)
             directory.names = expected_names
             return item.digest
         except BaseException:
@@ -841,6 +927,7 @@ class WindowsEventHistorySeal:
         """Record expected own control writes after newly appended files seal."""
 
         self._ensure_live()
+        self._control_advances += 1
         self._require_exact_directory_names(rebaseline=True)
         self._require_held_witnesses()
         self._control = WindowsHistoryControl(
@@ -858,6 +945,7 @@ class WindowsEventHistorySeal:
         for item in tuple(self._held.values()):
             _close_handle(item.handle)
         self._held.clear()
+        self._journal_paths_by_sequence.clear()
         self._release_admission_guards()
         _close_handle(self._root_directory.handle)
         _close_handle(self._journal_directory.handle)
@@ -868,6 +956,7 @@ class WindowsEventHistorySeal:
             raise WindowsEventHistoryViolation("Windows history seal is closed")
 
     def _require_exact_directory_names(self, *, rebaseline: bool = False) -> None:
+        self._directory_closure_checks += 1
         self._require_root_identity()
         for directory in (self._journal_directory, self._authority_directory):
             admission_guard = self._admission_guards.get(directory.path)
@@ -985,12 +1074,38 @@ class WindowsEventHistorySeal:
 
     def _require_held_witnesses(self) -> None:
         for item in self._held.values():
+            self._immutable_witness_queries += 1
             current = _query_witness(item.handle, item.path)
             _require_regular_witness(current, item.path)
             if current != item.witness:
                 raise WindowsEventHistoryViolation(
                     f"held immutable history file identity changed: {item.path}"
                 )
+
+    @staticmethod
+    def _journal_sequence(path: Path) -> int | None:
+        """Return the exact legacy lookup prefix encoded by one held path."""
+
+        name = path.name
+        delimiter = name.find("-")
+        if delimiter < 20:
+            return None
+        prefix = name[:delimiter]
+        if any(character < "0" or character > "9" for character in prefix):
+            return None
+        sequence = int(prefix)
+        if sequence < 1 or prefix != f"{sequence:020d}":
+            return None
+        return sequence
+
+    def _index_journal_path(self, path: Path) -> None:
+        self._journal_index_build_visits += 1
+        sequence = self._journal_sequence(path)
+        if sequence is not None:
+            if sequence in self._journal_paths_by_sequence:
+                self._journal_paths_by_sequence[sequence] = None
+            else:
+                self._journal_paths_by_sequence[sequence] = path
 
     def __enter__(self) -> "WindowsEventHistorySeal":
         return self

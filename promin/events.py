@@ -2363,6 +2363,15 @@ class EventStore:
                     self._load_journal_checkpoint_locked()
                 except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
                     self._fallback_reason = f"{type(exc).__name__}: {exc}"
+                    # The provisional seal belongs to the checkpoint
+                    # generation that just failed validation.  Release its
+                    # Windows no-delete handles before replay creates and
+                    # prunes disposable generations; otherwise successful
+                    # fallback must retain the invalid authority directory
+                    # until this outer finally block runs.
+                    if provisional_history is not None:
+                        provisional_history.close()
+                        provisional_history = None
                     self._recover_locked()
                     self._open_mode = "full-replay-fallback"
                 else:
@@ -2918,11 +2927,11 @@ class EventStore:
             authority_root=authority_root,
             state_binding_update_count=state_binding_update_count,
         )
-        # Recovery generations are disposable projections.  Keeping every
-        # successful replay forever makes an otherwise small control layer grow
-        # linearly with health checks and repairs.  The current generation plus
-        # one previous generation are sufficient for diagnostics and rollback;
-        # authoritative history remains in ``journal/``.
+        # Recovery generations are disposable projections.  This sweep also
+        # removes a partial generation left by an earlier failed replay before
+        # checkpoint fallback retried.  Only the completed generation named by
+        # the freshly written control records is retained; authoritative
+        # history remains in ``journal/``.
         self._prune_recovery_generations(
             active_index_generation=index_generation,
             active_authority_generation=authority_generation,
@@ -3036,7 +3045,7 @@ class EventStore:
         root: Path,
         *,
         active_generation: str,
-        retain: int = 2,
+        retain: int = 1,
     ) -> None:
         if retain < 1:
             retain = 1
@@ -3722,6 +3731,11 @@ class EventStore:
             raise DerivedCheckpointError("state binding index already exists")
         connection = self._state_binding_connection(generation, create=True)
         try:
+            # Configure page relocation before the first schema object exists.
+            # FULL auto-vacuum is part of SQLite's own atomic FULL-sync commit,
+            # so deleting sparse-tree rows cannot leave an ever-growing
+            # freelist and no separate unsafe VACUUM step is needed.
+            connection.execute("PRAGMA auto_vacuum=FULL")
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
@@ -3798,6 +3812,11 @@ class EventStore:
     @staticmethod
     def _state_binding_binding(connection: sqlite3.Connection) -> tuple[Any, ...]:
         try:
+            storage_mode = connection.execute("PRAGMA auto_vacuum").fetchone()
+            if storage_mode != (1,):
+                raise DerivedCheckpointError(
+                    "state binding index lacks bounded page reclamation"
+                )
             row = connection.execute(
                 "SELECT version, algorithm, activation_digest, "
                 "activation_record_digest, implementation_closure_digest, "
@@ -3868,6 +3887,99 @@ class EventStore:
             for prefix in selected
         }
 
+    @staticmethod
+    def _state_storage_union_rows(
+        connection: sqlite3.Connection,
+        key_digests: Iterable[bytes],
+    ) -> dict[tuple[int, bytes], tuple[bytes, dict[int, bytes]]]:
+        """Fetch the union of all touched byte-boundary paths once.
+
+        A maximum state-binding batch has 128 leaves and therefore at most
+        4,224 distinct storage identities.  Loading one depth at a time still
+        incurred 33 SQLite read round trips.  The sorted leaf keys are reduced
+        to a unique path union in Python.  One bounded length-prefixed BLOB
+        carries those identities into a recursive CTE, so every affected stored
+        prefix is looked up at most once without a SQLite DISTINCT sort or
+        dependence on a host's parameter ceiling.  The canonical v3 node table
+        and its byte-for-byte representation remain unchanged.
+        """
+
+        selected_keys = tuple(sorted(set(key_digests)))
+        if any(not isinstance(key_digest, bytes) or len(key_digest) != 32 for key_digest in selected_keys):
+            raise DerivedCheckpointError("state binding storage union request is invalid")
+        if not selected_keys:
+            return {}
+        selected = tuple(
+            sorted(
+                {
+                    (depth, key_digest[: depth // _STATE_BINDING_STORAGE_STRIDE])
+                    for key_digest in selected_keys
+                    for depth in range(
+                        0,
+                        _STATE_TREE_DEPTH + _STATE_BINDING_STORAGE_STRIDE,
+                        _STATE_BINDING_STORAGE_STRIDE,
+                    )
+                },
+                key=lambda value: (value[0], value[1]),
+            )
+        )
+        selected_set = set(selected)
+        path_payload = b"".join(
+            bytes((len(prefix) + 1,)) + prefix
+            for _depth, prefix in selected
+        )
+        try:
+            rows = connection.execute(
+                "WITH RECURSIVE affected(offset, prefix_bytes, prefix) AS ("
+                "SELECT 1, unicode(substr(?1, 1, 1)) - 1, "
+                "substr(?1, 2, unicode(substr(?1, 1, 1)) - 1) "
+                "UNION ALL SELECT offset + 1 + prefix_bytes, "
+                "unicode(substr(?1, offset + 1 + prefix_bytes, 1)) - 1, "
+                "substr(?1, offset + 2 + prefix_bytes, "
+                "unicode(substr(?1, offset + 1 + prefix_bytes, 1)) - 1) "
+                "FROM affected WHERE offset + 1 + prefix_bytes <= length(?1)) "
+                "SELECT node.depth, node.prefix, node.digest, node.children "
+                "FROM affected CROSS JOIN node "
+                "WHERE node.depth = affected.prefix_bytes * 8 "
+                "AND node.prefix = affected.prefix",
+                (path_payload,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError(
+                "state binding storage union rows are unreadable"
+            ) from exc
+        observed: dict[tuple[int, bytes], tuple[bytes, dict[int, bytes]]] = {}
+        for depth, prefix, node_digest, children_payload in rows:
+            identity = (depth, prefix)
+            if (
+                identity not in selected_set
+                or identity in observed
+                or not isinstance(node_digest, bytes)
+                or len(node_digest) != 32
+                or not isinstance(children_payload, bytes)
+            ):
+                raise DerivedCheckpointError("state binding storage union row is invalid")
+            children = _decode_state_storage_children(children_payload)
+            if depth == _STATE_TREE_DEPTH:
+                if children:
+                    raise DerivedCheckpointError("state binding leaf row has children")
+            else:
+                child_default = _STATE_DEFAULT_DIGESTS[
+                    depth + _STATE_BINDING_STORAGE_STRIDE
+                ]
+                if any(value == child_default for value in children.values()):
+                    raise DerivedCheckpointError(
+                        "state binding storage row retains a default child"
+                    )
+                if _state_storage_parent_digest(depth, children) != node_digest:
+                    raise DerivedCheckpointError(
+                        "state binding storage row digest mismatch"
+                    )
+            if node_digest == _STATE_DEFAULT_DIGESTS[depth]:
+                raise DerivedCheckpointError("state binding storage retains a default row")
+            observed[identity] = (node_digest, children)
+        return observed
+
     def _stage_state_binding_delta(
         self,
         generation: str,
@@ -3901,9 +4013,8 @@ class EventStore:
             leaf_keys = tuple(_state_leaf_key_digest(update) for update in delta)
             if len(leaf_keys) != len(set(leaf_keys)):
                 raise DerivedCheckpointError("state binding leaf keys collide")
-            leaf_rows = self._state_storage_rows(
+            path_rows = self._state_storage_union_rows(
                 connection,
-                _STATE_TREE_DEPTH,
                 leaf_keys,
             )
             changed: dict[bytes, tuple[bytes, bytes]] = {}
@@ -3914,7 +4025,10 @@ class EventStore:
                     if update["operation"] == "set"
                     else _STATE_DEFAULT_DIGESTS[_STATE_TREE_DEPTH]
                 )
-                old_leaf = leaf_rows[key_digest][0]
+                old_leaf = path_rows.get(
+                    (_STATE_TREE_DEPTH, key_digest),
+                    (_STATE_DEFAULT_DIGESTS[_STATE_TREE_DEPTH], {}),
+                )[0]
                 changed[key_digest] = (old_leaf, leaf_digest)
                 overlay[(_STATE_TREE_DEPTH, key_digest)] = (leaf_digest, b"")
 
@@ -3927,17 +4041,15 @@ class EventStore:
                 for child_prefix, pair in changed.items():
                     parent_prefix = child_prefix[:-1]
                     grouped.setdefault(parent_prefix, {})[child_prefix[-1]] = pair
-                parent_rows = self._state_storage_rows(
-                    connection,
-                    parent_depth,
-                    grouped,
-                )
                 next_changed: dict[bytes, tuple[bytes, bytes]] = {}
                 child_default = _STATE_DEFAULT_DIGESTS[
                     parent_depth + _STATE_BINDING_STORAGE_STRIDE
                 ]
                 for parent_prefix in sorted(grouped):
-                    old_parent, existing_children = parent_rows[parent_prefix]
+                    old_parent, existing_children = path_rows.get(
+                        (parent_depth, parent_prefix),
+                        (_STATE_DEFAULT_DIGESTS[parent_depth], {}),
+                    )
                     children = dict(existing_children)
                     for edge, (old_child, new_child) in grouped[parent_prefix].items():
                         if children.get(edge, child_default) != old_child:

@@ -3763,7 +3763,7 @@ def _compile_projection(
         "next_stream_cursor": deepcopy(nonnegative_integer),
         "effective_top_k": {
             "maximum": hard_budget["top_k"],
-            "minimum": 1,
+            "minimum": 0,
             "type": "integer",
         },
         "selected_seed_count": deepcopy(nonnegative_integer),

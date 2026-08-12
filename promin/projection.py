@@ -50,6 +50,8 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SEMANTIC_SHARD_COUNT = 256
 _SEMANTIC_DIGEST_ALGORITHM = "semantic-shards-v1"
 _PROJECTION_STORAGE_LAYOUT = "semantic-row-digest-blob-v2"
+_BULK_REBUILD_BATCH_ROWS = 512
+_BULK_SQL_VALUE_ROWS = 64
 _SEARCH_ROUTE = "search-v1"
 _READY_FRONTIER_ROUTE = "ready-frontier-v1"
 _READY_FRONTIER_ORDERING = ("created_at-ascending", "task_id-ascending")
@@ -549,13 +551,15 @@ class Projection:
         try:
             connection = sqlite3.connect(sqlite_path(temporary))
             try:
-                self._create_schema(connection)
+                self._create_schema(connection, defer_search_indexes=True)
+                self._prepare_bulk_rebuild(connection)
                 connection.execute("BEGIN IMMEDIATE")
-                self._ingest_events(connection, event_store, stats)
+                self._ingest_events_for_rebuild(connection, event_store, stats)
                 if inventory is not None:
-                    self._ingest_inventory(connection, inventory, stats)
+                    self._ingest_inventory_for_rebuild(connection, inventory, stats)
                 self._validate_relation_closure(connection)
                 self._validate_dependency_graph_acyclic(connection)
+                self._create_search_indexes(connection)
                 self._recompute_semantic_shards(
                     connection, range(_SEMANTIC_SHARD_COUNT)
                 )
@@ -627,12 +631,27 @@ class Projection:
             except FileNotFoundError:
                 pass
 
-    @staticmethod
-    def _create_schema(connection: sqlite3.Connection) -> None:
+    @classmethod
+    def _create_schema(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        defer_search_indexes: bool = False,
+    ) -> None:
+        if defer_search_indexes:
+            # This database is an unpublished disposable temp file.  SQLite's
+            # rollback journal cannot protect the authoritative event stream
+            # and only amplifies every rebuild write.  A failed build is
+            # discarded; a successful build is closed, explicitly fsynced,
+            # then atomically replaces the last durable projection.
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA locking_mode=EXCLUSIVE")
+        else:
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("PRAGMA synchronous=FULL")
         connection.executescript(
             """
-            PRAGMA journal_mode=DELETE;
-            PRAGMA synchronous=FULL;
             PRAGMA foreign_keys=ON;
             PRAGMA page_size=4096;
             PRAGMA temp_store=MEMORY;
@@ -659,8 +678,6 @@ class Projection:
               created_at TEXT NOT NULL,
               payload_json TEXT NOT NULL
             ) WITHOUT ROWID;
-            CREATE INDEX relations_source ON relations(source_id,kind,target_id,id);
-            CREATE INDEX relations_target ON relations(target_id,kind,source_id,id);
             CREATE TABLE semantic_rows(
               shard INTEGER NOT NULL,
               key TEXT NOT NULL,
@@ -708,6 +725,458 @@ class Projection:
             );
             """
         )
+        if not defer_search_indexes:
+            cls._create_search_indexes(connection)
+
+    @staticmethod
+    def _create_search_indexes(connection: sqlite3.Connection) -> None:
+        """Build relation read indexes after a rebuild's append-only load."""
+
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS relations_source "
+            "ON relations(source_id,kind,target_id,id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS relations_target "
+            "ON relations(target_id,kind,source_id,id)"
+        )
+
+    @staticmethod
+    def _prepare_bulk_rebuild(connection: sqlite3.Connection) -> None:
+        """Create bounded staging tables used only by a fresh disposable build."""
+
+        connection.executescript(
+            """
+            CREATE TEMP TABLE projection_entity_stage(
+              id TEXT PRIMARY KEY,
+              entity_type TEXT NOT NULL,
+              data_class TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              search_text TEXT NOT NULL,
+              event_sequence INTEGER,
+              event_index INTEGER,
+              shard INTEGER NOT NULL,
+              semantic_key TEXT NOT NULL,
+              row_digest BLOB NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TEMP TABLE projection_entity_changes(
+              id TEXT PRIMARY KEY,
+              entity_type TEXT NOT NULL,
+              data_class TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              search_text TEXT NOT NULL,
+              event_sequence INTEGER,
+              event_index INTEGER,
+              shard INTEGER NOT NULL,
+              semantic_key TEXT NOT NULL,
+              row_digest BLOB NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TEMP TABLE projection_relation_stage(
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              target_type TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              shard INTEGER NOT NULL,
+              semantic_key TEXT NOT NULL,
+              row_digest BLOB NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TEMP TABLE projection_relation_changes(
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              target_type TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              shard INTEGER NOT NULL,
+              semantic_key TEXT NOT NULL,
+              row_digest BLOB NOT NULL
+            ) WITHOUT ROWID;
+            """
+        )
+
+    @staticmethod
+    def _insert_bulk_values(
+        connection: sqlite3.Connection,
+        table: str,
+        columns: Sequence[str],
+        rows: Sequence[tuple[Any, ...]],
+    ) -> None:
+        """Cross the SQLite boundary once per bounded group, not once per row."""
+
+        if not rows:
+            return
+        column_sql = ",".join(columns)
+        row_placeholder = "(" + ",".join("?" for _ in columns) + ")"
+        for offset in range(0, len(rows), _BULK_SQL_VALUE_ROWS):
+            selected = rows[offset : offset + _BULK_SQL_VALUE_ROWS]
+            placeholders = ",".join(row_placeholder for _ in selected)
+            parameters = tuple(itertools.chain.from_iterable(selected))
+            connection.execute(
+                f"INSERT INTO {table}({column_sql}) VALUES {placeholders}",
+                parameters,
+            )
+
+    def _entity_rebuild_row(
+        self,
+        entity_id: str,
+        entity_type: str,
+        data_class: str,
+        payload: Mapping[str, Any],
+        *,
+        search_text: str | None = None,
+        event_sequence: int | None = None,
+        event_index: int | None = None,
+    ) -> tuple[Any, ...]:
+        if (event_sequence is None) != (event_index is None):
+            raise ProjectionError("operational entity event position is incomplete")
+        if event_sequence is not None and (
+            not isinstance(event_sequence, int)
+            or isinstance(event_sequence, bool)
+            or event_sequence < 1
+            or not isinstance(event_index, int)
+            or isinstance(event_index, bool)
+            or event_index < 0
+        ):
+            raise ProjectionError("operational entity event position is invalid")
+        payload_json = canonical_bytes(payload).decode("utf-8")
+        text = _entity_text(entity_id, entity_type, payload)
+        if search_text:
+            text += " " + search_text
+        semantic_key = f"entity:{entity_id}"
+        semantic_value = {
+            "id": entity_id,
+            "entity_type": entity_type,
+            "data_class": data_class,
+            "payload": dict(payload),
+        }
+        return (
+            entity_id,
+            entity_type,
+            data_class,
+            payload_json,
+            text,
+            event_sequence,
+            event_index,
+            self._semantic_shard(semantic_key),
+            semantic_key,
+            hashlib.sha256(canonical_bytes(semantic_value)).digest(),
+        )
+
+    def _relation_rebuild_row(
+        self, relation: Mapping[str, Any]
+    ) -> tuple[Any, ...]:
+        required = {
+            "record_type",
+            "relation_id",
+            "kind",
+            "source_type",
+            "source_id",
+            "target_type",
+            "target_id",
+            "activation_digest",
+            "created_at",
+        }
+        if (
+            not isinstance(relation, Mapping)
+            or set(relation) != required
+            or relation["record_type"] != "Relation"
+        ):
+            raise ProjectionError("Relation fields mismatch")
+        parse_timestamp(relation["created_at"])
+        if not self.relation_domains:
+            raise ProjectionError("relation domains are required to project typed relations")
+        domain = self.relation_domains.get(relation["kind"])
+        if (
+            domain is None
+            or relation["source_type"] not in domain[0]
+            or relation["target_type"] not in domain[1]
+        ):
+            raise ProjectionError("Relation violates canonical domain/range")
+        payload = dict(relation)
+        payload_json = canonical_bytes(payload).decode("utf-8")
+        semantic_key = f"relation:{relation['relation_id']}"
+        return (
+            relation["relation_id"],
+            relation["kind"],
+            relation["source_type"],
+            relation["source_id"],
+            relation["target_type"],
+            relation["target_id"],
+            relation["created_at"],
+            payload_json,
+            self._semantic_shard(semantic_key),
+            semantic_key,
+            hashlib.sha256(canonical_bytes(payload)).digest(),
+        )
+
+    @classmethod
+    def _flush_entity_rebuild_rows(
+        cls,
+        connection: sqlite3.Connection,
+        rows: Sequence[tuple[Any, ...]],
+        *,
+        replace_event_state: bool,
+        operational: bool,
+    ) -> None:
+        if not rows:
+            return
+        connection.execute("DELETE FROM projection_entity_stage")
+        connection.execute("DELETE FROM projection_entity_changes")
+        cls._insert_bulk_values(
+            connection,
+            "projection_entity_stage",
+            (
+                "id",
+                "entity_type",
+                "data_class",
+                "payload_json",
+                "search_text",
+                "event_sequence",
+                "event_index",
+                "shard",
+                "semantic_key",
+                "row_digest",
+            ),
+            rows,
+        )
+        if not replace_event_state:
+            collision = connection.execute(
+                """
+                SELECT stage.id
+                FROM projection_entity_stage AS stage
+                JOIN entities AS current ON current.id=stage.id
+                WHERE current.entity_type<>stage.entity_type
+                   OR current.data_class<>stage.data_class
+                   OR current.payload_json<>stage.payload_json
+                ORDER BY stage.id LIMIT 1
+                """
+            ).fetchone()
+            if collision is not None:
+                raise ProjectionError(f"entity ID collision: {collision[0]}")
+        changed_predicate = (
+            "current.id IS NULL OR current.entity_type<>stage.entity_type "
+            "OR current.data_class<>stage.data_class "
+            "OR current.payload_json<>stage.payload_json"
+            if replace_event_state
+            else "current.id IS NULL"
+        )
+        connection.execute(
+            """
+            INSERT INTO projection_entity_changes
+            SELECT stage.*
+            FROM projection_entity_stage AS stage
+            LEFT JOIN entities AS current ON current.id=stage.id
+            WHERE """
+            + changed_predicate
+        )
+        replaces_existing = connection.execute(
+            """
+            SELECT 1
+            FROM projection_entity_changes AS changed
+            JOIN entities AS current ON current.id=changed.id
+            LIMIT 1
+            """
+        ).fetchone() is not None
+        if replaces_existing:
+            connection.execute(
+                """
+                DELETE FROM entity_fts
+                WHERE id IN (
+                  SELECT changed.id
+                  FROM projection_entity_changes AS changed
+                  JOIN entities AS current ON current.id=changed.id
+                )
+                """
+            )
+        entity_insert = "INSERT OR REPLACE" if replaces_existing else "INSERT"
+        connection.execute(
+            f"""
+            {entity_insert} INTO entities(id,entity_type,data_class,payload_json)
+            SELECT id,entity_type,data_class,payload_json
+            FROM projection_entity_changes
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO entity_fts(id,text)
+            SELECT id,search_text FROM projection_entity_changes
+            """
+        )
+        if operational:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO operational_order(
+                  entity_id,event_sequence,event_index
+                )
+                SELECT id,event_sequence,event_index
+                FROM projection_entity_changes
+                WHERE event_sequence IS NOT NULL
+                """
+            )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO semantic_rows(shard,key,row_digest)
+            SELECT shard,semantic_key,row_digest
+            FROM projection_entity_changes
+            """
+        )
+
+    @classmethod
+    def _flush_relation_rebuild_rows(
+        cls,
+        connection: sqlite3.Connection,
+        rows: Sequence[tuple[Any, ...]],
+    ) -> None:
+        if not rows:
+            return
+        connection.execute("DELETE FROM projection_relation_stage")
+        connection.execute("DELETE FROM projection_relation_changes")
+        cls._insert_bulk_values(
+            connection,
+            "projection_relation_stage",
+            (
+                "id",
+                "kind",
+                "source_type",
+                "source_id",
+                "target_type",
+                "target_id",
+                "created_at",
+                "payload_json",
+                "shard",
+                "semantic_key",
+                "row_digest",
+            ),
+            rows,
+        )
+        collision = connection.execute(
+            """
+            SELECT stage.id
+            FROM projection_relation_stage AS stage
+            JOIN relations AS current ON current.id=stage.id
+            WHERE current.payload_json<>stage.payload_json
+            ORDER BY stage.id LIMIT 1
+            """
+        ).fetchone()
+        if collision is not None:
+            raise ProjectionError(f"relation ID collision: {collision[0]}")
+        connection.execute(
+            """
+            INSERT INTO projection_relation_changes
+            SELECT stage.*
+            FROM projection_relation_stage AS stage
+            LEFT JOIN relations AS current ON current.id=stage.id
+            WHERE current.id IS NULL
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO relations(
+              id,kind,source_type,source_id,target_type,target_id,created_at,payload_json
+            )
+            SELECT id,kind,source_type,source_id,target_type,target_id,created_at,payload_json
+            FROM projection_relation_changes
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO semantic_rows(shard,key,row_digest)
+            SELECT shard,semantic_key,row_digest
+            FROM projection_relation_changes
+            """
+        )
+
+    def _ingest_events_for_rebuild(
+        self,
+        connection: sqlite3.Connection,
+        event_store: EventStore,
+        stats: dict[str, int],
+    ) -> None:
+        entity_rows: dict[str, tuple[Any, ...]] = {}
+        relation_rows: dict[str, tuple[Any, ...]] = {}
+
+        def flush_entities() -> None:
+            if not entity_rows:
+                return
+            self._flush_entity_rebuild_rows(
+                connection,
+                tuple(entity_rows.values()),
+                replace_event_state=True,
+                operational=True,
+            )
+            entity_rows.clear()
+
+        def flush_relations() -> None:
+            if not relation_rows:
+                return
+            self._flush_relation_rebuild_rows(
+                connection, tuple(relation_rows.values())
+            )
+            relation_rows.clear()
+
+        def flush_all() -> None:
+            flush_entities()
+            flush_relations()
+
+        for envelope in event_store.iter_envelopes(validate=True):
+            batch = envelope["batch"]
+            for event_index, event in enumerate(batch["events"]):
+                stats["event_count"] += 1
+                event_kind = event["event_kind"]
+                payload = event["payload"]
+                if event_kind == "task.transitioned" or (
+                    event_kind == "decision.recorded"
+                    and payload.get("decision_kind") in {"resolve", "waive"}
+                ):
+                    flush_all()
+                    self._apply_event(
+                        connection,
+                        event,
+                        state_binding_delta=batch["state_binding_delta"],
+                        event_sequence=batch["sequence"],
+                        event_index=event_index,
+                    )
+                    continue
+                if event_kind == "relation.recorded":
+                    row = self._relation_rebuild_row(payload)
+                    previous = relation_rows.get(row[0])
+                    if previous is not None:
+                        if previous[7] != row[7]:
+                            raise ProjectionError(f"relation ID collision: {row[0]}")
+                    else:
+                        relation_rows[row[0]] = row
+                    if len(relation_rows) >= _BULK_REBUILD_BATCH_ROWS:
+                        flush_relations()
+                    continue
+                identity = self._entity_identity(payload)
+                if identity is None:
+                    continue
+                entity_type, entity_id = identity
+                row = self._entity_rebuild_row(
+                    entity_id,
+                    entity_type,
+                    "operational-record",
+                    payload,
+                    event_sequence=batch["sequence"],
+                    event_index=event_index,
+                )
+                previous = entity_rows.get(entity_id)
+                if previous is not None and previous[1:4] != row[1:4]:
+                    # A changed repeated entity used to be deleted/reinserted
+                    # at this exact stream position. Flush first so FTS rowid
+                    # ordering and latest operational_order remain identical.
+                    flush_entities()
+                if previous is None or previous[1:4] != row[1:4]:
+                    entity_rows[entity_id] = row
+                if len(entity_rows) >= _BULK_REBUILD_BATCH_ROWS:
+                    flush_entities()
+        flush_all()
 
     def _ingest_events(self, connection: sqlite3.Connection, event_store: EventStore, stats: dict[str, int]) -> None:
         for envelope in event_store.iter_envelopes(validate=True):
@@ -884,6 +1353,129 @@ class Projection:
         if changed_shard is None:
             raise ProjectionError("Task transition did not change its projected Task")
         return changed_shard
+
+    def _ingest_inventory_for_rebuild(
+        self,
+        connection: sqlite3.Connection,
+        inventory: VerifiedInventoryInput,
+        stats: dict[str, int],
+    ) -> None:
+        identity_stream = hashlib.sha256()
+        persisted_stream = hashlib.sha256()
+        previous_path: str | None = None
+        persisted = inventory.stream_path is not None
+        if not persisted:
+            assert inventory.entries is not None
+            source: Iterable[tuple[Mapping[str, Any], bytes | None]] = (
+                (row, None) for row in inventory.entries
+            )
+        else:
+            source = self._iter_persisted_inventory(inventory, persisted_stream)
+        entity_rows: dict[str, tuple[Any, ...]] = {}
+
+        def flush_entities() -> None:
+            if not entity_rows:
+                return
+            self._flush_entity_rebuild_rows(
+                connection,
+                tuple(entity_rows.values()),
+                replace_event_state=False,
+                operational=False,
+            )
+            entity_rows.clear()
+
+        for row, encoded_line in source:
+            stats["inventory_entries"] += 1
+            if not isinstance(row, Mapping):
+                raise ProjectionError("inventory row must be an object")
+            required = (
+                {"path", "digest", "size", "search_text"}
+                if persisted
+                else {"record_type", "path", "digest", "size", "semantic_proxy"}
+            )
+            if set(row) != required or (
+                not persisted and row.get("record_type") != "InventoryProjectionRow"
+            ):
+                raise ProjectionError("InventoryProjectionRow fields mismatch")
+            path = row["path"]
+            file_digest = row["digest"]
+            size = row["size"]
+            self._validate_inventory_path(path)
+            if previous_path is not None and path <= previous_path:
+                raise ProjectionError("inventory paths must be strictly sorted and unique")
+            previous_path = path
+            if not isinstance(file_digest, str) or not _DIGEST.fullmatch(file_digest):
+                raise ProjectionError("inventory digest must be SHA-256")
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise ProjectionError("inventory size must be a nonnegative integer")
+            identity = canonical_bytes(
+                {"path": path, "digest": file_digest, "size": size}
+            )
+            identity_stream.update(identity)
+            stats["inventory_stream_bytes"] += (
+                len(encoded_line) if encoded_line is not None else len(identity)
+            )
+
+            expected_id = (
+                "artifact:file:"
+                + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            )
+            search_text: str | None = None
+            if persisted:
+                search_text = row["search_text"]
+                if (
+                    not isinstance(search_text, str)
+                    or len(search_text.encode("utf-8")) > 4096
+                    or "\x00" in search_text
+                ):
+                    raise ProjectionError(
+                        "inventory search text is invalid or exceeds 4096 bytes"
+                    )
+                payload = {
+                    "record_type": "Artifact",
+                    "artifact_id": expected_id,
+                    "artifact_kind": "product",
+                    "digest": file_digest,
+                    "media_type": "application/octet-stream",
+                    "size_bytes": size,
+                    "retention_class": "project",
+                    "inventory_path": path,
+                    "inventory_digest": file_digest,
+                    "inventory_size": size,
+                }
+                if inventory.observed_at is not None:
+                    payload["created_at"] = inventory.observed_at
+            else:
+                payload = self._validated_inventory_proxy(
+                    row["semantic_proxy"], expected_id, path, file_digest, size
+                )
+            projected = self._entity_rebuild_row(
+                expected_id,
+                "Artifact",
+                "untrusted-source",
+                payload,
+                search_text=search_text,
+            )
+            pending = entity_rows.get(expected_id)
+            if pending is not None:
+                if pending[1:4] != projected[1:4]:
+                    raise ProjectionError(f"entity ID collision: {expected_id}")
+            else:
+                entity_rows[expected_id] = projected
+            if len(entity_rows) >= _BULK_REBUILD_BATCH_ROWS:
+                flush_entities()
+            stats["inventory_proxies"] += 1
+        flush_entities()
+        if stats["inventory_entries"] != inventory.entry_count:
+            raise ProjectionError("verified inventory entry count mismatch")
+        if identity_stream.hexdigest() != inventory.inventory_digest:
+            raise ProjectionError("verified inventory identity digest mismatch")
+        if persisted and persisted_stream.hexdigest() != inventory.stream_digest:
+            raise ProjectionError("verified inventory stream digest mismatch")
+        if stats["inventory_proxies"] != stats["inventory_entries"]:
+            raise ProjectionError(
+                "raw inventory must produce exactly one Artifact proxy per file"
+            )
 
     def _ingest_inventory(
         self,

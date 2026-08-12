@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 232
+CANONICAL_PACKAGE_FILE_COUNT = 244
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -265,9 +265,11 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_contract_mutations.py',
         'tests/test_events_projection.py',
         'tests/test_heavy_artifact_minimality.py',
+        'tests/test_heavy_checkpoint_profile.py',
         'tests/test_heavy_comparative_bench.py',
         'tests/test_heavy_derived_storage.py',
         'tests/test_heavy_event_batching.py',
+        'tests/test_heavy_eventstore_commit_io_profile.py',
         'tests/test_heavy_eventstore_lifecycle.py',
         'tests/test_heavy_eventstore_postcommit_index_failure.py',
         'tests/test_heavy_eventstore_prefix_witness.py',
@@ -277,17 +279,24 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_language_catalog.py',
         'tests/test_heavy_language_profile_catalog.py',
         'tests/test_heavy_linux_model.py',
+        'tests/test_heavy_performance_model.py',
         'tests/test_heavy_product_inspection.py',
+        'tests/test_heavy_projection_bulk_rebuild.py',
+        'tests/test_heavy_projection_profile.py',
         'tests/test_heavy_provider_identity.py',
+        'tests/test_heavy_query_tail_scale.py',
         'tests/test_heavy_receipt_cache.py',
         'tests/test_heavy_recovery_stress.py',
         'tests/test_heavy_relation_ledger_hotpath.py',
         'tests/test_heavy_revalidation.py',
         'tests/test_heavy_saturation_storage_budget.py',
+        'tests/test_heavy_state_binding_batch_union.py',
         'tests/test_heavy_state_binding_storage.py',
+        'tests/test_heavy_state_binding_storage_retention.py',
         'tests/test_heavy_weak_model_execution.py',
         'tests/test_heavy_windows_event_history.py',
         'tests/test_heavy_windows_publication.py',
+        'tests/test_heavy_windows_seal_scaling.py',
         'tests/test_installed_distribution.py',
         'tests/test_package_validation.py',
         'tests/test_platform_paths_hotpath.py',
@@ -301,12 +310,15 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tools/generate_human.py',
         'tools/promin.py',
         'tools/promin_alpha_check.py',
+        'tools/promin_checkpoint_profile.py',
         'tools/promin_command_bench.py',
         'tools/promin_comparative_bench.py',
         'tools/promin_init.py',
         'tools/promin_linux_model.py',
         'tools/promin_no_degradation.py',
         'tools/promin_package.py',
+        'tools/promin_performance_model.py',
+        'tools/promin_projection_profile.py',
         'tools/promin_runtime.py',
         'tools/promin_saturation.py',
         'tools/promin_saturation_audit.py',

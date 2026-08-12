@@ -319,7 +319,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 232)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 244)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -367,7 +367,10 @@ class PackageValidationTests(unittest.TestCase):
             "tools/compile_schema.py",
             "tools/generate_human.py",
             "tools/promin_alpha_check.py",
+            "tools/promin_checkpoint_profile.py",
             "tools/promin_package.py",
+            "tools/promin_performance_model.py",
+            "tools/promin_projection_profile.py",
             "tools/promin_validate.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
@@ -379,13 +382,22 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_alpha_skills_checklist.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
+            "tests/test_heavy_checkpoint_profile.py",
             "tests/test_heavy_derived_storage.py",
             "tests/test_heavy_event_batching.py",
+            "tests/test_heavy_eventstore_commit_io_profile.py",
             "tests/test_heavy_eventstore_lifecycle.py",
             "tests/test_heavy_eventstore_postcommit_index_failure.py",
+            "tests/test_heavy_performance_model.py",
+            "tests/test_heavy_projection_bulk_rebuild.py",
+            "tests/test_heavy_projection_profile.py",
+            "tests/test_heavy_query_tail_scale.py",
             "tests/test_heavy_saturation_storage_budget.py",
+            "tests/test_heavy_state_binding_batch_union.py",
             "tests/test_heavy_state_binding_storage.py",
+            "tests/test_heavy_state_binding_storage_retention.py",
             "tests/test_heavy_windows_event_history.py",
+            "tests/test_heavy_windows_seal_scaling.py",
             "tests/test_retrieval_continuation_service.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
 
@@ -552,6 +564,63 @@ class PackageValidationTests(unittest.TestCase):
             python_schema = properties["python"]
             self.assertIn("base_executable", python_schema["required"])
             self.assertIn("base_executable_sha256", python_schema["required"])
+
+    def test_compiled_retrieval_page_accepts_zero_effective_top_k_only_for_integer_boundary(
+        self,
+    ) -> None:
+        schema = json.loads(
+            (self.root / "core" / "contracts.schema.json").read_text(encoding="utf-8")
+        )
+        retrieval_schema = schema["$defs"]["RetrievalPage"]
+        effective_top_k_schema = retrieval_schema["properties"]["effective_top_k"]
+        validator = Draft202012Validator(
+            {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                "$ref": "#/$defs/RetrievalPage",
+            }
+        )
+        empty_miss = {
+            "record_type": "RetrievalPage",
+            "query": "no matching entity",
+            "activation_digest": "a" * 64,
+            "depth": 1,
+            "ranking": "bm25-v1",
+            "budget": {
+                "max_bytes": 1024,
+                "max_entities": 1,
+                "max_relations": 0,
+                "max_fanout_per_entity": 1,
+                "top_k": 1,
+            },
+            "head_digest": None,
+            "projection_digest": "b" * 64,
+            "entities": [],
+            "relations": [],
+            "evidence": [],
+            "truncated": False,
+            "continuation": None,
+            "continuation_version": 2,
+            "stream_cursor": 0,
+            "next_stream_cursor": 0,
+            "effective_top_k": 0,
+            "selected_seed_count": 0,
+            "refinement_required": False,
+            "refinement_hints": [],
+            "unselected_matches_traversable": False,
+            "selected_closure_complete": True,
+            "silent_truncation": False,
+            "projection_authoritative": False,
+        }
+
+        self.assertEqual(effective_top_k_schema["minimum"], 0)
+        self.assertEqual(effective_top_k_schema["maximum"], 12)
+        self.assertEqual(effective_top_k_schema["type"], "integer")
+        validator.validate(empty_miss)
+        for invalid in (-1, True, 13):
+            with self.subTest(effective_top_k=invalid):
+                candidate = dict(empty_miss, effective_top_k=invalid)
+                self.assertFalse(validator.is_valid(candidate))
 
     def test_compiled_saturation_audit_accepts_only_current_fresh_state_shape(
         self,

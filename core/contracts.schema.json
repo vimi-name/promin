@@ -17208,7 +17208,7 @@
         },
         "effective_top_k": {
           "maximum": 12,
-          "minimum": 1,
+          "minimum": 0,
           "type": "integer"
         },
         "entities": {

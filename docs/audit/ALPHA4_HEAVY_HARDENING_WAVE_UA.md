@@ -74,6 +74,56 @@ query/depth/budget/ranking/TTL bindings до Projection. Старий `continue_
 продовжує retrieval через публічний service search. Підміна Grant/subject/query/budget,
 пошкодження token і пряме використання retrieval token як ReadyFrontier fail closed.
 
+## Performance hardening після R5
+
+Версія лишається `1.0.0-alpha.4`. Цей зріз не змінює workload і не отримує
+performance/product pass-credit до нового повного 100k запуску.
+
+- State-binding v3 тепер читає union усіх зачеплених byte-boundary paths одним
+  recursive SQLite SELECT замість 33 послідовних SELECT. Для однакового 128-Relation
+  batch точний root і 4069 node writes лишилися byte-identical; 30 чергованих
+  вимірювань дали 153.661 ms → 134.951 ms для staging. SQLite `auto_vacuum=FULL`
+  прибирає накопичення freelist, а recovery зберігає лише одну активну disposable
+  index/authority generation. Інтегрований storage/batching зріз: `12 passed`.
+- Windows physical history seal зберігає повний byte-verification під час admission
+  і точну O(N) directory-closure/witness перевірку кожного healthy commit. Replay
+  lookup за sequence тепер використовує побудований лише з уже утримуваних шляхів
+  індекс: для 1604 journal/authority pairs старий контур мав 5,145,632 переглядів
+  членів, а індексований — 3,208, не послаблюючи missing/ambiguous rejection.
+  Кожний immutable файл і надалі має власний no-write/no-delete handle; це свідома
+  ціна точного physical seal, а не прихована performance-перемога.
+- Projection rebuild використовує bounded bulk staging і створює search indexes
+  після bulk writes. На counterbalanced 10240 Artifact + 10240 Relation contour
+  median wall time зменшився 9.167202 s → 6.413626 s, SQLite execute calls
+  72624 → 1153. Reference і bulk outputs збігаються для entities, Relations,
+  semantic rows/root, operational order та FTS, включно з repeated entity update
+  і Task transition. Це microbenchmark, не 100k acceptance.
+- Query-tail regression через публічний `ProminService.search` охоплює 2048
+  inventory Artifact, 127 READS, 12 DEPENDS_ON, depths 1..12, 13-page exact
+  continuation union та незменшений детермінований 600-query plan. Він завершився
+  за 92.14 s; wrong Grant/subject/TTL/ranking/depth/budget, token tamper, expiry і
+  stale HEAD fail closed. Порожній legit miss тепер має schema-valid
+  `effective_top_k=0`; негативні, boolean і значення понад top-k ceiling відхиляються.
+- Додано claim-free checkpoint/projection профайлери та SHA-bound performance model.
+  Модель бере SQL geometry з поточного `events.py`: 2 binding SELECT + 1 union SELECT
+  на commit, тобто 4812 для 1604-commit 100k contour; усі prediction/claim/
+  acceptance поля залишаються false.
+
+Три широкі експериментальні зрізи навмисно не залишені в продукті. Incremental
+runtime-checkpoint chain відхилено після recovery P1 на base-only → first-delta;
+весь `service.py` lane, два тести й невикористаний API відкочено. Розширений
+phase-timing lane також відкочено: незалежний review виявив неповну validator binding,
+неправдиву назву RSS peak і неоднозначні aggregate elapsed boundaries. Windows
+`ReadDirectoryChangesW` fast path відкочено після повторних native OVERLAPPED-lifetime
+P2: у продукті не залишено notification, retention або handle-cap механізмів.
+Це зберігає
+правило мінімальності: у канонічному дереві немає напівперевірених механізмів.
+
+Поточний full-checkpoint write amplification лишається відомим performance debt.
+Новий повний Windows 100k запуск має окремо довести ingestion, два rebuild,
+600-query tail, storage і RSS на exact same-version candidate. До цього:
+`performance_acceptance=false`, `acceptance_pass=false`, `pass_credit=false`.
+
 Окремо завершений run із перевищеним performance profile тепер проходить повну
 структурну/криптографічну перевірку з `require_pass=false` і публікує sealed
 `saturation-result.json` зі `status=fail`; це не надає acceptance або pass-credit.
@@ -85,6 +135,23 @@ Malformed fail-result не публікується.
 `1.1 GB`. Ці дані є діагностичними: вони підтверджують scale-capacity, але прямо
 спростовують поточний performance/low-memory acceptance. Fresh repaired candidate,
 повний query tail і подальша performance-хвиля залишаються обов'язковими.
+
+Фінальна інтеграційна перевірка цього зрізу виконана з вимкненими bytecode/cache:
+
+- state-binding/storage/batching: `12 passed`;
+- Windows exact seal/history/prefix: `21 passed, 1 skipped, 10 subtests`;
+- projection durability + projection suite + public continuation: `51 passed, 4 subtests`;
+- query-tail route після package refresh: `1 passed in 87.95s`;
+- claim-free profiler/model suites: `19 passed`;
+- schema boundary: `2 passed, 3 subtests`, `compile_schema.py --check` — pass;
+- saturation self-check — pass, але `full_100k_executed=false`;
+- canonical package closure: 244 files, 242 payload files, 243 checksum entries;
+  `verify-tree --install-mode current-environment` — valid, version лишилась
+  `1.0.0-alpha.4` / `1.0.0a4`.
+
+Повний non-scale aggregate у цій хвилі не запускався: застосовано цільовий Tier A,
+а новий exact 100k та дворазові Windows/Linux aggregates залишаються наступним
+evidence-кроком. Жоден із наведених diagnostic результатів не є release acceptance.
 
 ## Truth tokens
 
