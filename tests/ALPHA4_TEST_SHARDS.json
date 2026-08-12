@@ -78,12 +78,13 @@
     "tests/test_installed_distribution.py",
     "tests/test_package_validation.py",
     "tests/test_platform_paths_hotpath.py",
+    "tests/test_retrieval_continuation_service.py",
     "tests/test_scale_orchestration.py",
     "tests/test_search_scale.py",
     "tests/test_service_cli.py",
     "tests/test_service_mutation_cache.py"
   ],
-  "selector_count": 79,
+  "selector_count": 80,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
@@ -216,7 +217,8 @@
         "tests/test_heavy_state_binding_storage.py",
         "tests/test_heavy_weak_model_execution.py",
         "tests/test_heavy_windows_event_history.py",
-        "tests/test_heavy_windows_publication.py"
+        "tests/test_heavy_windows_publication.py",
+        "tests/test_retrieval_continuation_service.py"
       ],
       "limits": {
         "timeout_seconds": 600,

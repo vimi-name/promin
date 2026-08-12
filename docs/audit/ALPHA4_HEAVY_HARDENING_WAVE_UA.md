@@ -54,6 +54,38 @@ Non-storage відмова після preflight тепер залишає sealed
 - deterministic product-inspection receipts;
 - короткий клієнтський PDF із зовнішніми receipt bindings.
 
+## R5 100k — повний corpus/projection і чесний tail-blocker
+
+Exact same-version candidate `1149430402e1a12779f855ae7fb49b1c7363dfe25357b461ce1dabe45dd121d8`
+двічі пройшов повне semantic ingestion: `1604` batches / `200603` events. Перший
+foreground run завершив ingestion без projection і має окреме create-only interruption
+observation. Другий detached run побудував projection з точним контуром
+`100000 Artifact + 1 Candidate + 4 Grant + 1599 Task = 101604` та `198999`
+Relations, після чого був відхилений query harness із
+`continuation v2 omitted fields: ['grant_claim_digest']`. Це не product/storage failure:
+публічний RetrievalPage навмисно приховує Grant claim усередині authenticated
+`resume_binding` і відкриває лише `resume_binding_digest`.
+
+Repair зберігає цю межу: `ProminService.search(..., continuation_token=...)` повторно
+авторизує subject/Grant, перевіряє current projection/head і передає точні
+query/depth/budget/ranking/TTL bindings до Projection. Старий `continue_search`
+залишається лише для `ReadyFrontier`. Saturation harness перевіряє точний публічний
+13-field envelope, стабільний `resume_binding_digest`, суворо зростаючий cursor і
+продовжує retrieval через публічний service search. Підміна Grant/subject/query/budget,
+пошкодження token і пряме використання retrieval token як ReadyFrontier fail closed.
+
+Окремо завершений run із перевищеним performance profile тепер проходить повну
+структурну/криптографічну перевірку з `require_pass=false` і публікує sealed
+`saturation-result.json` зі `status=fail`; це не надає acceptance або pass-credit.
+Malformed fail-result не публікується.
+
+Дві виміряні ingestion тривалості — `113m21s` і `115m02s`; це значно вище
+канонічного `600s` ceiling. Retained semantic state перед projection був близько
+`965 MB`, projection SQLite — `378454016` bytes, а sampled working set перевищив
+`1.1 GB`. Ці дані є діагностичними: вони підтверджують scale-capacity, але прямо
+спростовують поточний performance/low-memory acceptance. Fresh repaired candidate,
+повний query tail і подальша performance-хвиля залишаються обов'язковими.
+
 ## Truth tokens
 
 ```text

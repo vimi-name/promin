@@ -282,7 +282,12 @@ class ScaleOrchestrationTests(unittest.TestCase):
         return verification, raw
 
     @staticmethod
-    def _validate_exact_saturation_fixture(verification: dict, raw: dict) -> dict:
+    def _validate_exact_saturation_fixture(
+        verification: dict,
+        raw: dict,
+        *,
+        require_pass: bool = True,
+    ) -> dict:
         candidate = {"candidate_binding_digest": "c" * 64}
         with (
             mock.patch(
@@ -303,6 +308,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 candidate_binding={},
                 source_path=Path("saturation-result.json"),
                 evidence_root=Path("evidence"),
+                require_pass=require_pass,
             )
 
     @staticmethod
@@ -574,6 +580,154 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "contract predicates cannot be recomputed",
         ):
             self._validate_exact_saturation_fixture(verification, stale_commit_count)
+
+    def test_completed_performance_failure_is_structurally_published(self) -> None:
+        failed, failed_raw = self._exact_saturation_evidence_fixture()
+        failed["status"] = "fail"
+        failed["performance"]["observed"]["semantic_ingestion_seconds"] = 6.000001
+        failed["performance"]["predicates"][
+            "semantic_ingestion_within_profile"
+        ] = False
+        failed["performance"]["all_within_profile"] = False
+        failed_raw["operation"]["semantic_ingestion"]["elapsed_seconds"] = 6.000001
+
+        candidate_binding = {"candidate_binding_digest": "c" * 64}
+        validation_calls: list[dict] = []
+
+        def structural_validator(raw: dict):
+            def validate(document: dict, **kwargs):
+                validation_calls.append(kwargs)
+                return self._validate_exact_saturation_fixture(
+                    document,
+                    raw,
+                    require_pass=kwargs["require_pass"],
+                )
+
+            return validate
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failed_output = root / "failed"
+            with mock.patch.object(
+                saturation,
+                "validate_saturation_evidence",
+                side_effect=structural_validator(failed_raw),
+            ):
+                published = saturation._publish_completed_saturation_result(
+                    failed_output,
+                    failed,
+                    candidate_binding=candidate_binding,
+                )
+            self.assertEqual(published, failed)
+            self.assertEqual(
+                json.loads(
+                    (failed_output / "saturation-result.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                failed,
+            )
+            self.assertEqual(published["status"], "fail")
+            for field in (
+                "pass_credit",
+                "acceptance_pass",
+                "product_acceptance_pass",
+                "public_release_approved",
+            ):
+                self.assertIs(published[field], False)
+
+            passed, passed_raw = self._exact_saturation_evidence_fixture()
+            passed_output = root / "passed"
+            with mock.patch.object(
+                saturation,
+                "validate_saturation_evidence",
+                side_effect=structural_validator(passed_raw),
+            ):
+                published_pass = saturation._publish_completed_saturation_result(
+                    passed_output,
+                    passed,
+                    candidate_binding=candidate_binding,
+                )
+            self.assertEqual(published_pass, passed)
+            self.assertEqual(
+                json.loads(
+                    (passed_output / "saturation-result.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                passed,
+            )
+
+            malformed = json.loads(json.dumps(failed))
+            malformed["performance"]["predicates"][
+                "semantic_ingestion_within_profile"
+            ] = True
+            malformed_output = root / "malformed"
+            with (
+                mock.patch.object(
+                    saturation,
+                    "validate_saturation_evidence",
+                    side_effect=structural_validator(failed_raw),
+                ),
+                self.assertRaisesRegex(
+                    EvidenceError,
+                    "performance predicates cannot be recomputed",
+                ),
+            ):
+                saturation._publish_completed_saturation_result(
+                    malformed_output,
+                    malformed,
+                    candidate_binding=candidate_binding,
+                )
+            self.assertFalse((malformed_output / "saturation-result.json").exists())
+
+        self.assertEqual(len(validation_calls), 3)
+        for call in validation_calls:
+            self.assertIs(call["require_pass"], False)
+            self.assertEqual(call["candidate_binding"], candidate_binding)
+            self.assertEqual(call["source_path"].name, "saturation-result.json")
+            self.assertEqual(call["evidence_root"], call["source_path"].parent)
+
+    def test_completed_result_refuses_existing_terminal_file(self) -> None:
+        evidence, raw = self._exact_saturation_evidence_fixture()
+        candidate_binding = {"candidate_binding_digest": "c" * 64}
+        sentinel = b"external terminal owner\n"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "evidence"
+            output.mkdir()
+            result_path = output / "saturation-result.json"
+            result_path.write_bytes(sentinel)
+
+            def validate(document: dict, **kwargs):
+                return self._validate_exact_saturation_fixture(
+                    document,
+                    raw,
+                    require_pass=kwargs["require_pass"],
+                )
+
+            with (
+                mock.patch.object(
+                    saturation,
+                    "validate_saturation_evidence",
+                    side_effect=validate,
+                ),
+                self.assertRaisesRegex(
+                    saturation.TerminalPublicationError,
+                    "terminal result already exists",
+                ),
+            ):
+                saturation._publish_completed_saturation_result(
+                    output,
+                    evidence,
+                    candidate_binding=candidate_binding,
+                )
+
+            self.assertEqual(result_path.read_bytes(), sentinel)
+            self.assertEqual(
+                sorted(path.name for path in output.iterdir()),
+                ["saturation-result.json"],
+            )
 
     def test_fresh_semantic_corpus_rejects_every_reuse_signal(self) -> None:
         corpus = {
@@ -986,11 +1140,20 @@ class ScaleOrchestrationTests(unittest.TestCase):
     def test_scale_producers_validate_sealed_evidence_before_publication(self) -> None:
         saturation_source = inspect.getsource(saturation.run)
         sealed = saturation_source.index("evidence = seal_release_evidence(evidence)")
-        validated = saturation_source.index("validated = validate_saturation_evidence(")
-        published = saturation_source.index(
-            '_write_json(output / "saturation-result.json", evidence)'
+        publication = saturation_source.index(
+            "return _publish_completed_saturation_result("
         )
-        self.assertLess(sealed, validated)
+        self.assertLess(sealed, publication)
+
+        publication_source = inspect.getsource(
+            saturation._publish_completed_saturation_result
+        )
+        validated = publication_source.index(
+            "validated = validate_saturation_evidence("
+        )
+        published = publication_source.index(
+            "_write_json_create_only(result_path, evidence)"
+        )
         self.assertLess(validated, published)
 
         no_degradation_source = inspect.getsource(no_degradation.run)

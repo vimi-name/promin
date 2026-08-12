@@ -62,6 +62,7 @@ _PHYSICAL_CORPUS_RECIPE = "representative-operational-text-v3"
 _EXACT_PHYSICAL_FILES = 100_000
 _EXACT_CORE_VALID_RELATIONS = 198_999
 _EXACT_RUNTIME_QUERIES = 600
+_SATURATION_CONTINUATION_TTL_SECONDS = 900
 _SEARCH_FIXTURE_TASK_COUNT = 32
 _SEARCH_FIXTURE_RELATION_COUNT = 28
 _PHYSICAL_RELATION_COUNT = (
@@ -113,6 +114,10 @@ class StorageBudgetError(SaturationError):
         self.failure_code = failure_code
 
 
+class TerminalPublicationError(SaturationError):
+    """The create-only terminal result path was already occupied."""
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, Mapping):
         return dict(value)
@@ -154,6 +159,33 @@ def _write_json(path: Path, value: Any) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _write_json_create_only(path: Path, value: Any) -> None:
+    """Atomically publish canonical JSON without replacing an existing path."""
+
+    payload = _canonical_bytes(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise TerminalPublicationError(
+                f"terminal result already exists: {path}"
+            ) from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # The final hard link, once created, is already the durable result.
+            pass
 
 
 def _write_bytes(path: Path, payload: bytes) -> None:
@@ -3268,6 +3300,7 @@ def _drain_pages(
     maximums: Mapping[str, int],
     *,
     query_grant: Mapping[str, Any],
+    ttl_seconds: int,
 ) -> dict[str, Any]:
     current = first
     seen_atoms: set[str] = set()
@@ -3275,6 +3308,7 @@ def _drain_pages(
     page_digests: list[str] = []
     previous_cursor: int | None = None
     fixed_expiry: str | None = None
+    fixed_resume_binding_digest: str | None = None
     first_truncated = False
     continuation_pages = 0
     maximum_token_bytes = 0
@@ -3339,24 +3373,43 @@ def _drain_pages(
             raise SaturationError("WorkCard stream_cursor is invalid")
         required = {
             "version",
+            "traversal",
             "token",
             "cursor",
             "expiry",
             "activation_digest",
             "head_digest",
             "projection_digest",
+            "implementation_closure_digest",
             "ranking",
             "depth",
             "budget_digest",
-            "grant_claim_digest",
+            "resume_binding_digest",
         }
         missing = sorted(required - set(continuation))
         if missing:
             raise SaturationError(f"continuation v2 omitted fields: {missing}")
+        unexpected = sorted(set(continuation) - required)
+        if unexpected:
+            raise SaturationError(
+                f"continuation v2 exposed unexpected fields: {unexpected}"
+            )
         if continuation.get("version") != 2:
             raise SaturationError("continuation does not identify the authorized v2 envelope")
-        if continuation.get("grant_claim_digest") != query_grant.get("claim_digest"):
-            raise SaturationError("continuation differs from the exact projection.read Grant claim")
+        resume_binding_digest = continuation.get("resume_binding_digest")
+        if (
+            _hex_digest(resume_binding_digest, "continuation resume binding digest")
+            != resume_binding_digest
+        ):
+            raise SaturationError(
+                "continuation resume binding digest is not canonical lowercase SHA-256"
+            )
+        if fixed_resume_binding_digest is None:
+            fixed_resume_binding_digest = resume_binding_digest
+        elif resume_binding_digest != fixed_resume_binding_digest:
+            raise SaturationError(
+                "continuation authorization binding changed within one page chain"
+            )
         cursor = continuation.get("cursor")
         if not isinstance(cursor, int) or cursor < 0:
             raise SaturationError("continuation cursor is not a non-negative integer")
@@ -3376,10 +3429,31 @@ def _drain_pages(
         continuation_pages += 1
         if continuation_pages > 10_000:
             raise SaturationError("continuation exceeded the bounded 10000-page safety limit")
-        current = runtime.continue_search(
-            token,
+        continuation_query = current_value.get("query")
+        continuation_depth = current_value.get("depth")
+        continuation_budget = current_value.get("budget")
+        continuation_ranking = current_value.get("ranking")
+        if (
+            not isinstance(continuation_query, str)
+            or not continuation_query
+            or not isinstance(continuation_depth, int)
+            or isinstance(continuation_depth, bool)
+            or not isinstance(continuation_budget, Mapping)
+            or not isinstance(continuation_ranking, str)
+            or not continuation_ranking
+        ):
+            raise SaturationError(
+                "continuation source page omitted its exact search binding"
+            )
+        current = runtime.search(
+            continuation_query,
+            continuation_depth,
+            budget=dict(continuation_budget),
+            ranking=continuation_ranking,
+            continuation_token=token,
             subject_id=query_grant["subject_id"],
             grant_id=query_grant["grant_id"],
+            ttl_seconds=ttl_seconds,
         )
     return {
         "atoms": seen_atoms,
@@ -3860,6 +3934,8 @@ def _guard_storage_run(operation: Any) -> Any:
                 performance_profile=performance_profile,
             )
         except BaseException as exc:
+            if isinstance(exc, TerminalPublicationError):
+                raise
             failure_code = telemetry.failure_code(exc)
             if failure_code is not None:
                 receipt_path: Path | None = None
@@ -3888,6 +3964,28 @@ def _guard_storage_run(operation: Any) -> Any:
             _ACTIVE_STORAGE_TELEMETRY.reset(token)
 
     return guarded
+
+
+def _publish_completed_saturation_result(
+    output: Path,
+    evidence: dict[str, Any],
+    *,
+    candidate_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Publish a sealed completed run after pass-neutral structural validation."""
+
+    result_path = output / "saturation-result.json"
+    validated = validate_saturation_evidence(
+        evidence,
+        candidate_binding=candidate_binding,
+        source_path=result_path,
+        evidence_root=output,
+        require_pass=False,
+    )
+    if _canonical_bytes(validated) != _canonical_bytes(evidence):
+        raise SaturationError("live saturation validation changed the sealed result")
+    _write_json_create_only(result_path, evidence)
+    return evidence
 
 
 @_guard_storage_run
@@ -4217,6 +4315,7 @@ def run(
             budget=query_budget,
             subject_id=query_grant["subject_id"],
             grant_id=query_grant["grant_id"],
+            ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
         )
         total_search_calls += 1
         elapsed_query_ms = (time.perf_counter() - started) * 1000.0
@@ -4258,7 +4357,13 @@ def run(
         elif query_class == "exact-artifact":
             class_result_verified = _first_entity_id(card) == query
             exact_artifact_checks.append(class_result_verified)
-        reference = _drain_pages(runtime, card, ceiling, query_grant=query_grant)
+        reference = _drain_pages(
+            runtime,
+            card,
+            ceiling,
+            query_grant=query_grant,
+            ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
+        )
         if reference["selected_closure_complete"]:
             selected_closure_chains += 1
         maximum_continuation_token_bytes = max(
@@ -4279,6 +4384,7 @@ def run(
                 budget=forced_budget,
                 subject_id=query_grant["subject_id"],
                 grant_id=query_grant["grant_id"],
+                ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
             )
             total_search_calls += 1
             forced = _drain_pages(
@@ -4286,6 +4392,7 @@ def run(
                 forced_first,
                 forced_budget,
                 query_grant=query_grant,
+                ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
             )
             if forced["selected_closure_complete"]:
                 selected_closure_chains += 1
@@ -4892,16 +4999,11 @@ def run(
         "manifest_digest": _digest(raw_manifest_identity),
     }
     evidence = seal_release_evidence(evidence)
-    validated = validate_saturation_evidence(
+    return _publish_completed_saturation_result(
+        output,
         evidence,
         candidate_binding=artifact_binding["standard_candidate_binding"],
-        source_path=output / "saturation-result.json",
-        evidence_root=output,
     )
-    if _canonical_bytes(validated) != _canonical_bytes(evidence):
-        raise SaturationError("live saturation validation changed the sealed result")
-    _write_json(output / "saturation-result.json", evidence)
-    return evidence
 
 
 def self_check(performance_profile: str = "portable-local-v1") -> dict[str, Any]:

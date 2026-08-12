@@ -2927,11 +2927,14 @@ class ProminService:
         grant_id: str,
         budget: dict[str, int] | None = None,
         ranking: str = "bm25-v1",
+        continuation_token: str | None = None,
         now: datetime | None = None,
         ttl_seconds: int = 900,
     ) -> dict[str, Any]:
         if not query or not query.strip():
             raise ServiceError("query must be non-empty")
+        if continuation_token is not None and not continuation_token:
+            raise ServiceError("continuation token must be non-empty")
         context = self._context()
         selected_depth = _profile_depth(
             _preset(context),
@@ -2956,6 +2959,7 @@ class ProminService:
             depth=selected_depth,
             budget=selected_budget,
             ranking=ranking,
+            continuation_token=continuation_token,
             resume_binding=_projection_resume_binding(context, access),
             now=now_text,
             ttl_seconds=ttl_seconds,

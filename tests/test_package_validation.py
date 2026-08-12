@@ -319,7 +319,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 231)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 232)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -386,6 +386,7 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_heavy_saturation_storage_budget.py",
             "tests/test_heavy_state_binding_storage.py",
             "tests/test_heavy_windows_event_history.py",
+            "tests/test_retrieval_continuation_service.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
 
     def test_every_canonical_payload_file_is_mandatory(self) -> None:

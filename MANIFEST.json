@@ -228,8 +228,8 @@
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
-      "sha256": "5d1a0f85d6ae90e430f3a2bb58171ef5d6d13fb981d143a8d534448c7e0e4231",
-      "size": 6313
+      "sha256": "8b165073adf738f4eb55a22d11c0549b0ef0919a31c0957397bb7f9f32175805",
+      "size": 9061
     },
     {
       "path": "examples/project-brief.json",
@@ -588,8 +588,8 @@
     },
     {
       "path": "promin/service.py",
-      "sha256": "d07a05aa53d0481dead3ebf99e3c20ef2ce60e9f8d7f0763dac9429b9fbed47b",
-      "size": 262629
+      "sha256": "7f0f5ed5e8b4480ccd0660d1e727f4794f0bebb1e857ad3bceac2e1ca5ddcc93",
+      "size": 262868
     },
     {
       "path": "promin/skills.py",
@@ -673,8 +673,8 @@
     },
     {
       "path": "tests/ALPHA4_TEST_SHARDS.json",
-      "sha256": "10d14726a419e68f291e3eb220e0ba3848451cca63dd7c10447af55c795e08e0",
-      "size": 8922
+      "sha256": "91366e1cb3da97c0bc0d5c3635484b68fabf4434cb2d850de8e74b7939023ff8",
+      "size": 9030
     },
     {
       "path": "tests/test_alpha3_ingress_budget.py",
@@ -1043,8 +1043,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "6ca44582c18578ef5c1effce38e84215ffcc847398529cd7b5462b27db6ec088",
-      "size": 66356
+      "sha256": "45415a40e3f0f5435818b4c8611bb93f6a96bbd8930b79d88039ce64849ecc57",
+      "size": 66416
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1052,9 +1052,14 @@
       "size": 2737
     },
     {
+      "path": "tests/test_retrieval_continuation_service.py",
+      "sha256": "3d734d8c382d38f6d0a3922e27ec1c84ae8a6f48c5745774a6f561bc0a6ade42",
+      "size": 8127
+    },
+    {
       "path": "tests/test_scale_orchestration.py",
-      "sha256": "a135893c151f7fdf5e7290aba26807c59763116e9d0909a648f4d23d97d34770",
-      "size": 82701
+      "sha256": "80791065b580689e1e88c91a20033a204ed7be086957b5a3da1a22bc96f6eecb",
+      "size": 88905
     },
     {
       "path": "tests/test_search_scale.py",
@@ -1128,8 +1133,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "672762ec4a25e701764174b88464deef52a711bb0df1bb6b7454214c3c8299e1",
-      "size": 208203
+      "sha256": "6083d468973d80802943e5467d425627758fa07a5471b595485e29e94c3a32d5",
+      "size": 211845
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1143,8 +1148,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "edb7632b3398fec236399b36b4290a62a2fdaa8872f5cde83faa25f02dcd09e6",
-      "size": 141474
+      "sha256": "420f943861a4aa16aca9b656e7daee35c526625cca68f3f0b5758eaabbe7af4a",
+      "size": 141530
     }
   ],
   "generated_surfaces": [
