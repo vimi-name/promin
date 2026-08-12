@@ -2253,9 +2253,9 @@ def _handle_relative_evidence_root_safety(
         raise ConformanceError("handle-relative evidence-root race matrix is incomplete")
 
 
-def _raw_scale_summary_recomputation(
-    value: Mapping[str, Any], bundle: "ContractBundle", context: Mapping[str, Any]
-) -> None:
+def _validated_raw_scale_result(
+    value: Mapping[str, Any], context: Mapping[str, Any]
+) -> Mapping[str, Any]:
     result = context.get("physical_100k_result", value)
     candidate = context.get("standard_release_candidate_binding")
     source_path = context.get("physical_100k_result_path")
@@ -2265,7 +2265,7 @@ def _raw_scale_summary_recomputation(
     try:
         from .evidence import validate_saturation_evidence
 
-        validate_saturation_evidence(
+        return validate_saturation_evidence(
             result,
             candidate_binding=candidate,
             source_path=Path(source_path),
@@ -2275,18 +2275,37 @@ def _raw_scale_summary_recomputation(
         raise ConformanceError("raw scale summaries do not recompute") from exc
 
 
+def _raw_scale_summary_recomputation(
+    value: Mapping[str, Any], bundle: "ContractBundle", context: Mapping[str, Any]
+) -> None:
+    _validated_raw_scale_result(value, context)
+
+
 def _bounded_incremental_commit_and_compaction(
     value: Mapping[str, Any], bundle: "ContractBundle", context: Mapping[str, Any]
 ) -> None:
     _profile_bound_physical_100k_performance(value, bundle, context)
-    result = context.get("physical_100k_result", value)
-    performance = result.get("performance") if isinstance(result, Mapping) else None
+    result = _validated_raw_scale_result(value, context)
+    performance = result.get("performance")
+    observed = performance.get("observed") if isinstance(performance, Mapping) else None
+    predicates = result.get("contract_predicates")
     if (
-        not isinstance(performance, Mapping)
-        or performance.get("semantic_commit_count", 0) < 1
-        or performance.get("runtime_checkpoint_writes", 0)
-        > performance.get("runtime_checkpoint_count", -1)
+        not isinstance(observed, Mapping)
+        or not isinstance(predicates, Mapping)
+        or predicates.get("semantic_commit_count_exact") is not True
     ):
+        raise ConformanceError("incremental commit/checkpoint evidence is incomplete")
+    checkpoint_writes = _required_nonnegative_int(
+        observed,
+        "runtime_checkpoint_writes",
+        owner="bounded-incremental-commit-and-compaction",
+    )
+    checkpoint_count = _required_nonnegative_int(
+        observed,
+        "runtime_checkpoint_count",
+        owner="bounded-incremental-commit-and-compaction",
+    )
+    if checkpoint_writes > checkpoint_count:
         raise ConformanceError("incremental commit/checkpoint evidence is incomplete")
 
 

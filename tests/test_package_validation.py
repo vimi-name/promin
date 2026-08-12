@@ -725,6 +725,64 @@ class PackageValidationTests(unittest.TestCase):
             reused[field] = True
             self.assertTrue(list(validator.iter_errors(reused)), field)
 
+    def test_compiled_saturation_projection_requires_exact_entity_contour(
+        self,
+    ) -> None:
+        schema = json.loads(
+            (self.root / "core" / "contracts.schema.json").read_text(encoding="utf-8")
+        )
+        validator = Draft202012Validator(
+            {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                "$ref": "#/$defs/SaturationEvidence/properties/projection",
+            }
+        )
+        projection = {
+            "database_bytes": 8_192,
+            "elapsed_ms": 250.0,
+            "entity_count": 101_604,
+            "entity_type_counts": {
+                "Artifact": 100_000,
+                "Candidate": 1,
+                "Grant": 4,
+                "Task": 1_599,
+            },
+            "equal_semantic_digest": True,
+            "implementation_closure_digest": "a" * 64,
+            "initial_inventory_passes": 1,
+            "initial_product_passes": 0,
+            "inventory_integrity": True,
+            "inventory_projection_amplification": 1.0,
+            "projection_amplification": 2.0,
+            "rebuild_inventory_passes": 1,
+            "rebuild_product_passes": 0,
+            "relation_count": 198_999,
+            "semantic_digest": "b" * 64,
+            "semantic_inflation": 3.0,
+        }
+        self.assertEqual(list(validator.iter_errors(projection)), [])
+
+        missing_candidate = json.loads(json.dumps(projection))
+        del missing_candidate["entity_type_counts"]["Candidate"]
+        self.assertTrue(list(validator.iter_errors(missing_candidate)))
+
+        extra_entity_type = json.loads(json.dumps(projection))
+        extra_entity_type["entity_type_counts"]["Document"] = 1
+        self.assertTrue(list(validator.iter_errors(extra_entity_type)))
+
+        zero_candidate = json.loads(json.dumps(projection))
+        zero_candidate["entity_type_counts"]["Candidate"] = 0
+        self.assertTrue(list(validator.iter_errors(zero_candidate)))
+
+        wrong_total = json.loads(json.dumps(projection))
+        wrong_total["entity_count"] = 101_603
+        self.assertTrue(list(validator.iter_errors(wrong_total)))
+
+        wrong_relation_total = json.loads(json.dumps(projection))
+        wrong_relation_total["relation_count"] = 198_998
+        self.assertTrue(list(validator.iter_errors(wrong_relation_total)))
+
     def test_existing_pdf_verification_does_not_invoke_generator(self) -> None:
         (self.root / "tools" / "generate_human.py").write_text("raise RuntimeError('must not run')\n", encoding="utf-8")
         result = verify_human_documents(self.root)

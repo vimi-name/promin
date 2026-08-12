@@ -47,6 +47,14 @@ SATURATION_TOOL = Path(__file__).with_name("promin_saturation.py")
 MAX_ITERATIONS = 18
 EXACT_PHYSICAL_FILES = 100_000
 EXACT_CORE_VALID_RELATIONS = 198_999
+EXACT_PROJECTION_ENTITY_COUNT = 101_604
+EXACT_PROJECTION_ENTITY_TYPE_COUNTS = {
+    "Artifact": 100_000,
+    "Candidate": 1,
+    "Grant": 4,
+    "Task": 1_599,
+}
+EXACT_SEMANTIC_COMMIT_COUNT = 1_604
 EXACT_RUNTIME_QUERIES = 600
 FOCUSED_MARKER = "not scale"
 PHYSICAL_MARKER = "scale"
@@ -1360,6 +1368,10 @@ def _validate_physical_result(
         or projection.get("initial_product_passes") != 0
         or projection.get("rebuild_inventory_passes") != 1
         or projection.get("rebuild_product_passes") != 0
+        or projection.get("entity_count") != EXACT_PROJECTION_ENTITY_COUNT
+        or projection.get("entity_type_counts")
+        != EXACT_PROJECTION_ENTITY_TYPE_COUNTS
+        or projection.get("relation_count") != EXACT_CORE_VALID_RELATIONS
         or projection.get("equal_semantic_digest") is not True
         or not isinstance(projection.get("database_bytes"), int)
         or projection["database_bytes"] <= 0
@@ -1452,7 +1464,7 @@ def _validate_physical_result(
         not isinstance(semantic_ingestion, dict)
         or not isinstance(semantic_ingestion.get("commit_count"), int)
         or isinstance(semantic_ingestion.get("commit_count"), bool)
-        or semantic_ingestion["commit_count"] < 1
+        or semantic_ingestion["commit_count"] != EXACT_SEMANTIC_COMMIT_COUNT
         or not isinstance(semantic_ingestion.get("changed_records"), int)
         or isinstance(semantic_ingestion.get("changed_records"), bool)
         or semantic_ingestion["changed_records"] < 1

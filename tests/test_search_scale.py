@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -1049,6 +1050,45 @@ class SearchScaleFocusedTests(unittest.TestCase):
                 created["implementation_closure_digest"],
             )
 
+    def test_projection_entity_type_contour_includes_exactly_one_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "physical-saturation"
+            database = (
+                workspace / ".promin" / "state" / "projection" / "promin.sqlite3"
+            )
+            database.parent.mkdir(parents=True)
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE entities (entity_type TEXT NOT NULL)")
+                connection.executemany(
+                    "INSERT INTO entities (entity_type) VALUES (?)",
+                    [
+                        ("Artifact",),
+                        ("Artifact",),
+                        ("Candidate",),
+                        ("Grant",),
+                        ("Grant",),
+                        ("Grant",),
+                        ("Grant",),
+                        ("Task",),
+                        ("Task",),
+                        ("Task",),
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertEqual(
+                saturation._projection_entity_type_counts(workspace),
+                {
+                    "Artifact": 2,
+                    "Candidate": 1,
+                    "Grant": 4,
+                    "Task": 3,
+                },
+            )
+
     def test_saturation_all_scope_is_not_combined_with_task_selector(self) -> None:
         self.assertEqual(
             saturation._task_requested_scope(
@@ -1092,12 +1132,14 @@ class SearchScaleFocusedTests(unittest.TestCase):
                     set(created["continuation_query_ids"]), set(created["query_ids"])
                 )
                 self.assertFalse(created["reused"])
+                self.assertEqual(len(commit_observations), 4 + 1 + 32)
                 reused = saturation._ensure_semantic_corpus(
                     runtime,
                     candidate_digest="a" * 64,
                     commit_observations=commit_observations,
                 )
                 self.assertTrue(reused["reused"])
+                self.assertEqual(len(commit_observations), 4 + 1 + 32)
                 self.assertEqual(
                     reused["query_grant"]["capability_id"], "projection.read"
                 )
@@ -1451,13 +1493,25 @@ class SearchScalePhysicalTests(unittest.TestCase):
         product = workspace / "product"
         reuse = product.is_dir() and any(product.iterdir())
         with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "physical-saturation"
             result = saturation.run(
                 workspace,
-                Path(temporary) / "physical-saturation",
+                output,
                 archive=archive,
                 files=100_000,
                 queries=600,
                 reuse_product=reuse,
+            )
+            operation_metrics = saturation_audit._read_bound_raw_json(
+                result,
+                record_path=output / "saturation-result.json",
+                role="operation-metrics",
+                expected_path="raw/operation-metrics.json",
+                max_bytes=128 * 1024 * 1024,
+            )
+            self.assertEqual(
+                operation_metrics["semantic_ingestion"]["commit_count"],
+                1_604,
             )
         self.assertEqual(result["status"], "pass")
         self.assertFalse(result["pass_credit"])
@@ -1468,11 +1522,25 @@ class SearchScalePhysicalTests(unittest.TestCase):
         self.assertEqual(result["inventory"]["passes"], 1)
         self.assertEqual(result["projection"]["rebuild_product_passes"], 0)
         self.assertTrue(result["projection"]["equal_semantic_digest"])
+        self.assertEqual(result["projection"]["entity_count"], 101_604)
+        self.assertEqual(result["projection"]["relation_count"], 198_999)
+        self.assertEqual(
+            result["projection"]["entity_type_counts"],
+            {
+                "Artifact": 100_000,
+                "Candidate": 1,
+                "Grant": 4,
+                "Task": 1_599,
+            },
+        )
         self.assertGreaterEqual(result["search"]["actual_runtime_queries"], 600)
         self.assertEqual(result["search"]["depth_min"], 1)
         self.assertEqual(result["search"]["depth_max"], 12)
         self.assertEqual(result["search"]["silent_truncations"], 0)
-        self.assertLessEqual(result["projection"]["amplification"], 32.0)
+        self.assertLessEqual(
+            result["projection"]["projection_amplification"],
+            32.0,
+        )
 
 
 if __name__ == "__main__":

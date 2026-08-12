@@ -5728,13 +5728,27 @@ def _compile_projection(
         ),
         "projection": exact_keys(
             (
-                "database_bytes", "elapsed_ms", "entity_count", "equal_semantic_digest",
-                "implementation_closure_digest", "initial_inventory_passes", "initial_product_passes",
-                "inventory_integrity", "inventory_projection_amplification", "projection_amplification",
+                "database_bytes", "elapsed_ms", "entity_count", "entity_type_counts",
+                "equal_semantic_digest", "implementation_closure_digest",
+                "initial_inventory_passes", "initial_product_passes", "inventory_integrity",
+                "inventory_projection_amplification", "projection_amplification",
                 "rebuild_inventory_passes", "rebuild_product_passes", "relation_count",
                 "semantic_digest", "semantic_inflation",
             ),
-            {"implementation_closure_digest": {"$ref": "#/$defs/Digest"}},
+            {
+                "entity_count": {"const": 101604},
+                "entity_type_counts": exact_keys(
+                    ("Artifact", "Candidate", "Grant", "Task"),
+                    {
+                        "Artifact": {"const": 100000},
+                        "Candidate": {"const": 1},
+                        "Grant": {"const": 4},
+                        "Task": {"const": 1599},
+                    },
+                ),
+                "implementation_closure_digest": {"$ref": "#/$defs/Digest"},
+                "relation_count": {"const": 198999},
+            },
         ),
         "query_authorization": exact_keys(
             ("activation_digest", "capability_id", "claim_digest", "expires_at", "grant_id", "scope", "subject_id"),

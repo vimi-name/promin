@@ -1616,6 +1616,61 @@ class ContractMutationTests(unittest.TestCase):
                 check({}, self.bundle, {})
             self.assertNotIn("EvidenceStore", str(raised.exception))
 
+    def test_bounded_incremental_commit_hook_reads_validated_nested_metrics(self) -> None:
+        baseline = _physical_scale_result_from_core(self.bundle)
+        validated = deepcopy(baseline)
+        validated["performance"]["observed"].update(
+            {
+                "runtime_checkpoint_count": 4,
+                "runtime_checkpoint_writes": 3,
+            }
+        )
+        validated["contract_predicates"] = {
+            "semantic_commit_count_exact": True,
+        }
+        candidate = {"candidate_binding_digest": "a" * 64}
+        source_path = Path("physical-100k-result.json")
+        evidence_root = Path("release-evidence")
+        context = {
+            "physical_100k_result": baseline,
+            "standard_release_candidate_binding": candidate,
+            "physical_100k_result_path": source_path,
+            "standard_release_evidence_root": evidence_root,
+        }
+        check = ACCEPTANCE_VALIDATORS[
+            "bounded-incremental-commit-and-compaction"
+        ]
+
+        with patch(
+            "promin.evidence.validate_saturation_evidence",
+            return_value=validated,
+        ) as validate:
+            check({}, self.bundle, context)
+        validate.assert_called_once_with(
+            baseline,
+            candidate_binding=candidate,
+            source_path=source_path,
+            evidence_root=evidence_root,
+        )
+
+        invalid_variants = []
+        stale_predicate = deepcopy(validated)
+        stale_predicate["contract_predicates"]["semantic_commit_count_exact"] = False
+        invalid_variants.append(("stale semantic count predicate", stale_predicate))
+        missing_predicate = deepcopy(validated)
+        del missing_predicate["contract_predicates"]["semantic_commit_count_exact"]
+        invalid_variants.append(("missing semantic count predicate", missing_predicate))
+        excessive_writes = deepcopy(validated)
+        excessive_writes["performance"]["observed"]["runtime_checkpoint_writes"] = 5
+        invalid_variants.append(("checkpoint writes exceed checkpoints", excessive_writes))
+
+        for label, invalid in invalid_variants:
+            with self.subTest(case=label), patch(
+                "promin.evidence.validate_saturation_evidence",
+                return_value=invalid,
+            ), self.assertRaises(ConformanceError):
+                check({}, self.bundle, context)
+
     def test_release_decision_hooks_require_pinned_signed_outcome_after_evidence_validation(self) -> None:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey

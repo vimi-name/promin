@@ -33,6 +33,7 @@ from promin.evidence import (
     _validate_saturation_operation_metrics,
     _validate_saturation_runtime_bindings,
     release_evidence_invocation,
+    validate_saturation_evidence,
 )
 
 
@@ -59,6 +60,251 @@ saturation = _load(
 
 
 class ScaleOrchestrationTests(unittest.TestCase):
+    @staticmethod
+    def _exact_saturation_evidence_fixture() -> tuple[dict, dict]:
+        corpus = {
+            "record_type": "SaturationSemanticCorpus",
+            "generation": "explicit-authorized-command-events",
+            "harness_generated": True,
+            "product_acceptance_credit": False,
+            "task_count": 1_599,
+            "relation_count": 198_999,
+            "depths": list(range(1, 13)),
+            "high_fanout": 16,
+            "conflicting_exact_id_text": True,
+            "search_fixture": {
+                "task_count": 32,
+                "relation_count": 28,
+                "depths": list(range(1, 13)),
+                "high_fanout": 16,
+            },
+            "physical_relation_fixture": {
+                "task_count": 1_567,
+                "relation_count": 198_971,
+                "relation_kind": "READS",
+                "target_type": "Artifact",
+                "artifact_target_count": 100_000,
+                "artifact_target_coverage": 1.0,
+                "relations_per_atomic_batch_max": 127,
+            },
+            "reused": False,
+            "search_fixture_reused": False,
+            "physical_relation_fixture_reused": False,
+        }
+        semantic_ingestion = {
+            "commit_count": 1_604,
+            "p95_ms": 2.0,
+            "p99_ms": 3.0,
+            "bytes_per_changed_record": 4.0,
+            "checkpoint_count": 5,
+            "checkpoint_writes": 2,
+            "elapsed_seconds": 6.0,
+        }
+        query_mix = {
+            "broad": 60,
+            "content-high-cardinality": 60,
+            "content-probe": 60,
+            "exact-artifact": 60,
+            "exact-semantic": 60,
+            "forced-continuation": 120,
+            "hostile-content": 60,
+            "hostile-exact": 60,
+            "miss": 60,
+        }
+        search = {
+            "actual_runtime_queries": 600,
+            "query_mix": query_mix,
+            "depth_counts": {str(depth): 1 for depth in range(1, 13)},
+            "depth_min": 1,
+            "depth_max": 12,
+            "silent_truncations": 0,
+            "continuation_union_completeness": 1.0,
+            "selected_closure_union_completeness": 1.0,
+            "maximum_continuation_token_bytes": 256,
+            "continuation_state": {"maximum_bytes": 16_384},
+            "continuation_token_overhead_at_most_10_percent": True,
+            "broad_query_refinement_required": True,
+            "high_cardinality_terms_verified": True,
+            "content_search_verified": True,
+            "miss_behavior_verified": True,
+            "hostile_proxy_content_verified": True,
+            "exact_artifact_search_verified": True,
+            "forced_union_matches": 1,
+            "forced_continuation_chains": 1,
+            "runtime_query_budget": {"queries": 600},
+        }
+        observed = {
+            "p50_ms": 1.0,
+            "p95_ms": 2.0,
+            "p99_ms": 3.0,
+            "peak_rss_bytes": 4_096,
+            "database_bytes": 8_192,
+            "projection_amplification": 2.0,
+            "semantic_inflation": 3.0,
+            "commit_p95_ms": 2.0,
+            "commit_p99_ms": 3.0,
+            "commit_bytes_per_changed_record": 4.0,
+            "runtime_checkpoint_count": 5,
+            "runtime_checkpoint_writes": 2,
+            "semantic_ingestion_seconds": 6.0,
+        }
+        thresholds = {
+            "p50_ms_max": 1.0,
+            "p95_ms_max": 2.0,
+            "p99_ms_max": 3.0,
+            "peak_rss_bytes_max": 4_096,
+            "database_bytes_max": 8_192,
+            "projection_amplification_max": 2.0,
+            "semantic_inflation_max": 3.0,
+            "commit_p95_ms_max": 2.0,
+            "commit_p99_ms_max": 3.0,
+            "commit_bytes_per_changed_record_max": 4.0,
+            "runtime_checkpoint_count_max": 5,
+            "semantic_ingestion_seconds_max": 6.0,
+        }
+        performance_predicates = {
+            "p50_within_profile": True,
+            "p95_within_profile": True,
+            "p99_within_profile": True,
+            "peak_rss_within_profile": True,
+            "database_within_profile": True,
+            "projection_amplification_within_profile": True,
+            "semantic_inflation_within_profile": True,
+            "commit_p95_within_profile": True,
+            "commit_p99_within_profile": True,
+            "commit_bytes_per_changed_record_within_profile": True,
+            "runtime_checkpoint_count_within_profile": True,
+            "semantic_ingestion_within_profile": True,
+        }
+        contract_predicates = {
+            "broad_query_refinement_required": True,
+            "content_search_verified": True,
+            "continuation_state_bytes_at_most_16384": True,
+            "continuation_token_bytes_at_most_256": True,
+            "continuation_token_overhead_at_most_10_percent": True,
+            "continuation_union_complete": True,
+            "core_valid_relations_exact": True,
+            "exact_artifact_binding_unchanged": True,
+            "exact_artifact_search_verified": True,
+            "high_cardinality_terms_verified": True,
+            "hostile_proxy_content_verified": True,
+            "inventory_incremental_memory_amplification_at_most_32": True,
+            "inventory_passes_exact": True,
+            "miss_behavior_verified": True,
+            "mixed_query_classes_complete": True,
+            "physical_relation_artifact_coverage_complete": True,
+            "raw_file_proxy_ratio_exact": True,
+            "rebuild_digest_equal": True,
+            "rebuild_product_passes_zero": True,
+            "runtime_depths_1_through_12": True,
+            "runtime_queries_exact": True,
+            "runtime_query_budget_bounded": True,
+            "selected_closure_union_complete": True,
+            "semantic_commit_count_exact": True,
+            "silent_truncations_zero": True,
+            "synthetic_task_ratio_zero": True,
+        }
+        verification = {field: None for field in _SATURATION_EVIDENCE_FIELDS}
+        verification.update(
+            {
+                "record_type": "SaturationEvidence",
+                "status": "pass",
+                "candidate_binding_digest": "c" * 64,
+                "artifact_binding": {
+                    "platform": {"binding_digest": "sha256:" + "a" * 64}
+                },
+                "invocation": {"platform_binding_digest": "a" * 64},
+                "artifact_binding_unchanged": True,
+                "physical_files": 100_000,
+                "core_valid_relations": 198_999,
+                "runtime_queries": 600,
+                "silent_truncations": 0,
+                "selected_closure_union_completeness": 1.0,
+                "memory_amplification_at_most_32": True,
+                "core_valid_relations_exact_198999": True,
+                "broad_query_refinement_required": True,
+                "high_cardinality_terms_verified": True,
+                "content_search_verified": True,
+                "miss_behavior_verified": True,
+                "hostile_proxy_content_verified": True,
+                "exact_artifact_search_verified": True,
+                "mixed_query_classes_complete": True,
+                "continuation_token_bytes_at_most_256": True,
+                "continuation_state_bytes_at_most_16384": True,
+                "continuation_token_overhead_at_most_10_percent": True,
+                "pass_credit": False,
+                "acceptance_pass": False,
+                "product_acceptance_pass": False,
+                "public_release_approved": False,
+                "physical": {
+                    "files": 100_000,
+                    "raw_files": 100_000,
+                    "raw_file_proxies": 100_000,
+                    "semantic_proxies": 100_000,
+                    "raw_file_proxy_ratio": 1.0,
+                    "synthetic_task_count": 0,
+                    "synthetic_task_ratio": 0.0,
+                    "relations": 198_999,
+                    "vcs_tree_files": 100_000,
+                    "explicit_semantic_corpus": corpus,
+                },
+                "inventory": {"entries": 100_000, "passes": 1},
+                "projection": {
+                    "entity_count": 101_604,
+                    "entity_type_counts": {
+                        "Artifact": 100_000,
+                        "Task": 1_599,
+                        "Grant": 4,
+                        "Candidate": 1,
+                    },
+                    "relation_count": 198_999,
+                    "initial_inventory_passes": 1,
+                    "initial_product_passes": 0,
+                    "rebuild_inventory_passes": 1,
+                    "rebuild_product_passes": 0,
+                    "equal_semantic_digest": True,
+                },
+                "search": search,
+                "resources": {"peak_rss_bytes": 4_096},
+                "performance": {
+                    "observed": observed,
+                    "thresholds": thresholds,
+                    "predicates": performance_predicates,
+                    "all_within_profile": True,
+                },
+                "contract_predicates": contract_predicates,
+            }
+        )
+        raw = {
+            "operation": {"semantic_ingestion": semantic_ingestion},
+            "memory_within_threshold": True,
+        }
+        return verification, raw
+
+    @staticmethod
+    def _validate_exact_saturation_fixture(verification: dict, raw: dict) -> dict:
+        candidate = {"candidate_binding_digest": "c" * 64}
+        with (
+            mock.patch(
+                "promin.evidence.validate_standard_release_candidate_binding",
+                return_value=candidate,
+            ),
+            mock.patch("promin.evidence._validate_release_evidence_schema"),
+            mock.patch("promin.evidence._validate_exact_artifact_binding"),
+            mock.patch("promin.evidence._validate_release_evidence_envelope"),
+            mock.patch(
+                "promin.evidence._validate_saturation_raw_artifacts",
+                return_value=raw,
+            ),
+            mock.patch("promin.evidence._validate_saturation_runtime_bindings"),
+        ):
+            return validate_saturation_evidence(
+                verification,
+                candidate_binding={},
+                source_path=Path("saturation-result.json"),
+                evidence_root=Path("evidence"),
+            )
+
     @staticmethod
     def _fresh_state_fixture():
         class FakeSaturationTool:
@@ -291,6 +537,43 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 records=1,
                 verification=verification,
             )
+
+    def test_saturation_evidence_requires_exact_candidate_in_projection_contour(
+        self,
+    ) -> None:
+        verification, raw = self._exact_saturation_evidence_fixture()
+        validated = self._validate_exact_saturation_fixture(verification, raw)
+        self.assertEqual(validated["projection"]["entity_count"], 101_604)
+        self.assertEqual(
+            validated["projection"]["entity_type_counts"],
+            {
+                "Artifact": 100_000,
+                "Task": 1_599,
+                "Grant": 4,
+                "Candidate": 1,
+            },
+        )
+        self.assertEqual(raw["operation"]["semantic_ingestion"]["commit_count"], 1_604)
+
+        missing_candidate = json.loads(json.dumps(verification))
+        del missing_candidate["projection"]["entity_type_counts"]["Candidate"]
+        missing_candidate["projection"]["entity_count"] = 101_603
+        with self.assertRaisesRegex(EvidenceError, "entity contour shape is invalid"):
+            self._validate_exact_saturation_fixture(missing_candidate, raw)
+
+        tampered_candidate = json.loads(json.dumps(verification))
+        tampered_candidate["projection"]["entity_type_counts"]["Candidate"] = 0
+        tampered_candidate["projection"]["entity_count"] = 101_603
+        with self.assertRaisesRegex(EvidenceError, "entity contour is not exact"):
+            self._validate_exact_saturation_fixture(tampered_candidate, raw)
+
+        stale_commit_count = json.loads(json.dumps(raw))
+        stale_commit_count["operation"]["semantic_ingestion"]["commit_count"] = 1_603
+        with self.assertRaisesRegex(
+            EvidenceError,
+            "contract predicates cannot be recomputed",
+        ):
+            self._validate_exact_saturation_fixture(verification, stale_commit_count)
 
     def test_fresh_semantic_corpus_rejects_every_reuse_signal(self) -> None:
         corpus = {

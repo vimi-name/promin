@@ -624,6 +624,8 @@ class _StorageRunTelemetry:
         self.files = files
         self.queries = queries
         self.reuse_product = reuse_product
+        self.performance_profile = str(performance_contract["profile_id"])
+        self.performance_contract_digest = _digest(performance_contract)
         self.headroom_bytes = headroom_bytes
         self.plan = _storage_growth_plan(
             performance_contract,
@@ -646,6 +648,67 @@ class _StorageRunTelemetry:
         self._sampler: threading.Thread | None = None
         self._reserve_path = self.output / ".storage-failure-reserve.bin"
         self._output_created = False
+        self._prepared = False
+        self._output_identity: dict[str, int] | None = None
+        self._terminal_observed = False
+        self._terminal_free_space: list[dict[str, Any]] = []
+        self._terminal_telemetry_error: str | None = None
+
+    @staticmethod
+    def _directory_identity(state: os.stat_result) -> dict[str, int]:
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+        return {
+            "device": int(state.st_dev),
+            "inode": int(state.st_ino),
+            "file_type": int(stat.S_IFMT(state.st_mode)),
+            "reparse_attributes": int(
+                getattr(state, "st_file_attributes", 0)
+            )
+            & reparse_flag,
+        }
+
+    def _bind_output_identity(self) -> None:
+        try:
+            state = os.lstat(self.output)
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"output directory identity is unavailable: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+        attributes = int(getattr(state, "st_file_attributes", 0))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+        if not stat.S_ISDIR(state.st_mode) or attributes & reparse_flag:
+            raise StorageBudgetError(
+                "output destination must be a physical directory, not a symlink or reparse point",
+                failure_code="storage-telemetry-unavailable",
+            )
+        self._output_identity = self._directory_identity(state)
+
+    def _assert_output_identity(self) -> None:
+        if self._output_identity is None:
+            raise StorageBudgetError(
+                "output directory physical identity was not bound",
+                failure_code="storage-telemetry-unavailable",
+            )
+        try:
+            state = os.lstat(self.output)
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"output directory physical identity is unavailable: {exc}",
+                failure_code="storage-telemetry-unavailable",
+            ) from exc
+        attributes = int(getattr(state, "st_file_attributes", 0))
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+        observed = self._directory_identity(state)
+        if (
+            not stat.S_ISDIR(state.st_mode)
+            or attributes & reparse_flag
+            or observed != self._output_identity
+        ):
+            raise StorageBudgetError(
+                "output directory physical identity changed during saturation",
+                failure_code="storage-telemetry-unavailable",
+            )
 
     def _role_space(self) -> dict[str, dict[str, Any]]:
         return {
@@ -700,7 +763,9 @@ class _StorageRunTelemetry:
             raise SaturationError("output directory already exists")
         self.output.mkdir(parents=True, exist_ok=False)
         self._output_created = True
+        self._bind_output_identity()
         try:
+            self._assert_output_identity()
             with self._reserve_path.open("xb") as handle:
                 block = bytes(64 * 1024)
                 remaining = _STORAGE_FAILURE_RESERVE_BYTES
@@ -711,6 +776,7 @@ class _StorageRunTelemetry:
                 handle.flush()
                 os.fsync(handle.fileno())
         except OSError as exc:
+            self._assert_output_identity()
             self._reserve_path.unlink(missing_ok=True)
             raise StorageBudgetError(
                 f"storage failure receipt reserve could not be allocated: {exc}",
@@ -765,8 +831,11 @@ class _StorageRunTelemetry:
             daemon=True,
         )
         self._sampler.start()
+        self._prepared = True
 
     def _observe_free_space(self) -> list[dict[str, Any]]:
+        if self._output_created:
+            self._assert_output_identity()
         current = self._role_space()
         by_volume: dict[str, dict[str, Any]] = {}
         for role, record in current.items():
@@ -923,7 +992,38 @@ class _StorageRunTelemetry:
             value["workload_reduced"] = False
         return value
 
+    def _stop_sampler(self) -> None:
+        self._stop.set()
+        if self._sampler is None:
+            return
+        self._sampler.join(timeout=2.0)
+        if self._sampler.is_alive():
+            with self._lock:
+                if self._sampling_error is None:
+                    self._sampling_error = (
+                        "storage sampler did not stop before terminal classification"
+                    )
+
+    def _observe_terminal_free_space(self) -> None:
+        if self._terminal_observed:
+            return
+        self._stop_sampler()
+        self._terminal_observed = True
+        try:
+            self._terminal_free_space = (
+                self._observe_free_space() if self._volume_roles else []
+            )
+        except Exception as telemetry_error:
+            self._terminal_free_space = []
+            self._terminal_telemetry_error = str(telemetry_error)
+            with self._lock:
+                if self._sampling_error is None:
+                    self._sampling_error = str(telemetry_error)
+
     def failure_code(self, error: BaseException) -> str | None:
+        # This is the sole terminal observation.  Receipt publication consumes
+        # the captured values so no later probe can change the classification.
+        self._observe_terminal_free_space()
         direct = _storage_failure_code(error)
         if direct is not None:
             return direct
@@ -937,33 +1037,45 @@ class _StorageRunTelemetry:
     def _release_reserve(self) -> None:
         if not self._output_created:
             return
-        try:
-            self._reserve_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        self._assert_output_identity()
+        self._reserve_path.unlink(missing_ok=True)
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._sampler is not None:
-            self._sampler.join(timeout=2.0)
-        self._release_reserve()
+    def stop(self, *, suppress_identity_error: bool = False) -> None:
+        self._stop_sampler()
+        try:
+            self._release_reserve()
+        except (OSError, StorageBudgetError):
+            if not suppress_identity_error:
+                raise
+
+    def _remove_result_if_present(self) -> None:
+        self._assert_output_identity()
+        (self.output / "saturation-result.json").unlink(missing_ok=True)
+
+    def _write_failure_receipt_once(
+        self, path: Path, receipt: Mapping[str, Any]
+    ) -> None:
+        self._assert_output_identity()
+        payload = _canonical_bytes(receipt)
+        with path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def publish_failure(self, error: BaseException, failure_code: str) -> Path | None:
-        self.stop()
+        self._stop_sampler()
         if not self._output_created:
             try:
                 self.output.mkdir(parents=True, exist_ok=False)
                 self._output_created = True
+                self._bind_output_identity()
             except OSError:
                 return None
-        (self.output / "saturation-result.json").unlink(missing_ok=True)
         try:
-            terminal_space = self._observe_free_space() if self._volume_roles else []
-        except Exception as telemetry_error:
-            terminal_space = []
-            terminal_telemetry_error = str(telemetry_error)
-        else:
-            terminal_telemetry_error = None
+            self._release_reserve()
+            self._remove_result_if_present()
+        except (OSError, StorageBudgetError):
+            return None
         archive_binding: dict[str, Any] | None = None
         if self.archive is not None:
             try:
@@ -1016,8 +1128,8 @@ class _StorageRunTelemetry:
                 "commit_checkpoint_digest": _digest(self.checkpoint_measurements),
                 "commit_checkpoint_tail": checkpoint_tail,
                 "minimum_free_bytes_by_volume": minimum_free,
-                "terminal_free_space": terminal_space,
-                "terminal_telemetry_error": terminal_telemetry_error,
+                "terminal_free_space": self._terminal_free_space,
+                "terminal_telemetry_error": self._terminal_telemetry_error,
                 "headroom_breach": breach,
                 "sampling_error": sampling_error,
                 "external_disk_pressure_attribution": "not-inferred-from-free-space",
@@ -1026,9 +1138,127 @@ class _StorageRunTelemetry:
         receipt = {**identity, "receipt_digest": _digest(identity)}
         path = self.output / "saturation-storage-failure.json"
         try:
-            _write_json(path, receipt)
+            self._write_failure_receipt_once(path, receipt)
         except OSError:
             return None
+        return path
+
+    def publish_rejection(self, error: BaseException) -> Path | None:
+        """Publish one fail-closed receipt after an acquired, prepared run fails."""
+
+        if not self._prepared or not self._output_created:
+            return None
+        self._stop_sampler()
+        self._release_reserve()
+        self._remove_result_if_present()
+
+        archive_binding: dict[str, Any]
+        if self.archive is None:
+            archive_identity = {
+                "available": False,
+                "requested_path": None,
+            }
+        else:
+            requested_archive = Path(os.path.abspath(self.archive))
+            try:
+                archive_path = requested_archive.resolve(strict=True)
+                archive_payload = _read_stable_file(archive_path)
+            except (OSError, SaturationError) as archive_error:
+                archive_identity = {
+                    "available": False,
+                    "requested_path": str(requested_archive),
+                    "binding_error": str(archive_error),
+                }
+            else:
+                archive_identity = {
+                    "available": True,
+                    "requested_path": str(requested_archive),
+                    "resolved_path": str(archive_path),
+                    "name": archive_path.name,
+                    "bytes": len(archive_payload),
+                    "sha256": _sha256_bytes(archive_payload),
+                }
+        archive_binding = {
+            **archive_identity,
+            "binding_digest": _digest(archive_identity),
+        }
+
+        tool_path = Path(__file__).resolve(strict=True)
+        tool_payload = _read_stable_file(tool_path)
+        tool_identity = {
+            "path": "tools/promin_saturation.py",
+            "resolved_path": str(tool_path),
+            "bytes": len(tool_payload),
+            "sha256": _sha256_bytes(tool_payload),
+        }
+        tool_binding = {
+            **tool_identity,
+            "binding_digest": _digest(tool_identity),
+        }
+        with self._lock:
+            minimum_free = dict(sorted(self._minimum_free_bytes.items()))
+            breach = dict(self._breach) if self._breach is not None else None
+            sampling_error = self._sampling_error
+        checkpoint_tail = self.checkpoint_measurements[-512:]
+        storage_identity = {
+            "preflight": self.preflight,
+            "growth_plan": self.plan,
+            "headroom_bytes": self.headroom_bytes,
+            "phase_measurements": [
+                self.phase_measurements[key] for key in self.phase_measurements
+            ],
+            "commit_checkpoint_count": len(self.checkpoint_measurements),
+            "commit_checkpoint_digest": _digest(self.checkpoint_measurements),
+            "commit_checkpoint_tail": checkpoint_tail,
+            "minimum_free_bytes_by_volume": minimum_free,
+            "terminal_free_space": self._terminal_free_space,
+            "terminal_telemetry_error": self._terminal_telemetry_error,
+            "headroom_breach": breach,
+            "sampling_error": sampling_error,
+            "external_disk_pressure_attribution": "not-inferred-from-free-space",
+        }
+        storage_binding = {
+            **storage_identity,
+            "binding_digest": _digest(storage_identity),
+        }
+        workspace_exists = self.workspace.exists()
+        identity = {
+            "schema": "promin.saturation-failure.v1",
+            "record_type": "SaturationFailure",
+            "status": "rejected",
+            "failure_code": "saturation-rejected",
+            "reason": str(error),
+            "exception_type": type(error).__name__,
+            "started_at": self.started_at,
+            "completed_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "pass_credit": False,
+            "acceptance_pass": False,
+            "product_acceptance_pass": False,
+            "public_release_approved": False,
+            "workload": {
+                "physical_files": self.files,
+                "runtime_queries": self.queries,
+                "core_valid_relations": _EXACT_CORE_VALID_RELATIONS,
+                "performance_profile": self.performance_profile,
+                "performance_contract_digest": self.performance_contract_digest,
+                "reuse_product": self.reuse_product,
+                "workload_reduced": False,
+            },
+            "archive_binding": archive_binding,
+            "tool_binding": tool_binding,
+            "storage": storage_binding,
+            "workspace": {
+                "path": str(self.workspace),
+                "exists": workspace_exists,
+                "preservation_verified": False,
+            },
+            "saturation_result_written": False,
+        }
+        receipt = {**identity, "receipt_digest": _digest(identity)}
+        path = self.output / "saturation-failure.json"
+        self._write_failure_receipt_once(path, receipt)
         return path
 
 
@@ -3443,6 +3673,38 @@ def _projection_database_bytes(workspace: Path) -> int:
     return size
 
 
+def _projection_entity_type_counts(workspace: Path) -> dict[str, int]:
+    path = workspace / ".promin" / "state" / "projection" / "promin.sqlite3"
+    if path.is_symlink() or not path.is_file():
+        raise SaturationError("projection database is unavailable or is a symlink")
+    uri = path.resolve(strict=True).as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT entity_type,count(*) FROM entities "
+                "GROUP BY entity_type ORDER BY entity_type"
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise SaturationError(f"projection entity type count query failed: {exc}") from exc
+    counts: dict[str, int] = {}
+    for entity_type, count in rows:
+        if (
+            not isinstance(entity_type, str)
+            or not entity_type
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 1
+        ):
+            raise SaturationError("projection entity type count row is invalid")
+        counts[entity_type] = count
+    if not counts:
+        raise SaturationError("projection entity type counts are empty")
+    return counts
+
+
 def _projection_inventory_integrity(workspace: Path, expected_files: int) -> dict[str, int]:
     path = workspace / ".promin" / "state" / "projection" / "promin.sqlite3"
     uri = path.resolve(strict=True).as_uri() + "?mode=ro"
@@ -3615,9 +3877,14 @@ def _guard_storage_run(operation: Any) -> Any:
                         f"saturation failed closed on {failure_code}: {exc}{receipt_suffix}",
                         failure_code=failure_code,
                     ) from exc
+            elif isinstance(exc, (OSError, ValueError, SaturationError)):
+                try:
+                    telemetry.publish_rejection(exc)
+                except Exception:
+                    pass
             raise
         finally:
-            telemetry.stop()
+            telemetry.stop(suppress_identity_error=telemetry._terminal_observed)
             _ACTIVE_STORAGE_TELEMETRY.reset(token)
 
     return guarded
@@ -3792,10 +4059,17 @@ def run(
             f"projection produced {relation_count} Core-valid Relations; "
             f"exactly {_EXACT_CORE_VALID_RELATIONS} required"
         )
-    minimum_entities = files + semantic_corpus["task_count"] + len(_CORPUS_GRANT_IDS)
-    if entity_count != minimum_entities:
+    expected_entity_type_counts = {
+        "Artifact": files,
+        "Candidate": 1,
+        "Grant": len(_CORPUS_GRANT_IDS),
+        "Task": semantic_corpus["task_count"],
+    }
+    expected_entity_count = sum(expected_entity_type_counts.values())
+    if entity_count != expected_entity_count:
         raise SaturationError(
-            f"projection entity count {entity_count} differs from exact fixture count {minimum_entities}"
+            f"projection entity count {entity_count} differs from exact fixture count "
+            f"{expected_entity_count}"
         )
 
     semantic_digest = _field(first_rebuild, "semantic_digest")
@@ -3817,6 +4091,16 @@ def run(
         raise SaturationError("projection rebuild semantic digest differs from initial build")
     if _field(second_rebuild, "implementation_closure_digest") != implementation_closure_digest:
         raise SaturationError("projection rebuild implementation closure differs from initial build")
+    if int(_field(second_rebuild, "entity_count", -1)) != entity_count:
+        raise SaturationError("projection rebuild entity count differs from initial build")
+    entity_type_counts = _projection_entity_type_counts(workspace)
+    if entity_type_counts != expected_entity_type_counts:
+        raise SaturationError(
+            "projection entity type counts differ from exact fixture contour: "
+            f"observed={entity_type_counts!r} expected={expected_entity_type_counts!r}"
+        )
+    if sum(entity_type_counts.values()) != entity_count:
+        raise SaturationError("projection entity type counts do not sum to entity_count")
     database_bytes = _projection_database_bytes(workspace)
     reported_database_bytes = int(_field(second_rebuild, "projection_db_bytes", -1))
     if reported_database_bytes != database_bytes:
@@ -4111,6 +4395,9 @@ def run(
     )
     commit_p95_ms = _percentile(commit_latencies_ms, 0.95)
     commit_p99_ms = _percentile(commit_latencies_ms, 0.99)
+    expected_semantic_commit_count = (
+        len(_CORPUS_GRANT_IDS) + 1 + semantic_corpus["task_count"]
+    )
     performance = _performance_result(
         performance_contract,
         p50_ms=p50_ms,
@@ -4164,7 +4451,7 @@ def run(
         "exact_artifact_search_verified": exact_artifact_search_verified,
         "mixed_query_classes_complete": mixed_query_classes_complete,
         "semantic_commit_count_exact": len(semantic_commit_observations)
-        == 3 + search_corpus["task_count"] + physical_relation_corpus["task_count"],
+        == expected_semantic_commit_count,
         "silent_truncations_zero": True,
         "continuation_token_bytes_at_most_256": maximum_continuation_token_bytes <= 256,
         "continuation_state_bytes_at_most_16384": 0
@@ -4284,6 +4571,7 @@ def run(
             "semantic_digest": semantic_digest,
             "implementation_closure_digest": implementation_closure_digest,
             "entity_count": entity_count,
+            "entity_type_counts": entity_type_counts,
             "relation_count": relation_count,
             "database_bytes": database_bytes,
             "projection_amplification": round(projection_amplification, 9),
@@ -4638,6 +4926,18 @@ def self_check(performance_profile: str = "portable-local-v1") -> dict[str, Any]
         ]
     ]
     query_budget = _mixed_query_budget(ceiling)
+    expected_entity_type_counts = {
+        "Artifact": _EXACT_PHYSICAL_FILES,
+        "Candidate": 1,
+        "Grant": len(_CORPUS_GRANT_IDS),
+        "Task": manifest["task_count"] + physical_relations["task_count"],
+    }
+    expected_semantic_commit_count = (
+        len(_CORPUS_GRANT_IDS)
+        + 1
+        + manifest["task_count"]
+        + physical_relations["task_count"]
+    )
     if (
         manifest["task_count"] != _SEARCH_FIXTURE_TASK_COUNT
         or manifest["relation_count"] != _SEARCH_FIXTURE_RELATION_COUNT
@@ -4664,6 +4964,8 @@ def self_check(performance_profile: str = "portable-local-v1") -> dict[str, Any]
         or physical_relations["task_count"] != 1_567
         or manifest["relation_count"] + physical_relations["relation_count"]
         != _EXACT_CORE_VALID_RELATIONS
+        or sum(expected_entity_type_counts.values()) != 101_604
+        or expected_semantic_commit_count != 1_604
     ):
         raise SaturationError("executable semantic corpus differs from its canonical counts")
     if _percentile([1.0, 2.0, 3.0, 4.0], 0.95) != 4.0:
@@ -4687,6 +4989,11 @@ def self_check(performance_profile: str = "portable-local-v1") -> dict[str, Any]
             )
         },
         "physical_relation_corpus": physical_relations,
+        "projection_fixture": {
+            "entity_count": sum(expected_entity_type_counts.values()),
+            "entity_type_counts": expected_entity_type_counts,
+            "semantic_commit_count": expected_semantic_commit_count,
+        },
         "mixed_query_plan": {
             "depths": sorted({depth for _query_class, depth in query_plan}),
             "physical_query_depth": 1,

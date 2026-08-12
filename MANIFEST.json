@@ -58,7 +58,7 @@
     },
     {
       "path": "VERSION.json",
-      "sha256": "f456a52156cc6a26026b58f1c65b3b45ae02839876560165da5467a68acacde6",
+      "sha256": "f816d16c649d3c31d5d04c57b187251eaeaf59ab7cafe4b6054d1f04a4d60a9b",
       "size": 469
     },
     {
@@ -83,8 +83,8 @@
     },
     {
       "path": "core/contracts.schema.json",
-      "sha256": "3f0bf8b1782fe0279efed115b2274424afcf65f1ea747ce19a96ffb0116683bc",
-      "size": 691316
+      "sha256": "85df4f4ee748db25c79a290e4a7137dc910626ef6105eba2e36b7c80ecbfab26",
+      "size": 692073
     },
     {
       "path": "core/policy-set.json",
@@ -93,7 +93,7 @@
     },
     {
       "path": "core/promin.manifest.json",
-      "sha256": "f7ab78842118db5439c18ec0635a9bf949e01adf2e8e4e4d93a630a61db5a012",
+      "sha256": "74b58f7a5f5b5c05aa8bb2461db00d4359886a139a0e1085fca4dc6d36958cc0",
       "size": 1407
     },
     {
@@ -228,8 +228,8 @@
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
-      "sha256": "0225bc5abd364d208d3cb1fbec2fdcdc45b017d6f527f308f33860fa25b9084d",
-      "size": 4178
+      "sha256": "5d1a0f85d6ae90e430f3a2bb58171ef5d6d13fb981d143a8d534448c7e0e4231",
+      "size": 6313
     },
     {
       "path": "examples/project-brief.json",
@@ -408,8 +408,8 @@
     },
     {
       "path": "promin/conformance.py",
-      "sha256": "2b9906eb5d66a5867dd356134e4d7a2b7239dcea28a8dbbec9a8e2675c008d54",
-      "size": 196621
+      "sha256": "e0353010f0e3b4d1b19dc056965daaac5e9206057c43222d53174f5118f52db8",
+      "size": 197301
     },
     {
       "path": "promin/context_index.py",
@@ -448,8 +448,8 @@
     },
     {
       "path": "promin/evidence.py",
-      "sha256": "75105d7eec472d9840c060f1d1f6c16c3d138d562ee857a6aad9d175795b5f80",
-      "size": 317221
+      "sha256": "ccefc3210f28798272df478a541b48ae140d205f24e886f66b9b353a8ba48091",
+      "size": 318552
     },
     {
       "path": "promin/experience.py",
@@ -908,8 +908,8 @@
     },
     {
       "path": "tests/test_contract_mutations.py",
-      "sha256": "9547eeba206e5bfd63d900dc086a53ebde7ddc9b9f47eff3edf15398446f0449",
-      "size": 92832
+      "sha256": "3e0291ae924d9411c6b8f5664e7ce042941758992a5a058fb9eb24347a2c7b52",
+      "size": 95210
     },
     {
       "path": "tests/test_events_projection.py",
@@ -1013,8 +1013,8 @@
     },
     {
       "path": "tests/test_heavy_saturation_storage_budget.py",
-      "sha256": "96ab99b1e31b786187e85a1fa9ab4be097234305f63daa306f192e6967c38b89",
-      "size": 12603
+      "sha256": "11c76c2ccfa8f6d7a5d2ebe9198785037756019eda21d5d3792c5c3e5fb4f0de",
+      "size": 21872
     },
     {
       "path": "tests/test_heavy_state_binding_storage.py",
@@ -1043,8 +1043,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "a718858a347ed8459c840024608cd2ff887af1e958e0871b4f84419275261bed",
-      "size": 64004
+      "sha256": "6ca44582c18578ef5c1effce38e84215ffcc847398529cd7b5462b27db6ec088",
+      "size": 66356
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1053,13 +1053,13 @@
     },
     {
       "path": "tests/test_scale_orchestration.py",
-      "sha256": "1ecb9ef1e4e9d5b442a6a7539b7147b7fbdcdd3f07bba567246e183ec3a9fd57",
-      "size": 70506
+      "sha256": "a135893c151f7fdf5e7290aba26807c59763116e9d0909a648f4d23d97d34770",
+      "size": 82701
     },
     {
       "path": "tests/test_search_scale.py",
-      "sha256": "610b4ee629bc0a88888e70d898a8308c1e95b4d0bbe9fdd93463715043c7654d",
-      "size": 60576
+      "sha256": "d0be4676e259eedad8bc4b1334924def6d8d39147e83f785c7d842dc719fe92d",
+      "size": 63115
     },
     {
       "path": "tests/test_service_cli.py",
@@ -1073,8 +1073,8 @@
     },
     {
       "path": "tools/compile_schema.py",
-      "sha256": "da635b01c387ae7b6ebf1c05ea49898122d40dad840aa3e9771f634df508019a",
-      "size": 361528
+      "sha256": "4f43b5277937cf45acca005aafd5dd0c4c4b857b1d792f61f6ee55d029438e74",
+      "size": 362081
     },
     {
       "path": "tools/generate_human.py",
@@ -1128,13 +1128,13 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "b423c123434daca73b90c80e950dfa6ca05d3af65c757585f883a742a6061cd8",
-      "size": 195239
+      "sha256": "672762ec4a25e701764174b88464deef52a711bb0df1bb6b7454214c3c8299e1",
+      "size": 208203
     },
     {
       "path": "tools/promin_saturation_audit.py",
-      "sha256": "0a599839b1c3ebdd6986700724ce7dca32eeb62c99c4805b035c7a7e36591c77",
-      "size": 89411
+      "sha256": "b14754f98f2fa9a214c7202cfbe5c54a40e89cf19aee162ca6d80259f2517906",
+      "size": 89880
     },
     {
       "path": "tools/promin_service.py",

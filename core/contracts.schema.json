@@ -18812,7 +18812,33 @@
           "properties": {
             "database_bytes": {},
             "elapsed_ms": {},
-            "entity_count": {},
+            "entity_count": {
+              "const": 101604
+            },
+            "entity_type_counts": {
+              "additionalProperties": false,
+              "properties": {
+                "Artifact": {
+                  "const": 100000
+                },
+                "Candidate": {
+                  "const": 1
+                },
+                "Grant": {
+                  "const": 4
+                },
+                "Task": {
+                  "const": 1599
+                }
+              },
+              "required": [
+                "Artifact",
+                "Candidate",
+                "Grant",
+                "Task"
+              ],
+              "type": "object"
+            },
             "equal_semantic_digest": {},
             "implementation_closure_digest": {
               "$ref": "#/$defs/Digest"
@@ -18824,7 +18850,9 @@
             "projection_amplification": {},
             "rebuild_inventory_passes": {},
             "rebuild_product_passes": {},
-            "relation_count": {},
+            "relation_count": {
+              "const": 198999
+            },
             "semantic_digest": {},
             "semantic_inflation": {}
           },
@@ -18832,6 +18860,7 @@
             "database_bytes",
             "elapsed_ms",
             "entity_count",
+            "entity_type_counts",
             "equal_semantic_digest",
             "implementation_closure_digest",
             "initial_inventory_passes",

@@ -3883,6 +3883,13 @@ _SATURATION_SEMANTIC_REUSE_FIELDS = (
     "search_fixture_reused",
     "physical_relation_fixture_reused",
 )
+_SATURATION_PROJECTION_ENTITY_TYPE_COUNTS = {
+    "Artifact": 100_000,
+    "Task": 1_599,
+    "Grant": 4,
+    "Candidate": 1,
+}
+_SATURATION_SEMANTIC_COMMIT_ENTITY_TYPES = ("Grant", "Candidate", "Task")
 
 
 def _validate_saturation_fresh_semantic_corpus(
@@ -3927,6 +3934,31 @@ def _validate_saturation_fresh_semantic_corpus(
             "fresh saturation semantic corpus shape or exact counts are invalid"
         )
     return deepcopy(dict(value))
+
+
+def _validate_saturation_projection_entity_contour(
+    projection: Any,
+) -> dict[str, int]:
+    if not isinstance(projection, Mapping):
+        raise EvidenceError("saturation projection entity contour is missing")
+    entity_type_counts = projection.get("entity_type_counts")
+    expected_counts = _SATURATION_PROJECTION_ENTITY_TYPE_COUNTS
+    if (
+        not isinstance(entity_type_counts, Mapping)
+        or set(entity_type_counts) != set(expected_counts)
+        or any(type(count) is not int for count in entity_type_counts.values())
+    ):
+        raise EvidenceError("saturation projection entity contour shape is invalid")
+    counts = dict(entity_type_counts)
+    expected_entity_count = sum(expected_counts.values())
+    if (
+        counts != expected_counts
+        or type(projection.get("entity_count")) is not int
+        or projection["entity_count"] != expected_entity_count
+        or projection["entity_count"] != sum(counts.values())
+    ):
+        raise EvidenceError("saturation projection entity contour is not exact")
+    return counts
 
 
 def validate_saturation_evidence(
@@ -3995,6 +4027,11 @@ def validate_saturation_evidence(
     )
     corpus = _validate_saturation_fresh_semantic_corpus(
         physical.get("explicit_semantic_corpus")
+    )
+    entity_type_counts = _validate_saturation_projection_entity_contour(projection)
+    expected_semantic_commit_count = sum(
+        entity_type_counts[entity_type]
+        for entity_type in _SATURATION_SEMANTIC_COMMIT_ENTITY_TYPES
     )
     if (
         physical.get("files") != 100_000
@@ -4193,9 +4230,7 @@ def validate_saturation_evidence(
         "runtime_query_budget_bounded": isinstance(search.get("runtime_query_budget"), Mapping),
         "selected_closure_union_complete": search.get("selected_closure_union_completeness") == 1.0,
         "semantic_commit_count_exact": semantic_ingestion.get("commit_count")
-        == 3
-        + (corpus.get("search_fixture", {}).get("task_count", -1) if isinstance(corpus, Mapping) else -1)
-        + (relation_fixture.get("task_count", -1) if isinstance(relation_fixture, Mapping) else -1),
+        == expected_semantic_commit_count,
         "silent_truncations_zero": search.get("silent_truncations") == 0,
         "synthetic_task_ratio_zero": physical.get("synthetic_task_ratio") == 0.0,
     }
