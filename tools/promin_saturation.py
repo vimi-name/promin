@@ -40,9 +40,11 @@ else:
     sys.path.insert(1, str(TOOLS_ROOT))
 
 from promin.evidence import (
+    EvidenceError,
     release_evidence_invocation,
     release_evidence_producer,
     seal_release_evidence,
+    validate_release_archive_basename,
     validate_saturation_evidence,
 )
 
@@ -1569,6 +1571,10 @@ def build_artifact_binding(package_root: Path, archive: Path | None) -> dict[str
     archive_path = archive_source.resolve(strict=True)
     if not archive_path.is_file():
         raise SaturationError("exact archive must be a regular non-symlink file")
+    try:
+        archive_name = validate_release_archive_basename(archive_path.name)
+    except EvidenceError as exc:
+        raise SaturationError(str(exc)) from exc
     archive_bytes = _read_stable_file(archive_path)
 
     version_bytes = (root / "VERSION.json").read_bytes()
@@ -1746,7 +1752,7 @@ def build_artifact_binding(package_root: Path, archive: Path | None) -> dict[str
         "record_type": "ExactArtifactBinding",
         "protocol_version": EVIDENCE_PROTOCOL_VERSION,
         "archive": {
-            "name": archive_path.name,
+            "name": archive_name,
             "sha256": "sha256:" + _sha256_bytes(archive_bytes),
             "bytes": len(archive_bytes),
             "member_count": len(expected_members),
@@ -3272,6 +3278,37 @@ def _continuation_state_metrics(
     }
 
 
+def _continuation_state_within_limit(metrics: Mapping[str, Any]) -> bool:
+    if set(metrics) != {
+        "files",
+        "maximum_bytes",
+        "total_bytes",
+        "preexisting_files_excluded",
+    }:
+        return False
+    files = metrics.get("files")
+    maximum_bytes = metrics.get("maximum_bytes")
+    total_bytes = metrics.get("total_bytes")
+    preexisting = metrics.get("preexisting_files_excluded")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in (files, maximum_bytes, total_bytes, preexisting)
+    ):
+        return False
+    return (
+        preexisting >= 0
+        and (
+            (files == 0 and maximum_bytes == 0 and total_bytes == 0)
+            or (
+                files >= 1
+                and 1 <= maximum_bytes <= 16_384
+                and total_bytes >= maximum_bytes
+                and files <= total_bytes <= files * maximum_bytes
+            )
+        )
+    )
+
+
 def _continuation_state_rows(
     workspace: Path,
     *,
@@ -4561,9 +4598,9 @@ def run(
         == expected_semantic_commit_count,
         "silent_truncations_zero": True,
         "continuation_token_bytes_at_most_256": maximum_continuation_token_bytes <= 256,
-        "continuation_state_bytes_at_most_16384": 0
-        < continuation_state["maximum_bytes"]
-        <= 16_384,
+        "continuation_state_bytes_at_most_16384": _continuation_state_within_limit(
+            continuation_state
+        ),
         "continuation_token_overhead_at_most_10_percent": (
             maximum_continuation_token_bytes * 10 <= ceiling["max_bytes"]
         ),
@@ -4605,9 +4642,9 @@ def run(
         "exact_artifact_search_verified": exact_artifact_search_verified,
         "mixed_query_classes_complete": mixed_query_classes_complete,
         "continuation_token_bytes_at_most_256": maximum_continuation_token_bytes <= 256,
-        "continuation_state_bytes_at_most_16384": 0
-        < continuation_state["maximum_bytes"]
-        <= 16_384,
+        "continuation_state_bytes_at_most_16384": _continuation_state_within_limit(
+            continuation_state
+        ),
         "continuation_token_overhead_at_most_10_percent": (
             maximum_continuation_token_bytes * 10 <= ceiling["max_bytes"]
         ),

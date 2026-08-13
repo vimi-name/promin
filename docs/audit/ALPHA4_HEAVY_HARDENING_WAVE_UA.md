@@ -153,6 +153,85 @@ Malformed fail-result не публікується.
 а новий exact 100k та дворазові Windows/Linux aggregates залишаються наступним
 evidence-кроком. Жоден із наведених diagnostic результатів не є release acceptance.
 
+## R6 100k — повний workload, schema-відхилення і performance fail
+
+Детермінований same-version ZIP
+`promin-1.0.0-alpha.4-heavy-verified-r6.zip` має SHA-256
+`b0b23f3576b5118fdcf33c605b5d4e29e4e2539df537ceb8d3f83dcb89708f54`.
+Fresh foreground run у
+`D:\ProminValidation\alpha4-r6-100k-b0b23f3576b5-20260812T152137953Z`
+завершив exact незменшений workload: EventStore HEAD `1604`, `200603` events,
+`100000` physical files і `600` runtime queries. Storage measurements наявні для
+`preflight`, `physical-generation`, `inventory`, `semantic-ingestion`, `projection`,
+`runtime-queries` та фінального `result` checkpoint. Але sealed
+`saturation-result.json` не був опублікований: launcher завершився
+`LAUNCHER_REJECTED_NO_PASS_CREDIT` о `2026-08-12T17:56:11Z`.
+
+Причина публікаційної відмови точна: четвертий елемент raw-artifact manifest,
+`raw/continuation-state-manifest.jsonl`, фізично існує, але має законні для
+stateless continuation `bytes=0`, `records=0` і SHA-256 порожнього payload
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+Стара Schema вимагала мінімум один byte для всіх ролей. Terminal failure receipt:
+`evidence/saturation-failure.json`, SHA-256
+`c16b3729056f7992da59dcf100bf46620aee9638e1ea8552eda020ddba623c54`;
+його `receipt_digest` —
+`5fbd02f233da781384cda44dfe73eca234ceb08cad870fc9d962d87bf04e0d98`.
+R6 збережено як terminal rejected evidence і не підлягає повторному запуску або
+ретроактивному зарахуванню.
+
+Сам workload також чесно не вклався у profile `portable-local-v1`. Не пройшли
+semantic ingestion `5399.621207 s > 600 s`, commit p95/p99
+`4285.4479/9164.8388 ms > 500/1000 ms`, query p50/p95/p99
+`483.5423/589.7476/828.9208 ms > 100/150/500 ms` та peak RSS
+`1257553920 > 805306368` bytes. Отже schema seam не приховує окремий performance
+fail: усі acceptance, product, public-release і pass-credit claims залишаються
+`false`.
+
+Вузький conditional-zero repair дозволяє лише ролі
+`continuation-state-manifest` атомарну пару `(bytes, records)=(0, 0)` або обидва
+додатні значення. Решта п'ять raw artifacts і generic JSONL parser залишаються
+обов'язково непорожніми; empty parsing є явним opt-in лише для continuation.
+Semantic validator зв'язує реальний payload, digest і точний summary
+`files=maximum_bytes=total_bytes=0`; змішані `(0,1)/(1,0)`, підміна role/path/media,
+неузгоджений summary та нульовий required artifact fail closed. Окремий focused
+suite має `19 passed`; інтегрований repair-зріз — `22 passed, 35 deselected`.
+Незалежний review завершився `PASS` без P1/P2 findings. Це доводить вузький repair,
+але не є release або performance PASS.
+
+Read-only exact r6 replay перед r7 виявив другий deterministic publication seam.
+Producer правдиво записував фактичний versioned basename
+`promin-1.0.0-alpha.4-heavy-verified-r6.zip`, тоді як semantic validator
+hardcoded-очікував `promin.zip`. На незмінених ZIP bytes/SHA, candidate digest і
+member closure старий validator відтворювано давав RED:
+`EvidenceError: exact artifact archive binding is invalid`. Це була суперечність
+label policy, а не зміна вмісту кандидата.
+
+Repair повторно використовує portable safe-basename policy `final_admission` у
+producer і validator: один NFC `.zip` filename без separator/traversal/NUL/colon,
+reserved Windows stem або непереносного компонента. Фактичний basename лишається
+частиною signed `binding_digest`; перевірки bytes, SHA-256, member closure і
+candidate binding не змінені та не послаблені. Versioned r6/r7 basename проходить,
+unsafe basename після повторного підпису fail closed. Focused suite:
+`17 passed`; незалежний review завершився `PASS` без P1/P2 findings. Версія
+незмінна, `acceptance_pass=false`, `performance_acceptance=false`,
+`pass_credit=false`.
+
+Версія не змінена: `1.0.0-alpha.4` / `1.0.0a4`. Поточні repair bindings:
+Core bundle digest
+`04df51b05013baa8a40e1425a13825261924e33d200ca5d1dbf972651b73bcdb`,
+`core/contracts.schema.json` SHA-256
+`5f95e0bc177c728e3edcd6faddde6716c4d7d527a68cfbb2b1980bcc87b26c41`.
+Оновлений pre-refresh canonical inventory визначено як `246` files, `17`
+directories і `91` test selectors;
+package refresh та exact closure verification ще обов'язкові перед candidate r7.
+
+Наступний допустимий scale-крок — лише новий deterministic r7 з повністю
+перевіреної extraction, потім fresh foreground Windows exact 100k у новому root.
+R6 workspace повторно не використовується. Навіть schema-valid terminal
+`status=fail` не надає performance/product acceptance; після успішного terminal
+100k ще потрібні незалежний audit, Windows aggregates ×2, modeled Linux/WSL,
+fixed 72-bucket comparison, product inspection і клієнтський PDF.
+
 ## Truth tokens
 
 ```text

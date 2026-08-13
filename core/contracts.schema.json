@@ -18929,10 +18929,190 @@
             "artifacts": {
               "items": {
                 "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/x-ndjson"
+                      },
+                      "path": {
+                        "const": "raw/inventory-stream.jsonl"
+                      },
+                      "records": {
+                        "minimum": 1
+                      },
+                      "role": {
+                        "const": "inventory-stream"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/x-ndjson"
+                      },
+                      "path": {
+                        "const": "raw/query-results.jsonl"
+                      },
+                      "records": {
+                        "minimum": 1
+                      },
+                      "role": {
+                        "const": "query-results"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/json"
+                      },
+                      "path": {
+                        "const": "raw/process-samples.json"
+                      },
+                      "records": {
+                        "minimum": 1
+                      },
+                      "role": {
+                        "const": "process-samples"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "bytes": {
+                            "const": 0
+                          },
+                          "records": {
+                            "const": 0
+                          }
+                        },
+                        "required": [
+                          "bytes",
+                          "records"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "bytes": {
+                            "minimum": 1
+                          },
+                          "records": {
+                            "minimum": 1
+                          }
+                        },
+                        "required": [
+                          "bytes",
+                          "records"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "media_type": {
+                        "const": "application/x-ndjson"
+                      },
+                      "path": {
+                        "const": "raw/continuation-state-manifest.jsonl"
+                      },
+                      "role": {
+                        "const": "continuation-state-manifest"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/x-ndjson"
+                      },
+                      "path": {
+                        "const": "raw/phase-log.jsonl"
+                      },
+                      "records": {
+                        "minimum": 1
+                      },
+                      "role": {
+                        "const": "phase-log"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/json"
+                      },
+                      "path": {
+                        "const": "raw/operation-metrics.json"
+                      },
+                      "records": {
+                        "minimum": 1
+                      },
+                      "role": {
+                        "const": "operation-metrics"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  }
+                ],
                 "properties": {
                   "bytes": {
                     "maximum": 268435456,
-                    "minimum": 1,
+                    "minimum": 0,
                     "type": "integer"
                   },
                   "media_type": {
@@ -18947,7 +19127,7 @@
                   },
                   "records": {
                     "maximum": 100000,
-                    "minimum": 1,
+                    "minimum": 0,
                     "type": "integer"
                   },
                   "role": {

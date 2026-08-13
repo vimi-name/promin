@@ -58,7 +58,7 @@
     },
     {
       "path": "VERSION.json",
-      "sha256": "0c8c598e4c7966b827dc532530ad56b13a23f6d80fbc9a908ffce2336b9f8157",
+      "sha256": "5a59b7c9b66bc0ebe24456d58b10e068778dd4f8156b7a46983b6bfc4a3ba7a7",
       "size": 469
     },
     {
@@ -83,8 +83,8 @@
     },
     {
       "path": "core/contracts.schema.json",
-      "sha256": "5f5ca113af85f2aea852f4af0854b104c5453b400ba6874f80645f673f6d247f",
-      "size": 692073
+      "sha256": "5f95e0bc177c728e3edcd6faddde6716c4d7d527a68cfbb2b1980bcc87b26c41",
+      "size": 697953
     },
     {
       "path": "core/policy-set.json",
@@ -93,7 +93,7 @@
     },
     {
       "path": "core/promin.manifest.json",
-      "sha256": "6fea9e972384a8b14b6a7ed3936df8cf284a5e7d474b1a6a6f14f5ee29594c0f",
+      "sha256": "1465f161de4046fceb8414feccdd342d9823ea19ef40f9c02082c4bb543def94",
       "size": 1407
     },
     {
@@ -228,8 +228,8 @@
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
-      "sha256": "8effbf80b11c83ffb8f60549caaf8aea789c8697bcf7cc42a9ca1fca0f8b0b41",
-      "size": 14747
+      "sha256": "e7682bdefae8b86e773e65decc46677552b415057bff37527a7e907c4031bf7d",
+      "size": 20512
     },
     {
       "path": "examples/project-brief.json",
@@ -448,8 +448,8 @@
     },
     {
       "path": "promin/evidence.py",
-      "sha256": "ccefc3210f28798272df478a541b48ae140d205f24e886f66b9b353a8ba48091",
-      "size": 318552
+      "sha256": "9a02ab4e8e2ff5040b5e1ae9c73017c21f544a2ad718c7cbd09cfb6630c816bb",
+      "size": 321829
     },
     {
       "path": "promin/experience.py",
@@ -673,8 +673,8 @@
     },
     {
       "path": "tests/ALPHA4_TEST_SHARDS.json",
-      "sha256": "33aa719d76ba2fa2f2308463838765d1511cd858939be7fe672980cd946d84de",
-      "size": 9962
+      "sha256": "67d8ec105c4f9efb88aff80c9bdbf600c8f341183c34c4d9e676d2492b2133b6",
+      "size": 10180
     },
     {
       "path": "tests/test_alpha3_ingress_budget.py",
@@ -1088,8 +1088,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "1a9b0dcf9292df8cc5d740b57e0367e8f7bd01dbb6d1fe02c5b8926c334a3adb",
-      "size": 69268
+      "sha256": "1984e557c53c20c5d3cc4ec4984c526b27daa6b20c18d56f74329917a47604fc",
+      "size": 69389
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1102,9 +1102,19 @@
       "size": 8127
     },
     {
+      "path": "tests/test_saturation_archive_binding.py",
+      "sha256": "0793bf4c1d925df3a69eb48865dbd3724160fcb7a7ab3a6fe1e0156f7e3ced7c",
+      "size": 6387
+    },
+    {
+      "path": "tests/test_saturation_raw_artifact_cardinality.py",
+      "sha256": "9828f4aa1c6307b8e425b84675a188607e8cab46c0a0fccccb19ed4cf997d0f7",
+      "size": 8019
+    },
+    {
       "path": "tests/test_scale_orchestration.py",
-      "sha256": "80791065b580689e1e88c91a20033a204ed7be086957b5a3da1a22bc96f6eecb",
-      "size": 88905
+      "sha256": "819b8f73017f6fde353f127494bae12e705fd0ce2952011f55a281040cfe08fe",
+      "size": 89052
     },
     {
       "path": "tests/test_search_scale.py",
@@ -1123,8 +1133,8 @@
     },
     {
       "path": "tools/compile_schema.py",
-      "sha256": "f2c5ddedd5c9cb1de094f45f725cd040865a8bf026eaa5af2d49645f9fe5e057",
-      "size": 362081
+      "sha256": "6b2f10536d8853562c6f743de0378039c0d16839e33f0811fea65d8e816c4b27",
+      "size": 363580
     },
     {
       "path": "tools/generate_human.py",
@@ -1193,8 +1203,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "6083d468973d80802943e5467d425627758fa07a5471b595485e29e94c3a32d5",
-      "size": 211845
+      "sha256": "d837dac96e4553110b0ee4c7aa27016f9df56daf694f3ac829b7c47faff9a428",
+      "size": 213033
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1208,8 +1218,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "6f235a8b40b73ac374e0aae217f8340d968f0a10ea9b3cbc0128642e4f741a80",
-      "size": 142151
+      "sha256": "82eb4260044b4bdede92e1b546f01a9617b4be8bae1d3cad832a12707b3f2bb9",
+      "size": 142264
     }
   ],
   "generated_surfaces": [

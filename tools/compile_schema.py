@@ -5476,26 +5476,58 @@ def _compile_projection(
         no_degradation_overrides,
     )
 
+    saturation_raw_layout = {
+        "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson", False),
+        "query-results": ("raw/query-results.jsonl", "application/x-ndjson", False),
+        "process-samples": ("raw/process-samples.json", "application/json", False),
+        "continuation-state-manifest": (
+            "raw/continuation-state-manifest.jsonl",
+            "application/x-ndjson",
+            True,
+        ),
+        "phase-log": ("raw/phase-log.jsonl", "application/x-ndjson", False),
+        "operation-metrics": ("raw/operation-metrics.json", "application/json", False),
+    }
     saturation_raw_artifact = exact_keys(
         ("role", "path", "media_type", "sha256", "bytes", "records"),
         {
-            "role": {
-                "enum": [
-                    "inventory-stream",
-                    "query-results",
-                    "process-samples",
-                    "continuation-state-manifest",
-                    "phase-log",
-                    "operation-metrics",
-                ]
-            },
+            "role": {"enum": list(saturation_raw_layout)},
             "path": {"pattern": "^raw/", "type": "string"},
             "media_type": {"enum": ["application/json", "application/x-ndjson"]},
             "sha256": {"$ref": "#/$defs/Digest"},
-            "bytes": {"minimum": 1, "maximum": 268435456, "type": "integer"},
-            "records": {"minimum": 1, "maximum": 100000, "type": "integer"},
+            "bytes": {"minimum": 0, "maximum": 268435456, "type": "integer"},
+            "records": {"minimum": 0, "maximum": 100000, "type": "integer"},
         },
     )
+    saturation_raw_artifact["oneOf"] = []
+    for role, (path, media_type, permits_empty) in saturation_raw_layout.items():
+        role_shape: dict[str, Any] = {
+            "properties": {
+                "role": {"const": role},
+                "path": {"const": path},
+                "media_type": {"const": media_type},
+            },
+            "required": ["role", "path", "media_type"],
+        }
+        positive_cardinality = {
+            "properties": {
+                "bytes": {"minimum": 1},
+                "records": {"minimum": 1},
+            },
+            "required": ["bytes", "records"],
+        }
+        if permits_empty:
+            role_shape["oneOf"] = [
+                {
+                    "properties": {"bytes": {"const": 0}, "records": {"const": 0}},
+                    "required": ["bytes", "records"],
+                },
+                positive_cardinality,
+            ]
+        else:
+            role_shape["properties"].update(positive_cardinality["properties"])
+            role_shape["required"].extend(positive_cardinality["required"])
+        saturation_raw_artifact["oneOf"].append(role_shape)
     saturation_raw_manifest = exact_keys(
         (
             "record_type",

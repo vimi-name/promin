@@ -121,7 +121,12 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "continuation_union_completeness": 1.0,
             "selected_closure_union_completeness": 1.0,
             "maximum_continuation_token_bytes": 256,
-            "continuation_state": {"maximum_bytes": 16_384},
+            "continuation_state": {
+                "files": 1,
+                "maximum_bytes": 16_384,
+                "total_bytes": 16_384,
+                "preexisting_files_excluded": 0,
+            },
             "continuation_token_overhead_at_most_10_percent": True,
             "broad_query_refinement_required": True,
             "high_cardinality_terms_verified": True,

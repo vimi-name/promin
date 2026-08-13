@@ -23,6 +23,7 @@ from .authority import AuthorityError, canonical_digest, parse_timestamp
 from .resources import bundle_root
 from .version import standard_version
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, parse_json_strict
+from .final_admission import FinalAdmissionError, _archive_name as _final_admission_archive_name
 from .platform_paths import filesystem_path
 
 
@@ -885,6 +886,38 @@ _SATURATION_EVIDENCE_FIELDS = frozenset(
         *_RELEASE_EVIDENCE_ENVELOPE_FIELDS,
     }
 )
+_SATURATION_RAW_ARTIFACT_LAYOUT = {
+    "inventory-stream": (
+        "raw/inventory-stream.jsonl",
+        "application/x-ndjson",
+        False,
+    ),
+    "query-results": (
+        "raw/query-results.jsonl",
+        "application/x-ndjson",
+        False,
+    ),
+    "process-samples": (
+        "raw/process-samples.json",
+        "application/json",
+        False,
+    ),
+    "continuation-state-manifest": (
+        "raw/continuation-state-manifest.jsonl",
+        "application/x-ndjson",
+        True,
+    ),
+    "phase-log": (
+        "raw/phase-log.jsonl",
+        "application/x-ndjson",
+        False,
+    ),
+    "operation-metrics": (
+        "raw/operation-metrics.json",
+        "application/json",
+        False,
+    ),
+}
 _SATURATION_AUDIT_FIELDS = frozenset(
     {
         "record_type",
@@ -2124,6 +2157,15 @@ def _valid_prefixed_digest(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("sha256:") and _valid_digest(value[7:])
 
 
+def validate_release_archive_basename(value: Any) -> str:
+    """Return one portable ZIP basename suitable for exact evidence binding."""
+
+    try:
+        return _final_admission_archive_name(value)
+    except (FinalAdmissionError, UnicodeEncodeError) as exc:
+        raise EvidenceError("exact artifact archive name is not a safe ZIP basename") from exc
+
+
 def _validate_release_platform_binding(value: Any) -> dict[str, Any]:
     fields = {
         "binding_digest",
@@ -2215,11 +2257,11 @@ def _validate_exact_artifact_binding(
         or archive.get("bytes") != candidate["archive_bytes"]
         or archive.get("sha256") != "sha256:" + candidate["archive_sha256"]
         or archive.get("manifest_member_bytes_match") is not True
-        or archive.get("name") != "promin.zip"
         or not isinstance(archive.get("member_count"), int)
         or archive["member_count"] < 1
     ):
         raise EvidenceError("exact artifact archive binding is invalid")
+    validate_release_archive_basename(archive.get("name"))
     for field, candidate_field in (
         ("checksums_sha256", "checksums_digest"),
         ("core_bundle_digest", "core_bundle_digest"),
@@ -2980,8 +3022,13 @@ def _parse_raw_jsonl(
     *,
     max_records: int,
     max_line_bytes: int = 1024 * 1024,
+    allow_empty: bool = False,
 ) -> list[dict[str, Any]]:
-    if not payload or not payload.endswith(b"\n"):
+    if not payload:
+        if allow_empty:
+            return []
+        raise EvidenceError(f"{label} must be non-empty newline-terminated JSONL")
+    if not payload.endswith(b"\n"):
         raise EvidenceError(f"{label} must be non-empty newline-terminated JSONL")
     rows: list[dict[str, Any]] = []
     for line in payload.splitlines(keepends=True):
@@ -3370,6 +3417,129 @@ def _validate_saturation_operation_metrics(
     return operation
 
 
+def _is_valid_saturation_raw_artifact_binding(artifact: Any) -> bool:
+    if (
+        not isinstance(artifact, Mapping)
+        or set(artifact) != {"role", "path", "media_type", "sha256", "bytes", "records"}
+    ):
+        return False
+    role = artifact.get("role")
+    layout = _SATURATION_RAW_ARTIFACT_LAYOUT.get(role)
+    byte_count = artifact.get("bytes")
+    record_count = artifact.get("records")
+    return bool(
+        layout is not None
+        and artifact.get("path") == layout[0]
+        and artifact.get("media_type") == layout[1]
+        and _valid_digest(artifact.get("sha256"))
+        and isinstance(byte_count, int)
+        and not isinstance(byte_count, bool)
+        and isinstance(record_count, int)
+        and not isinstance(record_count, bool)
+        and (
+            (layout[2] and byte_count == 0 and record_count == 0)
+            or (byte_count >= 1 and record_count >= 1)
+        )
+    )
+
+
+def _resolve_saturation_raw_artifact_binding(
+    artifact: Mapping[str, Any],
+    *,
+    source_directory: Path,
+    evidence_root: Path,
+) -> tuple[str, StableExternalBytes]:
+    if not _is_valid_saturation_raw_artifact_binding(artifact):
+        raise EvidenceError("saturation raw artifact binding is invalid")
+    relative = _external_relative_path(artifact.get("path"))
+    if not relative.startswith("raw/"):
+        raise EvidenceError("saturation raw artifact path is outside raw/")
+    maximum = (
+        256 * 1024 * 1024
+        if artifact["role"] == "inventory-stream"
+        else 128 * 1024 * 1024
+    )
+    stable = read_external_bytes_stable(
+        source_directory.joinpath(*relative.split("/")),
+        root=evidence_root,
+        max_bytes=maximum,
+    )
+    if stable.sha256 != artifact["sha256"] or stable.size_bytes != artifact["bytes"]:
+        raise EvidenceError("saturation raw artifact content binding mismatch")
+    return relative, stable
+
+
+def _saturation_continuation_state_within_limit(metrics: Any) -> bool:
+    if (
+        not isinstance(metrics, Mapping)
+        or set(metrics)
+        != {"files", "maximum_bytes", "total_bytes", "preexisting_files_excluded"}
+    ):
+        return False
+    files = metrics.get("files")
+    maximum_bytes = metrics.get("maximum_bytes")
+    total_bytes = metrics.get("total_bytes")
+    preexisting = metrics.get("preexisting_files_excluded")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in (files, maximum_bytes, total_bytes, preexisting)
+    ):
+        return False
+    return (
+        preexisting >= 0
+        and (
+            (files == 0 and maximum_bytes == 0 and total_bytes == 0)
+            or (
+                files >= 1
+                and 1 <= maximum_bytes <= 16_384
+                and total_bytes >= maximum_bytes
+                and files <= total_bytes <= files * maximum_bytes
+            )
+        )
+    )
+
+
+def _validate_saturation_continuation_state(
+    binding: Mapping[str, Any],
+    payload: bytes,
+    search: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    continuation_rows = _parse_raw_jsonl(
+        payload,
+        "continuation state manifest",
+        max_records=100_000,
+        allow_empty=True,
+    )
+    continuation_paths: list[str] = []
+    continuation_sizes: list[int] = []
+    for row in continuation_rows:
+        if (
+            set(row) != {"path", "sha256", "bytes"}
+            or not isinstance(row.get("path"), str)
+            or not row["path"]
+            or not _valid_digest(row.get("sha256"))
+            or not isinstance(row.get("bytes"), int)
+            or isinstance(row.get("bytes"), bool)
+            or row["bytes"] < 1
+        ):
+            raise EvidenceError("continuation state manifest row is invalid")
+        continuation_paths.append(row["path"])
+        continuation_sizes.append(row["bytes"])
+    if (
+        continuation_paths != sorted(set(continuation_paths))
+        or binding.get("records") != len(continuation_rows)
+        or search.get("continuation_state")
+        != {
+            "files": len(continuation_sizes),
+            "maximum_bytes": max(continuation_sizes, default=0),
+            "total_bytes": sum(continuation_sizes),
+            "preexisting_files_excluded": 0,
+        }
+    ):
+        raise EvidenceError("continuation state summary cannot be recomputed")
+    return continuation_rows
+
+
 def _validate_saturation_raw_artifacts(
     verification: Mapping[str, Any],
     *,
@@ -3403,14 +3573,7 @@ def _validate_saturation_raw_artifacts(
     if manifest.get("manifest_digest") != canonical_digest(manifest_identity):
         raise EvidenceError("saturation raw artifact manifest digest mismatch")
     artifacts = manifest.get("artifacts")
-    expected_roles = {
-        "inventory-stream",
-        "query-results",
-        "process-samples",
-        "continuation-state-manifest",
-        "phase-log",
-        "operation-metrics",
-    }
+    expected_roles = set(_SATURATION_RAW_ARTIFACT_LAYOUT)
     if (
         not isinstance(artifacts, list)
         or len(artifacts) != len(expected_roles)
@@ -3428,34 +3591,18 @@ def _validate_saturation_raw_artifacts(
     resolved: dict[str, tuple[Mapping[str, Any], StableExternalBytes]] = {}
     paths: set[str] = set()
     for artifact in artifacts:
-        if (
-            not isinstance(artifact, Mapping)
-            or set(artifact) != {"role", "path", "media_type", "sha256", "bytes", "records"}
-            or artifact.get("role") not in expected_roles
-            or artifact["role"] in resolved
-            or artifact.get("media_type") not in {"application/json", "application/x-ndjson"}
-            or not _valid_digest(artifact.get("sha256"))
-            or not isinstance(artifact.get("bytes"), int)
-            or isinstance(artifact.get("bytes"), bool)
-            or artifact["bytes"] < 1
-            or not isinstance(artifact.get("records"), int)
-            or isinstance(artifact.get("records"), bool)
-            or artifact["records"] < 1
-        ):
+        relative, stable = _resolve_saturation_raw_artifact_binding(
+            artifact,
+            source_directory=source_directory,
+            evidence_root=root,
+        )
+        role = artifact["role"]
+        if role in resolved:
             raise EvidenceError("saturation raw artifact binding is invalid")
-        relative = _external_relative_path(artifact.get("path"))
-        if relative in paths or not relative.startswith("raw/"):
+        if relative in paths:
             raise EvidenceError("saturation raw artifact path is duplicate or outside raw/")
         paths.add(relative)
-        maximum = 256 * 1024 * 1024 if artifact["role"] == "inventory-stream" else 128 * 1024 * 1024
-        stable = read_external_bytes_stable(
-            source_directory.joinpath(*relative.split("/")),
-            root=root,
-            max_bytes=maximum,
-        )
-        if stable.sha256 != artifact["sha256"] or stable.size_bytes != artifact["bytes"]:
-            raise EvidenceError("saturation raw artifact content binding mismatch")
-        resolved[artifact["role"]] = (artifact, stable)
+        resolved[role] = (artifact, stable)
     if set(resolved) != expected_roles:
         raise EvidenceError("saturation raw artifact roles are incomplete")
 
@@ -3605,38 +3752,11 @@ def _validate_saturation_raw_artifacts(
         raise EvidenceError("saturation query semantic flags cannot be recomputed")
 
     continuation_binding, continuation_raw = resolved["continuation-state-manifest"]
-    continuation_rows = _parse_raw_jsonl(
+    _validate_saturation_continuation_state(
+        continuation_binding,
         continuation_raw.payload,
-        "continuation state manifest",
-        max_records=100_000,
+        search,
     )
-    continuation_paths: list[str] = []
-    continuation_sizes: list[int] = []
-    for row in continuation_rows:
-        if (
-            set(row) != {"path", "sha256", "bytes"}
-            or not isinstance(row.get("path"), str)
-            or not row["path"]
-            or not _valid_digest(row.get("sha256"))
-            or not isinstance(row.get("bytes"), int)
-            or isinstance(row.get("bytes"), bool)
-            or row["bytes"] < 1
-        ):
-            raise EvidenceError("continuation state manifest row is invalid")
-        continuation_paths.append(row["path"])
-        continuation_sizes.append(row["bytes"])
-    if (
-        continuation_paths != sorted(set(continuation_paths))
-        or continuation_binding["records"] != len(continuation_rows)
-        or search.get("continuation_state")
-        != {
-            "files": len(continuation_sizes),
-            "maximum_bytes": max(continuation_sizes, default=0),
-            "total_bytes": sum(continuation_sizes),
-            "preexisting_files_excluded": 0,
-        }
-    ):
-        raise EvidenceError("continuation state summary cannot be recomputed")
 
     samples_binding, samples_raw = resolved["process-samples"]
     process_samples = _parse_raw_json(samples_raw.payload, "process samples")
@@ -4150,10 +4270,8 @@ def validate_saturation_evidence(
     ):
         raise EvidenceError("saturation performance predicates cannot be recomputed")
     continuation_state = search.get("continuation_state")
-    continuation_state_within_limit = (
-        isinstance(continuation_state, Mapping)
-        and isinstance(continuation_state.get("maximum_bytes"), int)
-        and 0 < continuation_state["maximum_bytes"] <= 16_384
+    continuation_state_within_limit = _saturation_continuation_state_within_limit(
+        continuation_state
     )
     continuation_token_within_limit = (
         isinstance(search.get("maximum_continuation_token_bytes"), int)
