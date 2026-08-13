@@ -567,8 +567,6 @@ def _resolve_profiles(
         add("windows-development", "Windows project toolchain facts detected", 0.9)
     if tech & {"cpp", "cmake"} and not ({"web-application", "android-application"} & set(layers)):
         add("c-family-development", "C++/CMake project matches studio baseline", 0.8)
-    if len(layers) == 1:
-        add("c-family-development", "fallback when repository evidence is insufficient", 0.55)
     if signals:
         add("vibe-recovery", "repository complexity/duplication signals detected", 0.65)
     for profile_id in explicit:
@@ -735,6 +733,15 @@ def resolve_plan(
             "requires_confirmation": False,
         }
     )
+    material_unknowns: list[str] = []
+    if not technologies:
+        material_unknowns.append(
+            "repository language and toolchain remain unknown after bounded preflight; no language profile was inferred"
+        )
+    if preflight.get("truncated"):
+        material_unknowns.append(
+            "bounded preflight was truncated; full inventory remains a separate visible operation"
+        )
     plan_identity = {
         "record_type": "ResolvedInitPlan",
         "plan_version": 1,
@@ -772,7 +779,7 @@ def resolve_plan(
             "network_or_remote_install": "explicit-source-policy",
         },
         "planned_operations": planned_operations,
-        "material_unknowns": (["bounded preflight was truncated; full inventory remains a separate visible operation"] if preflight.get("truncated") else []),
+        "material_unknowns": material_unknowns,
         "preflight": {
             key: preflight[key]
             for key in (

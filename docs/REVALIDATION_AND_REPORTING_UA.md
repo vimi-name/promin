@@ -1,69 +1,113 @@
-# Heavy revalidation і підготовка звіту
+# Відновлення, ревалідація, реконсолідація і звіт
 
-`promin.revalidation` — це read-only orchestration для відновлення після
-перерваної або сумнівної перевірки. Він не відновлює progress, не редагує
-SQLite, проєкції, journal, receipts, locks, leases або evidence; також не
-запускає provider, configure, build чи runtime. Реальні перевірки залишаються
-в уже наявних authority-модулях і передаються тільки як явно оголошені
-`ReadOnlyRevalidationCallback`.
+Promin розділяє planning, execution та evidence. Revalidation не переписує
+історію і не підвищує claims лише тому, що operation завершилася. Кожний
+результат прив’язаний до plan, input, configuration та попередніх receipts.
 
-## План і bounded фази
+## Строгий п’ятифазний цикл
 
-`RevalidationPlan` зв'язує:
+`promin.revalidation_workflow` виконує один обов’язковий порядок:
 
-- стабільний `plan_id`;
-- canonical digest input identity;
-- впорядкований список phase id;
-- бюджет кожної фази та загальний бюджет;
-- `restart_identity` і `plan_digest`.
+```text
+INSPECT → REPAIR → REVALIDATE → RECONSOLIDATE → REPORT
+```
 
-Фаза отримує лише `RevalidationContext` з digest-ами: очікуваним input,
-попереднім output, plan і restart identity. Вона не отримує writable project
-object, шлях до control root, SQLite connection або projection. Callback має
-повернути `RevalidationObservation` з observed input digest та canonical output
-identity. Обов'язкова ознака callback — `read_only=True`; неявний callback або
-неоголошений write route відхиляється до виконання фази.
+Фази мають вузькі ролі:
 
-Кількість фаз, час однієї фази, загальний час, identity payload і reason мають
-обмеження. Перший `FAIL`, `UNAVAILABLE`, `STALE` або `CHANGED` зупиняє маршрут.
-Якщо observed input digest відрізняється від очікуваного, результат примусово
-має статус `CHANGED`, навіть якщо callback помилково повернув `PASS`.
+- `inspect` — визначити поточний стан і required phases без виконання;
+- `repair` — виконати bounded clean reinitialization за вже підготовленим
+  admission;
+- `revalidate` — виконати заявлені read-only phases;
+- `reconsolidate` — відновити єдиний status із наявної послідовності receipts;
+- `report` — підготувати non-authoritative reporting record.
 
-## Restart-safe receipts і reconsolidation
+`plan_revalidation_workflow(...)` повертає canonical no-write plan.
+`execute_revalidation_workflow(...)` виконує рівно поточну фазу і створює один
+create-only receipt. Пізню фазу не можна запустити окремо або перестрибнути
+через попередню. Retry дозволений лише для тієї самої фази з точним predecessor
+receipt і наступним ordinal; перехід уперед дозволений лише до безпосередньо
+наступної фази. Немає прихованого tool discovery або автоматичного розширення
+scope.
 
-Кожен `RevalidationCheckpoint` містить phase id, expected та observed input
-digest, output identity/digest, виміряний elapsed time і non-promoting fields.
-`RevalidationReceipt` серіалізується в canonical record з власним
-`receipt_digest`. Його можна передати в наступний process як data; модуль не
-пише цей record до проєкту самостійно.
+## Детермінований control flow
 
-`reconsolidate_revalidation(...)` приймає тільки receipts з точним
-`plan_digest`, `input_digest`, `restart_identity` і phase sequence. Інший
-receipt не використовується як checkpoint: він лишається в
-`stale_receipt_digests`, а результат отримує `STALE`. Два receipts з одним
-планом, але різними output identities на тому самому checkpoint, отримують
-`CHANGED`. Це запобігає тихому продовженню з застарілою або конфліктною
-історією.
+`RevalidationWorkflowPlan` зв’язує:
 
-`revalidate_recovery(...)` може зупинитися після `max_phases`; це створює
-`PENDING` receipt для точного prefix. Під час повторного запуску виконуються
-лише решта фаз, якщо попередній prefix і його chained digest-и збігаються.
-Після terminal non-pass автоматичний retry не відбувається: потрібен новий
-контекст або явне нове revalidation рішення.
+- semantic workflow identity, mode і semantic subject digest;
+- implementation та configuration digests;
+- retry ordinal;
+- predecessor receipt для retry/resume;
+- required phases і prior receipt digests;
+- mode-specific inputs.
 
-## Підготовка звіту
+Semantic identity є path-independent: її визначають logical workflow,
+authority/configuration identity, початковий semantic subject і точна phase
+sequence, а не абсолютний project або receipt path. Тому однаковий workflow у
+різних коренях має однакову semantic identity. Водночас кожний runtime plan і
+receipt явно зв’язує конкретні шляхи, з яких реально читалися inputs та куди
+писалося evidence.
 
-`prepare_revalidation_report(...)` формує компактний data record лише з уже
-наявного receipt. Він показує checkpoint-и, changed identities, stale receipt
-digest-и, наступну фазу та zero-effect counters. Функція не публікує файл і не
-перетворює derived report на authority.
+Перший `inspect` attempt не має predecessor. Кожний наступний attempt або фаза
+посилається на точний попередній receipt. Це робить pause, resume, retry та
+audit відтворюваними: state визначається records, а не пам’яттю агента.
 
-Усі plan, checkpoint, receipt і report records незмінно містять:
+Revalidation phases мають детермінований порядок. `PENDING` означає, що частина
+required phases ще не виконана; `CHANGED`, `UNAVAILABLE`, `FAIL` і `PASS`
+зберігають вузьку domain-семантику. Caller-recorded PASS не приймається як
+авторитетний результат без виконання відповідного route.
 
-- `acceptance_pass=false`;
-- `product_acceptance_pass=false`;
-- `pass_credit=false`.
+## Керована складність
 
-`PASS` у revalidation означає лише завершення заявлених read-only authority
-спостережень для точної identity. Це не є installability, runtime, visual,
-performance або release acceptance.
+Resource bounds є частиною plan, а не прихованою евристикою:
+
+- не більше 16 prior receipts;
+- не більше 16 retry attempts;
+- workflow receipt не більше 4 MiB;
+- phase count і execution limit задаються явно;
+- clean recovery має окремий bounded attempt count.
+
+Перевищення limit повертає typed failure або pending state. Воно не обрізається
+до фальшивого PASS.
+
+## Recovery і reporting
+
+Repair використовує існуючі domain primitives clean reinitialization. Він не
+імпортує попередній operational state і не видає product credit. Reconsolidation
+перевіряє повноту, predecessor chain і порядок prior receipts. Reporting
+приймає лише завершений reconsolidation predecessor, серіалізує вже відомий
+стан і не змінює його.
+
+Receipt містить plan, authority/config identity, subject, predecessor, ordinal,
+execution state, result kind, result digest і власний receipt digest. Failure
+також записується як non-promoting record, тому interrupted або невдалий run
+можна перевірити й свідомо відновити.
+
+## CLI
+
+Revalidation залишається вкладеною в наявну surface:
+
+```text
+promin doctor --revalidate INPUT [--execute-revalidation]
+```
+
+Без execute flag команда лише готує plan. Поточний frozen CLI count
+`58 passed` належить weak lifecycle + focused weak CLI slice і не переноситься
+як окремий числовий доказ цього `doctor` boundary.
+
+## Межа відповідальності
+
+Promin відповідає за deterministic plans, IDs, ordering, state, budgets і
+receipts. OS permissions, process isolation, backup policy та довіра до
+локальних executors належать host/user environment.
+
+## Поточне evidence
+
+Focused strict-cycle revalidation slice: `39 passed`. Це source correctness, не
+runtime або product acceptance; weak-related CLI evidence обліковується окремо.
+
+```text
+acceptance_pass=false
+product_acceptance_pass=false
+performance_acceptance=false
+pass_credit=false
+```

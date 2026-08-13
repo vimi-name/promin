@@ -10,18 +10,17 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+from itertools import islice
 import json
-import os
 from pathlib import Path
 import re
-import stat
 from types import MappingProxyType
 from typing import Any, Final
 import unicodedata
 
 
 class LanguageCatalogError(ValueError):
-    """Raised when a language capability catalog is ambiguous or unsafe."""
+    """Raised when a language capability catalog is invalid or outside bounds."""
 
 
 PROFILE_SCHEMA: Final = "promin.language-capability-profile.v1"
@@ -32,9 +31,9 @@ _MAX_PROFILE_FILES: Final = 32
 _MAX_PROFILE_BYTES: Final = 256 * 1024
 _MAX_CATALOG_BYTES: Final = 1 * 1024 * 1024
 _MAX_LIST_ITEMS: Final = 64
+_MAX_JSON_DEPTH: Final = 16
 _MAX_IDENTIFIER_LENGTH: Final = 128
 _MAX_AVAILABILITY_DETAIL: Final = 512
-_REPARSE_POINT: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9.-]{0,127}\Z")
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9-]{0,127}\Z")
 _EXTENSION = re.compile(r"\.[a-z0-9+_-]{1,31}\Z")
@@ -145,6 +144,146 @@ class LanguageCapabilityProfile:
 
 
 @dataclass(frozen=True)
+class BundledLanguageProfile:
+    """Exact distribution identity plus detector aliases owned by that profile."""
+
+    filename: str
+    profile_id: str
+    language_family: str
+    languages: tuple[str, ...]
+    technology_language_aliases: tuple[tuple[str, str], ...] = ()
+
+
+BUNDLED_LANGUAGE_PROFILES: Final[tuple[BundledLanguageProfile, ...]] = (
+    BundledLanguageProfile(
+        "c-family-semantic.json",
+        "c-family-semantic",
+        "c-family",
+        ("c", "cpp"),
+        (
+            ("cmake", "cpp"),
+            ("visual-studio", "cpp"),
+            ("windows-native", "cpp"),
+        ),
+    ),
+    BundledLanguageProfile(
+        "csharp-semantic.json",
+        "csharp-semantic",
+        "csharp",
+        ("csharp",),
+        (("dotnet", "csharp"),),
+    ),
+    BundledLanguageProfile(
+        "javascript-typescript-semantic.json",
+        "javascript-typescript-semantic",
+        "javascript",
+        ("javascript", "typescript"),
+        (
+            ("expo", "javascript"),
+            ("express", "javascript"),
+            ("nextjs", "javascript"),
+            ("node", "javascript"),
+            ("react", "javascript"),
+            ("react-native", "javascript"),
+            ("svelte", "javascript"),
+            ("supabase", "javascript"),
+            ("vite", "javascript"),
+            ("vue", "javascript"),
+        ),
+    ),
+    BundledLanguageProfile(
+        "jvm-semantic.json",
+        "jvm-semantic",
+        "java",
+        ("java", "kotlin", "scala", "groovy"),
+        (("android", "kotlin"), ("gradle", "groovy")),
+    ),
+    BundledLanguageProfile(
+        "open-source-tooling.json",
+        "open-source-tooling",
+        "tooling",
+        ("build", "documentation", "static-analysis"),
+        (("containers", "build"),),
+    ),
+    BundledLanguageProfile(
+        "python-semantic.json",
+        "python-semantic",
+        "python",
+        ("python",),
+    ),
+    BundledLanguageProfile(
+        "weak-host-fallback.json",
+        "weak-host-fallback",
+        "generic",
+        ("generic",),
+        (
+            ("dart", "generic"),
+            ("go", "generic"),
+            ("rust", "generic"),
+            ("swift", "generic"),
+        ),
+    ),
+)
+
+
+def languages_for_detected_technologies(
+    technologies: Iterable[str],
+) -> tuple[str, ...]:
+    """Resolve detector facts to canonical languages in bundled-profile order.
+
+    Direct language facts retain their exact identity (for example TypeScript
+    stays ``typescript`` and Kotlin stays ``kotlin``).  Ecosystem aliases live
+    beside the one bundled profile that owns their target language, so callers
+    cannot maintain a second mapping.  Unknown future facts are ignored until a
+    bundled profile explicitly owns them.
+    """
+
+    if isinstance(technologies, (str, bytes)):
+        raise LanguageCatalogError(
+            "technologies must be an iterable of technology identifiers"
+        )
+    try:
+        requested = list(islice(iter(technologies), _MAX_LIST_ITEMS + 1))
+    except TypeError as error:
+        raise LanguageCatalogError(
+            "technologies must be an iterable of technology identifiers"
+        ) from error
+    if len(requested) > _MAX_LIST_ITEMS:
+        raise LanguageCatalogError("technologies exceeds the bounded item limit")
+
+    ordered_languages: list[str] = []
+    technology_languages: dict[str, str] = {}
+    for descriptor in BUNDLED_LANGUAGE_PROFILES:
+        for language in descriptor.languages:
+            if language in technology_languages:
+                raise LanguageCatalogError(
+                    f"bundled technology identity is ambiguous: {language}"
+                )
+            technology_languages[language] = language
+            ordered_languages.append(language)
+        for technology, language in descriptor.technology_language_aliases:
+            if language not in descriptor.languages:
+                raise LanguageCatalogError(
+                    f"bundled technology alias {technology} targets another profile"
+                )
+            if technology in technology_languages:
+                raise LanguageCatalogError(
+                    f"bundled technology identity is ambiguous: {technology}"
+                )
+            technology_languages[technology] = language
+
+    selected: set[str] = set()
+    for index, raw_value in enumerate(requested):
+        if not isinstance(raw_value, str):
+            raise LanguageCatalogError(f"technologies[{index}] must be a string")
+        technology = unicodedata.normalize("NFC", raw_value).casefold().strip()
+        language = technology_languages.get(technology)
+        if language is not None:
+            selected.add(language)
+    return tuple(language for language in ordered_languages if language in selected)
+
+
+@dataclass(frozen=True)
 class LanguageCatalog:
     """A closed set of profile documents, ordered by profile identity."""
 
@@ -178,21 +317,41 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
-def _normalise_json(value: object) -> object:
+def _bounded_sequence(
+    value: object,
+    label: str,
+    maximum_items: int,
+) -> tuple[object, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise LanguageCatalogError(f"{label} must be an array")
+    if len(value) > maximum_items:
+        raise LanguageCatalogError(f"{label} exceeds its bounded item count")
+    return tuple(value)
+
+
+def _normalise_json(
+    value: object,
+    *,
+    depth: int = 0,
+) -> object:
+    if depth > _MAX_JSON_DEPTH:
+        raise LanguageCatalogError("profile JSON exceeds its bounded nesting depth")
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
-    if isinstance(value, list):
-        return [_normalise_json(item) for item in value]
     if isinstance(value, Mapping):
         normalized: dict[str, object] = {}
-        for raw_key, raw_value in value.items():
+        source = _bounded_mapping(value, "profile JSON object", _MAX_LIST_ITEMS)
+        for raw_key, raw_value in source.items():
             if not isinstance(raw_key, str):
                 raise LanguageCatalogError("profile JSON object keys must be strings")
             key = unicodedata.normalize("NFC", raw_key)
             if key in normalized:
                 raise LanguageCatalogError("profile JSON contains duplicate normalized keys")
-            normalized[key] = _normalise_json(raw_value)
+            normalized[key] = _normalise_json(raw_value, depth=depth + 1)
         return normalized
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        items = _bounded_sequence(value, "profile JSON array", _MAX_LIST_ITEMS)
+        return [_normalise_json(item, depth=depth + 1) for item in items]
     return value
 
 
@@ -209,19 +368,31 @@ def _reject_nonfinite_json(value: str) -> None:
     raise LanguageCatalogError(f"profile JSON contains non-finite value: {value}")
 
 
-def _mapping(value: object, label: str) -> Mapping[str, object]:
+def _bounded_mapping(
+    value: object,
+    label: str,
+    maximum_keys: int,
+) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise LanguageCatalogError(f"{label} must be an object")
-    if any(not isinstance(key, str) for key in value):
+    if len(value) > maximum_keys:
+        raise LanguageCatalogError(f"{label} exceeds its bounded key count")
+    result = dict(value)
+    if any(not isinstance(key, str) for key in result):
         raise LanguageCatalogError(f"{label} keys must be strings")
-    return value
+    return result
+
+
+def _mapping(value: object, label: str) -> Mapping[str, object]:
+    return _bounded_mapping(value, label, _MAX_LIST_ITEMS)
 
 
 def _exact_keys(value: object, keys: frozenset[str], label: str) -> Mapping[str, object]:
-    mapping = _mapping(value, label)
-    if frozenset(mapping) != keys:
-        missing = sorted(keys - frozenset(mapping))
-        unexpected = sorted(frozenset(mapping) - keys)
+    mapping = _bounded_mapping(value, label, len(keys))
+    observed_keys = frozenset(mapping)
+    if observed_keys != keys:
+        missing = sorted(keys - observed_keys)
+        unexpected = sorted(observed_keys - keys)
         raise LanguageCatalogError(
             f"{label} keys must be exact; missing={missing}; unexpected={unexpected}"
         )
@@ -241,11 +412,11 @@ def _identifier(value: object, label: str, *, profile_id: bool = False) -> str:
 
 
 def _identifier_list(value: object, label: str, *, allow_empty: bool) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise LanguageCatalogError(f"{label} must be an array")
-    if len(value) > _MAX_LIST_ITEMS:
-        raise LanguageCatalogError(f"{label} exceeds the bounded item limit")
-    result = tuple(_identifier(item, f"{label}[{index}]") for index, item in enumerate(value))
+    items = _bounded_sequence(value, label, _MAX_LIST_ITEMS)
+    result = tuple(
+        _identifier(item, f"{label}[{index}]")
+        for index, item in enumerate(items)
+    )
     if not allow_empty and not result:
         raise LanguageCatalogError(f"{label} must not be empty")
     if len(result) != len(set(result)):
@@ -254,12 +425,11 @@ def _identifier_list(value: object, label: str, *, allow_empty: bool) -> tuple[s
 
 
 def _language_list(value: object) -> tuple[str, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise LanguageCatalogError("languages must be an array")
-    if not value or len(value) > 4:
+    items = _bounded_sequence(value, "languages", 4)
+    if not items:
         raise LanguageCatalogError("languages must contain one through four identifiers")
     normalized: list[str] = []
-    for index, item in enumerate(value):
+    for index, item in enumerate(items):
         if not isinstance(item, str) or item not in _FAMILY_BY_LANGUAGE:
             raise LanguageCatalogError(f"languages[{index}] is not a supported canonical language")
         normalized.append(item)
@@ -274,12 +444,11 @@ def _language_list(value: object) -> tuple[str, ...]:
 def _source_extensions(value: object, family: str) -> tuple[str, ...]:
     if value is None:
         return _DEFAULT_EXTENSIONS[family]
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise LanguageCatalogError("sourceExtensions must be an array")
-    if not value or len(value) > _MAX_LIST_ITEMS:
+    items = _bounded_sequence(value, "sourceExtensions", _MAX_LIST_ITEMS)
+    if not items:
         raise LanguageCatalogError("sourceExtensions must contain one through the bounded item limit")
     extensions: list[str] = []
-    for index, item in enumerate(value):
+    for index, item in enumerate(items):
         if not isinstance(item, str) or not _EXTENSION.fullmatch(item):
             raise LanguageCatalogError(f"sourceExtensions[{index}] must be a safe suffix")
         extensions.append(item)
@@ -453,41 +622,8 @@ def parse_language_catalog_profile(
     )
 
 
-def _is_link_or_reparse(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & _REPARSE_POINT)
-
-
-def _regular_file(path: Path, label: str) -> os.stat_result:
+def _parse_profile_source(source_bytes: bytes) -> Mapping[str, object]:
     try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise LanguageCatalogError(f"{label} is unavailable: {type(error).__name__}") from error
-    if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
-        raise LanguageCatalogError(f"{label} must be a regular non-link file")
-    return metadata
-
-
-def _file_state(metadata: os.stat_result) -> tuple[int, int, int, int]:
-    """Return only metadata that can witness a loader-time replacement/edit."""
-
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_size,
-        metadata.st_mtime_ns,
-    )
-
-
-def _read_profile(path: Path) -> tuple[Mapping[str, object], bytes]:
-    metadata = _regular_file(path, "language profile")
-    if metadata.st_size > _MAX_PROFILE_BYTES:
-        raise LanguageCatalogError("language profile exceeds the bounded byte limit")
-    try:
-        source_bytes = path.read_bytes()
-        after_read = _regular_file(path, "language profile")
-        if _file_state(metadata) != _file_state(after_read) or len(source_bytes) != metadata.st_size:
-            raise LanguageCatalogError("language profile changed while it was being read")
         parsed = json.loads(
             source_bytes.decode("utf-8"),
             object_pairs_hook=_duplicate_key_object,
@@ -495,58 +631,102 @@ def _read_profile(path: Path) -> tuple[Mapping[str, object], bytes]:
         )
     except LanguageCatalogError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise LanguageCatalogError(f"language profile JSON is invalid: {type(error).__name__}") from error
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise LanguageCatalogError(
+            f"language profile JSON is invalid: {type(error).__name__}"
+        ) from error
     if not isinstance(parsed, Mapping):
         raise LanguageCatalogError("language profile JSON root must be an object")
-    return _mapping(parsed, "language profile"), source_bytes
+    return _mapping(parsed, "language profile")
 
 
-def _catalog_paths(path: Path) -> tuple[Path, ...]:
+def _read_profile(path: Path) -> tuple[Mapping[str, object], bytes]:
     try:
-        metadata = path.lstat()
+        if not path.is_file():
+            raise LanguageCatalogError("language profile must be a file")
+        with path.open("rb") as handle:
+            source_bytes = handle.read(_MAX_PROFILE_BYTES + 1)
+    except LanguageCatalogError:
+        raise
     except OSError as error:
-        raise LanguageCatalogError(f"language catalog is unavailable: {type(error).__name__}") from error
-    if _is_link_or_reparse(metadata):
-        raise LanguageCatalogError("language catalog root must not be a link or reparse point")
-    if stat.S_ISREG(metadata.st_mode):
-        if path.suffix != ".json":
-            raise LanguageCatalogError("language catalog file must use the .json suffix")
-        return (path,)
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise LanguageCatalogError("language catalog path must be a file or directory")
+        raise LanguageCatalogError(
+            f"language profile is unavailable: {type(error).__name__}"
+        ) from error
+    if len(source_bytes) > _MAX_PROFILE_BYTES:
+        raise LanguageCatalogError("language profile exceeds the bounded byte limit")
+    return _parse_profile_source(source_bytes), source_bytes
 
-    entries: list[Path] = []
+
+def _directory_entries(path: Path, maximum: int) -> tuple[Path, ...]:
     try:
-        children = sorted(path.iterdir(), key=lambda item: (item.name.casefold(), item.name))
+        if not path.is_dir():
+            raise LanguageCatalogError("language catalog path must be a file or directory")
+        entries = list(islice(path.iterdir(), maximum + 1))
+    except LanguageCatalogError:
+        raise
     except OSError as error:
-        raise LanguageCatalogError(f"language catalog cannot be enumerated: {type(error).__name__}") from error
-    for child in children:
-        if child.suffix == ".json":
-            _regular_file(child, "language catalog member")
-            entries.append(child)
-        elif child.is_dir() or child.is_symlink():
-            raise LanguageCatalogError("language catalog does not permit nested directories or links")
-    if not entries:
-        raise LanguageCatalogError("language catalog does not contain a JSON profile")
-    if len(entries) > _MAX_PROFILE_FILES:
+        raise LanguageCatalogError(
+            f"language catalog cannot be enumerated: {type(error).__name__}"
+        ) from error
+    if len(entries) > maximum:
         raise LanguageCatalogError("language catalog exceeds the bounded profile count")
-    return tuple(entries)
+    return tuple(sorted(entries, key=lambda item: (item.name.casefold(), item.name)))
 
 
-def load_language_catalog(path: Path | str) -> LanguageCatalog:
-    """Strict-load one profile file or a bounded ``language_profiles`` directory."""
-
-    root = Path(path)
+def _load_profile_entries(
+    entries: Sequence[Path],
+) -> tuple[LanguageCapabilityProfile, ...]:
     records: list[LanguageCapabilityProfile] = []
     total_bytes = 0
-    for profile_path in _catalog_paths(root):
-        document, source_bytes = _read_profile(profile_path)
+    for entry in entries:
+        document, source_bytes = _read_profile(entry)
         total_bytes += len(source_bytes)
         if total_bytes > _MAX_CATALOG_BYTES:
             raise LanguageCatalogError("language catalog exceeds the bounded byte limit")
-        records.append(parse_language_catalog_profile(document, source_bytes=source_bytes))
+        records.append(
+            parse_language_catalog_profile(document, source_bytes=source_bytes)
+        )
+    return tuple(records)
 
+
+def _generic_profile_entries(directory: Path) -> tuple[Path, ...]:
+    entries = _directory_entries(directory, _MAX_PROFILE_FILES)
+    profiles: list[Path] = []
+    for entry in entries:
+        if entry.name.endswith(".json"):
+            if not entry.is_file():
+                raise LanguageCatalogError("language catalog member must be a file")
+            profiles.append(entry)
+        elif entry.is_dir():
+            raise LanguageCatalogError(
+                "language catalog does not permit nested directories"
+            )
+    if not profiles:
+        raise LanguageCatalogError(
+            "language catalog does not contain a JSON profile"
+        )
+    return tuple(profiles)
+
+
+def _bundled_profile_entries(directory: Path) -> tuple[Path, ...]:
+    expected_names = {
+        descriptor.filename for descriptor in BUNDLED_LANGUAGE_PROFILES
+    }
+    entries = _directory_entries(directory, _MAX_PROFILE_FILES)
+    actual_names = {entry.name for entry in entries}
+    missing = sorted(expected_names - actual_names)
+    unexpected = sorted(actual_names - expected_names)
+    if missing or unexpected:
+        raise LanguageCatalogError(
+            "bundled language catalog filenames must be exact; "
+            f"missing={missing}; unexpected={unexpected}"
+        )
+    if any(not entry.is_file() for entry in entries):
+        raise LanguageCatalogError("bundled language catalog members must be files")
+    return entries
+
+
+def _language_catalog(records: Sequence[LanguageCapabilityProfile]) -> LanguageCatalog:
     ordered = tuple(sorted(records, key=lambda profile: profile.profile_id))
     profile_ids = [profile.profile_id for profile in ordered]
     if len(profile_ids) != len(set(profile_ids)):
@@ -580,11 +760,98 @@ def load_language_catalog(path: Path | str) -> LanguageCatalog:
     )
 
 
+def _load_generic_directory(directory: Path) -> LanguageCatalog:
+    return _language_catalog(_load_profile_entries(_generic_profile_entries(directory)))
+
+
+def _load_single_profile(path: Path) -> LanguageCatalog:
+    if path.suffix != ".json":
+        raise LanguageCatalogError(
+            "language catalog file must use the .json suffix"
+        )
+    document, source_bytes = _read_profile(path)
+    return _language_catalog(
+        (parse_language_catalog_profile(document, source_bytes=source_bytes),)
+    )
+
+
+def _load_catalog_path(path: Path, *, bundled: bool) -> LanguageCatalog:
+    if path.is_file():
+        if bundled:
+            raise LanguageCatalogError("bundled language catalog must be a directory")
+        return _load_single_profile(path)
+    if path.is_dir():
+        return _load_bundled_directory(path) if bundled else _load_generic_directory(path)
+    raise LanguageCatalogError("language catalog path must be a file or directory")
+
+
+def _translate_catalog_path_error(
+    path: Path | str,
+    *,
+    bundled: bool,
+) -> LanguageCatalog:
+    try:
+        return _load_catalog_path(Path(path), bundled=bundled)
+    except LanguageCatalogError:
+        raise
+    except OSError as error:
+        label = "bundled language catalog" if bundled else "language catalog"
+        raise LanguageCatalogError(f"{label} is unavailable") from error
+
+
+def load_language_catalog(path: Path | str) -> LanguageCatalog:
+    """Load one bounded profile or directory with portable filesystem calls."""
+
+    return _translate_catalog_path_error(path, bundled=False)
+
+
+def load_bundled_language_catalog(path: Path | str) -> LanguageCatalog:
+    """Load the exact distribution catalog and bind each filename to its profile."""
+
+    return _translate_catalog_path_error(path, bundled=True)
+
+
+def _load_bundled_directory(directory: Path) -> LanguageCatalog:
+    expected = {profile.filename: profile for profile in BUNDLED_LANGUAGE_PROFILES}
+    entries = _bundled_profile_entries(directory)
+    records: list[LanguageCapabilityProfile] = []
+    total_bytes = 0
+    for entry in entries:
+        document, source_bytes = _read_profile(entry)
+        total_bytes += len(source_bytes)
+        if total_bytes > _MAX_CATALOG_BYTES:
+            raise LanguageCatalogError(
+                "language catalog exceeds the bounded byte limit"
+            )
+        parsed = parse_language_catalog_profile(document, source_bytes=source_bytes)
+        descriptor = expected[entry.name]
+        if (
+            parsed.profile_id != descriptor.profile_id
+            or parsed.language_family != descriptor.language_family
+            or parsed.languages != descriptor.languages
+        ):
+            raise LanguageCatalogError(
+                f"bundled language profile identity differs from {entry.name}"
+            )
+        records.append(parsed)
+    return _language_catalog(records)
+
+
 def _requested_languages(languages: Iterable[str]) -> tuple[str, ...]:
     if isinstance(languages, (str, bytes)):
         raise LanguageCatalogError("languages must be an iterable of language identifiers")
+    try:
+        requested = list(islice(iter(languages), _MAX_LIST_ITEMS + 1))
+    except TypeError as error:
+        raise LanguageCatalogError(
+            "languages must be an iterable of language identifiers"
+        ) from error
+    if not requested or len(requested) > _MAX_LIST_ITEMS:
+        raise LanguageCatalogError(
+            "languages must contain one through the bounded item limit"
+        )
     result: list[str] = []
-    for index, raw_value in enumerate(languages):
+    for index, raw_value in enumerate(requested):
         if not isinstance(raw_value, str):
             raise LanguageCatalogError(f"languages[{index}] must be a string")
         value = unicodedata.normalize("NFC", raw_value).casefold().strip()
@@ -594,9 +861,7 @@ def _requested_languages(languages: Iterable[str]) -> tuple[str, ...]:
         if canonical in result:
             raise LanguageCatalogError("languages contains duplicate canonical values")
         result.append(canonical)
-    if not result or len(result) > _MAX_LIST_ITEMS:
-        raise LanguageCatalogError("languages must contain one through the bounded item limit")
-    return tuple(result)
+    return tuple(sorted(result))
 
 
 def _selection(value: object, label: str, allowed: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
@@ -628,8 +893,12 @@ def _profile_override(
             docs = ("ask", ())
         return docs, ("profile-default", profile.recommended_tools)
 
-    override = _mapping(value, f"override for {profile.profile_id}")
     allowed_fields = frozenset({"documentation", "tools"})
+    override = _bounded_mapping(
+        value,
+        f"override for {profile.profile_id}",
+        len(allowed_fields),
+    )
     if not frozenset(override) <= allowed_fields or not override:
         raise LanguageCatalogError(f"override for {profile.profile_id} is not bounded")
     documentation = _profile_override(None, profile)[0]
@@ -668,7 +937,11 @@ def _availability(
 ) -> dict[str, dict[str, str]]:
     if value is None:
         return {}
-    observations = _mapping(value, "availability")
+    observations = _bounded_mapping(
+        value,
+        "availability",
+        len(allowed_capabilities),
+    )
     result: dict[str, dict[str, str]] = {}
     for capability, raw_record in observations.items():
         capability_id = _identifier(capability, "availability capability")
@@ -732,7 +1005,15 @@ def compose_language_capabilities(
     )
     resolved = {language for profile in selected_profiles for language in profile.languages}
     unresolved = sorted(set(requested) - resolved)
-    override_mapping = _mapping(overrides, "overrides") if overrides is not None else {}
+    override_mapping = (
+        _bounded_mapping(
+            overrides,
+            "overrides",
+            len(selected_profiles),
+        )
+        if overrides is not None
+        else {}
+    )
     selected_ids = {profile.profile_id for profile in selected_profiles}
     unknown_override_ids = sorted(set(override_mapping) - selected_ids)
     if unknown_override_ids:
@@ -858,6 +1139,8 @@ def compose_language_catalog(*args: object, **kwargs: object) -> dict[str, objec
 
 
 __all__ = [
+    "BUNDLED_LANGUAGE_PROFILES",
+    "BundledLanguageProfile",
     "CATALOG_SCHEMA",
     "COMPOSITION_SCHEMA",
     "LanguageCapabilityProfile",
@@ -866,6 +1149,8 @@ __all__ = [
     "PROFILE_SCHEMA",
     "compose_language_capabilities",
     "compose_language_catalog",
+    "languages_for_detected_technologies",
+    "load_bundled_language_catalog",
     "load_language_catalog",
     "parse_language_catalog_profile",
 ]

@@ -7,12 +7,12 @@
     "recommended": true,
     "userChoice": "ask",
     "primary": ["public-contract-index", "api-documentation"],
-    "optional": ["reference-documentation-generator"]
+    "optional": ["javadoc"]
   },
   "verification": {
     "cheapRequired": ["syntax-and-project-structure"],
-    "recommended": ["compiler-diagnostics", "static-analysis"],
-    "optional": ["format-check", "documentation-check"]
+    "recommended": ["javac", "checkstyle"],
+    "optional": ["spotbugs", "javadoc"]
   },
   "artifactPolicy": {
     "defaultMode": "minimal",

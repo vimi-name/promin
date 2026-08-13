@@ -3974,6 +3974,95 @@ def test_credit_and_gate_bind_exact_artifact_record_class_and_definition(
         )
 
 
+def test_task_accepts_no_filesystem_mutation_scope_and_still_validates_supplied_paths(
+    tmp_path: Path,
+) -> None:
+    engine, grants = issued_engine()
+    domain = DomainState(
+        engine,
+        EvidenceStore(tmp_path / "cas"),
+        implementation_closure_digest=IMPLEMENTATION,
+    )
+    domain.record_candidate(
+        {
+            "record_type": "Candidate",
+            "candidate_id": "C-non-filesystem-task",
+            "candidate_digest": CANDIDATE,
+            "inventory_digest": "1" * 64,
+            "product_root_digest": "2" * 64,
+            "control_excluded": True,
+            "candidate_recipe_digest": "5" * 64,
+            "consistency_mode": "immutable-vcs-tree",
+            "creditable": True,
+            "snapshot_provider_id": "test-vcs-provider",
+            "snapshot_digest": "6" * 64,
+        },
+        authorization(grants["worker"]),
+    )
+    task = task_with_gate_definitions(
+        {
+            "record_type": "Task",
+            "task_id": "T-non-filesystem",
+            "state": "PLANNED",
+            "required_capability": "task.execute",
+            "acceptance_predicate": "the declared computation result is recorded",
+            "allowed_paths": [],
+            "activation_digest": ACTIVATION,
+            "candidate_digest": CANDIDATE,
+            "created_at": "2026-02-01T00:00:00Z",
+        },
+        {"gate_id": "G-non-filesystem"},
+    )
+
+    validate_definition(core_schema(), "Task", task)
+    assert domain.record_task(task, authorization(grants["planner"])) == task
+    assert domain.tasks[task["task_id"]]["allowed_paths"] == []
+
+    invalid_path_task = task_with_gate_definitions(
+        {
+            **task,
+            "task_id": "T-invalid-path",
+            "allowed_paths": ["../outside"],
+        },
+        {"gate_id": "G-invalid-path"},
+    )
+    with pytest.raises(DomainError, match="changed path"):
+        domain.record_task(
+            invalid_path_task,
+            authorization(grants["planner"]),
+        )
+
+
+def test_plan_proposal_accepts_tasks_without_file_or_source_bindings() -> None:
+    proposal = {
+        "record_type": "PlanProposal",
+        "proposal_id": "proposal:compute-only",
+        "project_id": "project:arbitrary-work",
+        "project_mode": "greenfield",
+        "goal": "Compute and communicate a deterministic result.",
+        "source_plan_digest": "7" * 64,
+        "created_at": "2026-02-01T00:00:00Z",
+        "tasks": [
+            {
+                "task_id": "task:compute-only",
+                "title": "Compute a result",
+                "operation": "read",
+                "depends_on": [],
+                "acceptance_predicate": "The result matches the declared calculation.",
+                "allowed_paths": [],
+                "source_bindings": [],
+                "authority": False,
+                "pass_credit": False,
+            }
+        ],
+        "authority": False,
+        "pass_credit": False,
+        "proposal_digest": "8" * 64,
+    }
+
+    validate_definition(core_schema(), "PlanProposal", proposal)
+
+
 def test_task_and_lease_state_machine_fence_and_no_acceptance(tmp_path: Path) -> None:
     engine, grants = issued_engine()
     domain = DomainState(

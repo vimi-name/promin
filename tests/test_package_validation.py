@@ -319,7 +319,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 246)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 257)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -357,10 +357,13 @@ class PackageValidationTests(unittest.TestCase):
             "promin/documentation.py",
             "promin/experience.py",
             "promin/host_integration.py",
+            "promin/initial_project_work.py",
             "promin/portability.py",
+            "promin/revalidation_workflow.py",
             "promin/refresh.py",
             "promin/skills.py",
             "promin/system_check.py",
+            "promin/weak_model_workflow.py",
             "promin/windows_event_history.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
@@ -375,11 +378,17 @@ class PackageValidationTests(unittest.TestCase):
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
             "tests/test_alpha_deployable.py",
+            "tests/test_alpha4_bundled_language_catalog.py",
+            "tests/test_alpha4_init_evidence_first_profiles.py",
             "tests/test_alpha_experience.py",
             "tests/test_alpha_host_pickup.py",
             "tests/test_alpha_portability.py",
             "tests/test_alpha_skills.py",
             "tests/test_alpha_skills_checklist.py",
+            "tests/test_expert_init_bundle_roundtrip.py",
+            "tests/test_initial_project_work.py",
+            "tests/test_public_workflows_cli.py",
+            "tests/test_revalidation_workflow.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
             "tests/test_heavy_checkpoint_profile.py",
@@ -392,10 +401,12 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_heavy_projection_bulk_rebuild.py",
             "tests/test_heavy_projection_profile.py",
             "tests/test_heavy_query_tail_scale.py",
+            "tests/test_heavy_saturation_continuation_sqlite.py",
             "tests/test_heavy_saturation_storage_budget.py",
             "tests/test_heavy_state_binding_batch_union.py",
             "tests/test_heavy_state_binding_storage.py",
             "tests/test_heavy_state_binding_storage_retention.py",
+            "tests/test_heavy_weak_model_workflow.py",
             "tests/test_heavy_windows_event_history.py",
             "tests/test_heavy_windows_seal_scaling.py",
             "tests/test_retrieval_continuation_service.py",

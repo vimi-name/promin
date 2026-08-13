@@ -1139,7 +1139,6 @@ class DomainState:
         paths = task["allowed_paths"]
         if (
             not isinstance(paths, list)
-            or not paths
             or len(paths) != len(set(paths))
             or len(paths) > 64
         ):
@@ -3055,7 +3054,6 @@ class DomainState:
                 or not isinstance(task["acceptance_predicate"], str)
                 or not task["acceptance_predicate"]
                 or not isinstance(paths, list)
-                or not paths
                 or len(paths) > 64
                 or len(paths) != len(set(paths))
                 or not _valid_digest(task["candidate_digest"])

@@ -9,11 +9,26 @@ here makes profile selection safe to use before an activation is published.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import islice
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .canonical import digest_value
+from .canonical import (
+    DEFAULT_LIMITS,
+    CanonicalError,
+    canonical_bytes,
+    digest_value,
+    parse_json_strict,
+)
+from .language_catalog import (
+    LanguageCatalog,
+    LanguageCatalogError,
+    LanguageCapabilityProfile,
+    compose_language_capabilities,
+    load_bundled_language_catalog,
+)
+from .resources import ResourceError, bundle_root
 
 
 class InitProfileError(ValueError):
@@ -24,6 +39,7 @@ INIT_PROFILE_SCHEMA = "promin.init-profile.v1"
 LANGUAGE_CAPABILITY_PROFILE_SCHEMA = "promin.language-capability-profile.v1"
 INIT_ANALYSIS_CHOICE_SCHEMA = "promin.init-analysis-choice.v1"
 RESOLVED_INIT_PROFILE_SCHEMA = "promin.resolved-init-profile.v1"
+EXPERT_INIT_BUNDLE_SCHEMA = "promin.expert-init-bundle.v1"
 
 _SELECTION_SOURCES = (
     "default",
@@ -529,240 +545,325 @@ class ToolOutcome:
         }
 
 
-# H1 deliberately keeps these as generic, portable reference identifiers.  A
-# selected identifier is not a host probe, executable path, installed package,
-# semantic classification, or authority grant.
+# Init language choices use the installed catalog as their only profile authority.
+# The init layer adds experience/source labels and false claims, but it does not
+# maintain a second language or tool catalog.
 INIT_EXPERIENCE_SCHEMA = "promin.init-experience.v1"
 LANGUAGE_REFERENCE_SELECTION_SCHEMA = "promin.language-reference-selection.v1"
 
 _INIT_EXPERIENCES = frozenset({"minimal", "expert"})
 _EXPERT_SELECTION_SOURCES = frozenset({"owner", "cli", "interactive-user"})
 _MINIMAL_SELECTION_SOURCE = "minimal-one-click"
-_GENERIC_LANGUAGE_ORDER = (
-    "c",
-    "cpp",
-    "csharp",
-    "java",
-    "javascript",
-    "python",
-)
-
-
-@dataclass(frozen=True, slots=True)
-class LanguageReferenceSet:
-    """The bounded generic references available for one explicit language ID."""
-
-    language: str
-    capability_id: str
-    minimal_documentation: tuple[str, ...]
-    optional_documentation: tuple[str, ...]
-    required_tools: tuple[str, ...]
-    optional_tools: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _id(self.language, "generic language id")
-        _id(self.capability_id, "generic capability id")
-        for label, values in (
-            ("minimal documentation", self.minimal_documentation),
-            ("optional documentation", self.optional_documentation),
-            ("required tools", self.required_tools),
-            ("optional tools", self.optional_tools),
-        ):
-            if not values:
-                raise InitProfileError(f"generic {label} must not be empty")
-            for item in values:
-                _id(item, f"generic {label} item")
-            if len(values) != len(set(values)):
-                raise InitProfileError(f"generic {label} contains duplicates")
-        if set(self.minimal_documentation) & set(self.optional_documentation):
-            raise InitProfileError("generic documentation references overlap")
-        if set(self.required_tools) & set(self.optional_tools):
-            raise InitProfileError("generic tool references overlap")
-
-    @property
-    def documentation_references(self) -> tuple[str, ...]:
-        return self.minimal_documentation + self.optional_documentation
-
-    @property
-    def tool_references(self) -> tuple[str, ...]:
-        return self.required_tools + self.optional_tools
-
-
-_GENERIC_LANGUAGE_REFERENCES: dict[str, LanguageReferenceSet] = {
-    "c": LanguageReferenceSet(
-        language="c",
-        capability_id="c-language",
-        minimal_documentation=("c-language-reference",),
-        optional_documentation=("c-api-guidelines", "c-documentation-generator"),
-        required_tools=("c-syntax-check",),
-        optional_tools=("c-language-server", "c-static-analysis"),
-    ),
-    "cpp": LanguageReferenceSet(
-        language="cpp",
-        capability_id="cpp-language",
-        minimal_documentation=("cpp-language-reference",),
-        optional_documentation=("cpp-core-guidelines", "cpp-documentation-generator"),
-        required_tools=("cpp-syntax-check",),
-        optional_tools=("cpp-language-server", "cpp-static-analysis"),
-    ),
-    "csharp": LanguageReferenceSet(
-        language="csharp",
-        capability_id="csharp-language",
-        minimal_documentation=("csharp-language-reference",),
-        optional_documentation=("csharp-api-guidelines", "csharp-documentation-generator"),
-        required_tools=("csharp-compiler-check",),
-        optional_tools=("csharp-language-server", "csharp-static-analysis"),
-    ),
-    "java": LanguageReferenceSet(
-        language="java",
-        capability_id="java-language",
-        minimal_documentation=("java-language-specification",),
-        optional_documentation=("java-api-documentation", "java-documentation-generator"),
-        required_tools=("java-compiler-check",),
-        optional_tools=("java-language-server", "java-static-analysis"),
-    ),
-    "javascript": LanguageReferenceSet(
-        language="javascript",
-        capability_id="javascript-language",
-        minimal_documentation=("ecmascript-language-specification",),
-        optional_documentation=(
-            "javascript-api-documentation",
-            "javascript-documentation-generator",
-        ),
-        required_tools=("javascript-syntax-check",),
-        optional_tools=("javascript-language-server", "javascript-static-analysis"),
-    ),
-    "python": LanguageReferenceSet(
-        language="python",
-        capability_id="python-language",
-        minimal_documentation=("python-language-reference",),
-        optional_documentation=("python-api-documentation", "python-documentation-generator"),
-        required_tools=("python-compile-check",),
-        optional_tools=("python-language-server", "python-static-analysis"),
-    ),
+_MAX_EXPLICIT_LANGUAGES = 64
+_EXPERT_INIT_FILE = "expert-init.json"
+_BUNDLE_CLAIMS = {
+    "authority_effect": "none",
+    "authority_granted": False,
+    "pass_credit": False,
+    "acceptance_pass": False,
+    "product_acceptance_pass": False,
+    "release_approved": False,
 }
 
 
-def _iterable_values(value: object, label: str) -> list[object]:
-    """Require a caller-owned sequence instead of coercing strings or mappings."""
+def _iterable_values(
+    value: object,
+    label: str,
+    *,
+    maximum: int,
+) -> list[object]:
+    """Read at most one item beyond an ordinary public iterable bound."""
 
     if isinstance(value, (str, bytes, Mapping)):
         raise InitProfileError(f"{label} must be an explicit array")
     try:
-        return list(value)  # type: ignore[arg-type]
+        result = list(islice(iter(value), maximum + 1))  # type: ignore[arg-type]
     except TypeError as exc:
         raise InitProfileError(f"{label} must be an explicit array") from exc
-
-
-def _selected_generic_languages(languages: Iterable[str]) -> tuple[str, ...]:
-    requested = _string_list(
-        _iterable_values(languages, "generic languages"),
-        "generic languages",
-    )
-    unknown = sorted(set(requested) - set(_GENERIC_LANGUAGE_REFERENCES))
-    if unknown:
-        raise InitProfileError(f"unknown generic language selection: {unknown[0]}")
-    selected = set(requested)
-    return tuple(language for language in _GENERIC_LANGUAGE_ORDER if language in selected)
-
-
-def _registered_values(
-    value: object,
-    *,
-    allowed: tuple[str, ...],
-    label: str,
-) -> tuple[str, ...]:
-    requested = _string_list(_iterable_values(value, label), label)
-    unknown = sorted(set(requested) - set(allowed))
-    if unknown:
-        raise InitProfileError(f"unknown {label} reference: {unknown[0]}")
-    selected = set(requested)
-    return tuple(item for item in allowed if item in selected)
-
-
-def _expert_language_selections(
-    value: Mapping[str, Any],
-    *,
-    languages: tuple[str, ...],
-) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
-    selections = _mapping(value, "expert language selections")
-    if set(selections) != set(languages):
-        raise InitProfileError(
-            "expert language selections must contain exactly the explicit language IDs"
-        )
-    result: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
-    for language in languages:
-        reference_set = _GENERIC_LANGUAGE_REFERENCES[language]
-        selection = _mapping(selections[language], f"expert {language} selection")
-        if set(selection) != {"capability_id", "documentation", "tools"}:
-            raise InitProfileError(
-                f"expert {language} selection has an unsupported field set"
-            )
-        if selection["capability_id"] != reference_set.capability_id:
-            raise InitProfileError(
-                f"expert {language} selection cannot change its registered capability"
-            )
-        documentation = _registered_values(
-            selection["documentation"],
-            allowed=reference_set.documentation_references,
-            label=f"expert {language} documentation",
-        )
-        tools = _registered_values(
-            selection["tools"],
-            allowed=reference_set.tool_references,
-            label=f"expert {language} tools",
-        )
-        missing_required = [
-            tool for tool in reference_set.required_tools if tool not in tools
-        ]
-        if missing_required:
-            raise InitProfileError(
-                f"expert {language} selection omits required tool {missing_required[0]}"
-            )
-        result[language] = (documentation, tools)
+    if len(result) > maximum:
+        raise InitProfileError(f"{label} exceeds registered maximum {maximum}")
     return result
 
 
-def _language_reference_selection(
-    reference_set: LanguageReferenceSet,
-    *,
-    documentation: tuple[str, ...],
-    tools: tuple[str, ...],
-    selection_source: str,
-) -> dict[str, Any]:
-    """Return one typed selection without asserting a tool exists on this host."""
+def _installed_language_catalog() -> LanguageCatalog:
+    try:
+        return load_bundled_language_catalog(bundle_root() / "language_profiles")
+    except (LanguageCatalogError, ResourceError) as exc:
+        raise InitProfileError(f"installed language catalog is invalid: {exc}") from exc
 
-    identity = {
-        "schema": LANGUAGE_REFERENCE_SELECTION_SCHEMA,
-        "language": reference_set.language,
-        "capability_id": reference_set.capability_id,
-        "selection_source": selection_source,
-        "semantic_decision_policy": "registered-reference-only",
-        "weak_model_semantic_decision": False,
-        "documentation": [
-            {
-                "reference_id": reference,
-                "reference_kind": "generic-documentation-reference",
-                "source": selection_source,
-            }
-            for reference in documentation
-        ],
-        "tools": [
-            {
-                "tool_id": tool,
-                "reference_kind": "generic-tool-reference",
-                "source": selection_source,
-                "required": tool in reference_set.required_tools,
-                "availability": "UNOBSERVED",
-                "pass_credit": False,
-            }
-            for tool in tools
-        ],
-        "authority_granted": False,
-        "pass_credit": False,
-        "acceptance_pass": False,
+
+def _compose_languages(
+    catalog: LanguageCatalog,
+    *,
+    languages: Iterable[str],
+    overrides: Mapping[str, object] | None = None,
+) -> dict[str, object] | None:
+    values = _iterable_values(
+        languages,
+        "languages",
+        maximum=_MAX_EXPLICIT_LANGUAGES,
+    )
+    if not values:
+        return None
+    try:
+        return compose_language_capabilities(
+            catalog,
+            languages=values,
+            overrides=overrides,
+        )
+    except LanguageCatalogError as exc:
+        raise InitProfileError(str(exc)) from exc
+
+
+def _catalog_profiles(
+    catalog: LanguageCatalog,
+) -> tuple[dict[str, LanguageCapabilityProfile], dict[str, LanguageCapabilityProfile]]:
+    by_id = {profile.profile_id: profile for profile in catalog.profiles}
+    by_language = {
+        language: profile
+        for profile in catalog.profiles
+        for language in profile.languages
     }
-    return {**identity, "selection_digest": digest_value(identity)}
+    return by_id, by_language
+
+
+def _selection_items(
+    value: object,
+    label: str,
+    *,
+    maximum: int,
+) -> tuple[str, ...]:
+    raw = _iterable_values(value, label, maximum=maximum)
+    values = tuple(_id(item, f"{label} item") for item in raw)
+    if len(values) != len(set(values)):
+        raise InitProfileError(f"{label} contains duplicates")
+    return values
+
+
+def _legacy_selection_mode(
+    values: tuple[str, ...],
+    *,
+    declared: tuple[str, ...],
+    legacy_allowed: set[str],
+    label: str,
+) -> dict[str, object]:
+    if not values:
+        return {"mode": "decline", "items": []}
+    if set(values) <= set(declared):
+        return {"mode": "custom", "items": list(values)}
+    unknown = sorted(set(values) - legacy_allowed)
+    if unknown:
+        raise InitProfileError(f"unknown {label} reference: {unknown[0]}")
+    return {"mode": "accept", "items": []}
+
+
+def _legacy_profile_override(
+    language: str,
+    value: object,
+    profile: LanguageCapabilityProfile,
+) -> dict[str, object]:
+    """Translate the pre-catalog language-keyed form once, then discard it."""
+
+    selection = _mapping(value, f"expert {language} selection")
+    if set(selection) != {"capability_id", "documentation", "tools"}:
+        raise InitProfileError(
+            f"expert {language} selection has an unsupported field set"
+        )
+    if selection["capability_id"] != f"{language}-language":
+        raise InitProfileError(
+            f"expert {language} selection cannot change its catalog language"
+        )
+
+    declared_documentation = (
+        profile.documentation_primary + profile.documentation_optional
+    )
+    declared_tools = profile.recommended_tools + profile.optional_tools
+    documentation = _selection_items(
+        selection["documentation"],
+        f"expert {language} documentation",
+        maximum=max(1, len(declared_documentation)),
+    )
+    tools = _selection_items(
+        selection["tools"],
+        f"expert {language} tools",
+        maximum=max(1, len(declared_tools)),
+    )
+
+    language_names = {language}
+    if language == "javascript":
+        language_names.add("ecmascript")
+    legacy_documentation = {
+        f"{name}-{suffix}"
+        for name in language_names
+        for suffix in (
+            "language-reference",
+            "language-specification",
+            "api-guidelines",
+            "api-documentation",
+            "documentation-generator",
+        )
+    }
+    legacy_tools = {
+        f"{language}-{suffix}"
+        for suffix in (
+            "syntax-check",
+            "compiler-check",
+            "compile-check",
+            "language-server",
+            "static-analysis",
+        )
+    }
+    if tools and not set(tools) <= set(declared_tools) and not any(
+        item.endswith("-syntax-check")
+        or item.endswith("-compiler-check")
+        or item.endswith("-compile-check")
+        for item in tools
+    ):
+        raise InitProfileError(
+            f"expert {language} selection omits required tool"
+        )
+
+    return {
+        "documentation": _legacy_selection_mode(
+            documentation,
+            declared=declared_documentation,
+            legacy_allowed=legacy_documentation,
+            label=f"expert {language} documentation",
+        ),
+        "tools": _legacy_selection_mode(
+            tools,
+            declared=declared_tools,
+            legacy_allowed=legacy_tools,
+            label=f"expert {language} tool",
+        ),
+    }
+
+
+def _canonical_profile_selections(
+    composition: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    records = composition.get("profile_selections")
+    if not isinstance(records, list):
+        raise InitProfileError("language composition profile selections are invalid")
+    result: dict[str, dict[str, object]] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise InitProfileError("language composition profile selection is invalid")
+        profile_id = record.get("profile_id")
+        documentation = record.get("documentation")
+        tools = record.get("tools")
+        if (
+            not isinstance(profile_id, str)
+            or not isinstance(documentation, Mapping)
+            or not isinstance(tools, Mapping)
+        ):
+            raise InitProfileError("language composition profile selection is invalid")
+        result[profile_id] = {
+            "documentation": dict(documentation),
+            "tools": dict(tools),
+        }
+    return result
+
+
+def _normalize_expert_selections(
+    catalog: LanguageCatalog,
+    preview: Mapping[str, object],
+    value: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, object]], dict[str, object]]:
+    raw = _canonical_object(value, "expert language selections")
+    selected_profile_ids = tuple(preview["selected_profile_ids"])
+    requested_languages = tuple(preview["requested_languages"])
+    profile_keys = set(selected_profile_ids)
+    language_keys = set(requested_languages)
+
+    if set(raw) == profile_keys:
+        for profile_id, selection in raw.items():
+            candidate = _mapping(selection, f"expert {profile_id} selection")
+            if set(candidate) != {"documentation", "tools"}:
+                raise InitProfileError(
+                    f"expert {profile_id} selection must contain documentation and tools"
+                )
+        normalized_input: dict[str, object] = raw
+    elif set(raw) == language_keys:
+        _, by_language = _catalog_profiles(catalog)
+        translated: dict[str, object] = {}
+        for language in requested_languages:
+            profile = by_language[language]
+            override = _legacy_profile_override(language, raw[language], profile)
+            previous = translated.get(profile.profile_id)
+            if previous is not None and previous != override:
+                raise InitProfileError(
+                    f"legacy selections for {profile.profile_id} disagree"
+                )
+            translated[profile.profile_id] = override
+        normalized_input = translated
+    else:
+        raise InitProfileError(
+            "expert language selections must contain exactly the selected profile IDs"
+        )
+
+    composition = _compose_languages(
+        catalog,
+        languages=requested_languages,
+        overrides=normalized_input,
+    )
+    if composition is None:  # pragma: no cover - expert selection is non-empty
+        raise InitProfileError("expert experience requires at least one language")
+    composed = _canonical_profile_selections(composition)
+    if set(composed) != profile_keys:
+        raise InitProfileError(
+            "expert language selections do not cover the selected profiles"
+        )
+    normalized = {
+        profile_id: {
+            "documentation": dict(
+                _mapping(
+                    _mapping(normalized_input[profile_id], profile_id)["documentation"],
+                    f"{profile_id} documentation",
+                )
+            ),
+            "tools": dict(
+                _mapping(
+                    _mapping(normalized_input[profile_id], profile_id)["tools"],
+                    f"{profile_id} tools",
+                )
+            ),
+        }
+        for profile_id in selected_profile_ids
+    }
+    return normalized, composition
+
+
+def _capability_selection_records(
+    catalog: LanguageCatalog,
+    composition: Mapping[str, object] | None,
+    *,
+    selection_source: str,
+) -> list[dict[str, object]]:
+    if composition is None:
+        return []
+    requested = set(composition["requested_languages"])
+    by_id, _ = _catalog_profiles(catalog)
+    normalized = _canonical_profile_selections(composition)
+    records: list[dict[str, object]] = []
+    for profile_id, selection in normalized.items():
+        profile = by_id[profile_id]
+        identity = {
+            "schema": LANGUAGE_REFERENCE_SELECTION_SCHEMA,
+            "profile_id": profile_id,
+            "languages": [
+                language for language in profile.languages if language in requested
+            ],
+            "selection_source": selection_source,
+            "documentation": selection["documentation"],
+            "tools": selection["tools"],
+            "profile_digest": profile.profile_digest,
+            "authority_granted": False,
+            "pass_credit": False,
+            "acceptance_pass": False,
+        }
+        records.append({**identity, "selection_digest": digest_value(identity)})
+    return records
 
 
 def resolve_init_experience(
@@ -777,16 +878,13 @@ def resolve_init_experience(
     expert_selections: Mapping[str, Any] | None = None,
     expert_source: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve deterministic minimal or explicitly selected expert init UX.
+    """Resolve minimal defaults or explicit expert profile choices.
 
-    Language IDs must be supplied by a caller that already has an explicit,
-    independently-derived language choice.  This function never infers a
-    language, chooses a semantic capability from model output, probes tools, or
-    grants authority.  Expert input can choose only registered generic
-    references, and every unknown input is rejected before a result is made.
+    All language, documentation, and tool identities come from the installed
+    language catalog.  This function performs no tool discovery or execution.
     """
 
-    if not isinstance(experience, str) or experience not in _INIT_EXPERIENCES:
+    if experience not in _INIT_EXPERIENCES:
         raise InitProfileError("init experience must be minimal or expert")
     profile = resolve_init_profile(
         standard_default,
@@ -795,54 +893,52 @@ def resolve_init_experience(
         cli_override=cli_override,
         interactive_override=interactive_override,
     )
-    selected_languages = _selected_generic_languages(languages)
+    catalog = _installed_language_catalog()
+    preview = _compose_languages(catalog, languages=languages)
+
     if experience == "minimal":
         if expert_selections is not None or expert_source is not None:
             raise InitProfileError(
-                "minimal one-click experience does not accept expert semantic selections"
+                "minimal one-click experience does not accept expert selections"
             )
         selection_source = _MINIMAL_SELECTION_SOURCE
-        selections = [
-            _language_reference_selection(
-                _GENERIC_LANGUAGE_REFERENCES[language],
-                documentation=_GENERIC_LANGUAGE_REFERENCES[language].minimal_documentation,
-                tools=_GENERIC_LANGUAGE_REFERENCES[language].required_tools,
-                selection_source=selection_source,
-            )
-            for language in selected_languages
-        ]
+        composition = preview
+        normalized_selections = (
+            {} if composition is None else _canonical_profile_selections(composition)
+        )
         capability_precedence = [
-            "registered-generic-reference",
+            "installed-language-catalog",
             _MINIMAL_SELECTION_SOURCE,
         ]
     else:
-        if not selected_languages:
-            raise InitProfileError("expert experience requires at least one explicit language")
-        if expert_selections is None:
-            raise InitProfileError("expert experience requires explicit language selections")
-        if (
-            not isinstance(expert_source, str)
-            or expert_source not in _EXPERT_SELECTION_SOURCES
-        ):
+        if preview is None:
             raise InitProfileError(
-                "expert semantic selection source must be owner, cli, or interactive-user"
+                "expert experience requires at least one explicit language"
             )
-        selection_source = expert_source
-        selected = _expert_language_selections(
+        if expert_selections is None:
+            raise InitProfileError(
+                "expert experience requires explicit profile selections"
+            )
+        if expert_source not in _EXPERT_SELECTION_SOURCES:
+            raise InitProfileError(
+                "expert selection source must be owner, cli, or interactive-user"
+            )
+        selection_source = str(expert_source)
+        normalized_selections, composition = _normalize_expert_selections(
+            catalog,
+            preview,
             expert_selections,
-            languages=selected_languages,
         )
-        selections = [
-            _language_reference_selection(
-                _GENERIC_LANGUAGE_REFERENCES[language],
-                documentation=selected[language][0],
-                tools=selected[language][1],
-                selection_source=selection_source,
-            )
-            for language in selected_languages
-        ]
-        capability_precedence = ["registered-generic-reference", selection_source]
+        capability_precedence = ["installed-language-catalog", selection_source]
 
+    selected_languages = (
+        [] if composition is None else list(composition["requested_languages"])
+    )
+    selections = _capability_selection_records(
+        catalog,
+        composition,
+        selection_source=selection_source,
+    )
     identity = {
         "schema": INIT_EXPERIENCE_SCHEMA,
         "experience": experience,
@@ -852,9 +948,13 @@ def resolve_init_experience(
         "profile_provenance": profile["provenance"],
         "capability_precedence": capability_precedence,
         "capability_selection_source": selection_source,
-        "languages": list(selected_languages),
+        "language_catalog_digest": catalog.catalog_digest,
+        "language_catalog_source_digest": catalog.source_digest,
+        "languages": selected_languages,
+        "profile_selections": normalized_selections,
         "capability_selections": selections,
-        "semantic_decision_policy": "registered-default-or-explicit-owner-cli-interactive",
+        "language_composition": composition,
+        "semantic_decision_policy": "catalog-default-or-explicit-profile-selection",
         "weak_model_semantic_decisions": False,
         "model_inference_used": False,
         "host_probe_performed": False,
@@ -863,5 +963,237 @@ def resolve_init_experience(
         "authority_granted": False,
         "pass_credit": False,
         "acceptance_pass": False,
+        "product_acceptance_pass": False,
+        "release_approved": False,
     }
     return {**identity, "experience_digest": digest_value(identity)}
+
+
+def _canonical_object(value: object, label: str) -> dict[str, Any]:
+    candidate = _mapping(value, label)
+    try:
+        normalized = parse_json_strict(canonical_bytes(candidate))
+    except CanonicalError as exc:
+        raise InitProfileError(f"{label} is not bounded canonical JSON") from exc
+    if not isinstance(normalized, dict):  # pragma: no cover - _mapping owns this
+        raise InitProfileError(f"{label} must be an object")
+    return normalized
+
+
+def _bundle_override(
+    value: Mapping[str, Any] | None,
+    source: str,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return _validate_override(
+        _canonical_object(value, f"{source} override"),
+        source,
+    )
+
+
+def _bundle_claims_are_false(value: Mapping[str, Any], label: str) -> None:
+    for field, expected in _BUNDLE_CLAIMS.items():
+        if value.get(field) != expected or type(value.get(field)) is not type(expected):
+            raise InitProfileError(f"{label} {field} is invalid")
+
+
+def _expert_bundle_values(
+    *,
+    standard_default: Mapping[str, Any],
+    plan_inputs: Mapping[str, Any],
+    languages: Iterable[str],
+    expert_selections: Mapping[str, Any],
+    expert_source: str,
+    host_override: Mapping[str, Any] | None,
+    project_override: Mapping[str, Any] | None,
+    cli_override: Mapping[str, Any] | None,
+    interactive_override: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    standard = validate_init_profile(
+        _canonical_object(standard_default, "expert bundle standard profile")
+    )
+    overrides = {
+        "host_override": _bundle_override(host_override, "host-profile"),
+        "project_override": _bundle_override(project_override, "project-package"),
+        "cli_override": _bundle_override(cli_override, "cli"),
+        "interactive_override": _bundle_override(
+            interactive_override,
+            "interactive-user",
+        ),
+    }
+    normalized_plan_inputs = _canonical_object(plan_inputs, "expert plan_inputs")
+    if not normalized_plan_inputs:
+        raise InitProfileError("expert plan_inputs must not be empty")
+    resolved = resolve_init_experience(
+        standard,
+        experience="expert",
+        languages=languages,
+        expert_selections=expert_selections,
+        expert_source=expert_source,
+        **overrides,
+    )
+
+    identity = {
+        "record_type": "ExpertInit",
+        "schema": EXPERT_INIT_BUNDLE_SCHEMA,
+        "bundle_file": _EXPERT_INIT_FILE,
+        "standard_default": standard,
+        **overrides,
+        "languages": resolved["languages"],
+        "expert_selections": resolved["profile_selections"],
+        "expert_source": expert_source,
+        "plan_inputs": normalized_plan_inputs,
+        "resolved_experience": resolved,
+        **_BUNDLE_CLAIMS,
+    }
+    return {**identity, "bundle_digest": digest_value(identity)}
+
+
+def _read_canonical_bundle_object(data: bytes) -> dict[str, Any]:
+    try:
+        value = parse_json_strict(data)
+        if canonical_bytes(value) != data:
+            raise InitProfileError("expert init bytes are not canonical")
+    except InitProfileError:
+        raise
+    except CanonicalError as exc:
+        raise InitProfileError("expert init cannot be loaded") from exc
+    if not isinstance(value, dict):
+        raise InitProfileError("expert init must be an object")
+    return value
+
+
+def _exact_expert_init_path(directory: Path) -> Path:
+    try:
+        if not directory.is_dir():
+            raise InitProfileError("expert init bundle must be a directory")
+        entries = list(islice(directory.iterdir(), 2))
+    except InitProfileError:
+        raise
+    except OSError as exc:
+        raise InitProfileError("expert init bundle directory cannot be read") from exc
+    if (
+        len(entries) != 1
+        or entries[0].name != _EXPERT_INIT_FILE
+        or not entries[0].is_file()
+    ):
+        raise InitProfileError(
+            f"expert init bundle must contain exactly {_EXPERT_INIT_FILE}"
+        )
+    return entries[0]
+
+
+def _read_expert_init_bytes(path: Path) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(DEFAULT_LIMITS.max_bytes + 1)
+    except OSError as exc:
+        raise InitProfileError("expert init file cannot be read") from exc
+    if not data or len(data) > DEFAULT_LIMITS.max_bytes:
+        raise InitProfileError("expert init file exceeds its bounded size")
+    return data
+
+
+def export_expert_init_bundle(
+    directory: Path | str,
+    *,
+    standard_default: Mapping[str, Any],
+    plan_inputs: Mapping[str, Any],
+    languages: Iterable[str],
+    expert_selections: Mapping[str, Any],
+    expert_source: str,
+    host_override: Mapping[str, Any] | None = None,
+    project_override: Mapping[str, Any] | None = None,
+    cli_override: Mapping[str, Any] | None = None,
+    interactive_override: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create one directory containing one canonical expert-init document."""
+
+    document = _expert_bundle_values(
+        standard_default=standard_default,
+        plan_inputs=plan_inputs,
+        languages=languages,
+        expert_selections=expert_selections,
+        expert_source=expert_source,
+        host_override=host_override,
+        project_override=project_override,
+        cli_override=cli_override,
+        interactive_override=interactive_override,
+    )
+    try:
+        data = canonical_bytes(document)
+    except CanonicalError as exc:  # pragma: no cover - values were normalized above
+        raise InitProfileError("expert init document exceeds its bounds") from exc
+
+    destination = Path(directory)
+    try:
+        destination.mkdir()
+    except FileExistsError as exc:
+        raise InitProfileError("expert bundle destination already exists") from exc
+    except FileNotFoundError as exc:
+        raise InitProfileError(
+            "expert bundle destination parent must already be a directory"
+        ) from exc
+    except OSError as exc:
+        raise InitProfileError("expert bundle destination cannot be created") from exc
+
+    try:
+        with (destination / _EXPERT_INIT_FILE).open("xb") as handle:
+            handle.write(data)
+    except OSError as exc:
+        raise InitProfileError("expert init file cannot be written") from exc
+
+    imported = import_expert_init_bundle(destination)
+    if imported != document:
+        raise InitProfileError("expert init publication did not round-trip exactly")
+    return imported
+
+
+def import_expert_init_bundle(directory: Path | str) -> dict[str, Any]:
+    """Load and recompute one canonical expert-init document."""
+
+    path = _exact_expert_init_path(Path(directory))
+    value = _read_canonical_bundle_object(_read_expert_init_bytes(path))
+    if value.get("record_type") != "ExpertInit":
+        raise InitProfileError("expert init record_type is invalid")
+    if value.get("schema") != EXPERT_INIT_BUNDLE_SCHEMA:
+        raise InitProfileError("expert init schema is invalid")
+    if value.get("bundle_file") != _EXPERT_INIT_FILE:
+        raise InitProfileError("expert init filename binding is invalid")
+    _bundle_claims_are_false(value, "expert init")
+
+    identity = {key: item for key, item in value.items() if key != "bundle_digest"}
+    if value.get("bundle_digest") != digest_value(identity):
+        raise InitProfileError("expert init bundle digest mismatch")
+
+    required = {
+        "standard_default",
+        "plan_inputs",
+        "languages",
+        "expert_selections",
+        "expert_source",
+        "host_override",
+        "project_override",
+        "cli_override",
+        "interactive_override",
+    }
+    if not required <= set(value):
+        raise InitProfileError("expert init is missing a required configuration field")
+    try:
+        expected = _expert_bundle_values(
+            standard_default=value["standard_default"],
+            plan_inputs=value["plan_inputs"],
+            languages=value["languages"],
+            expert_selections=value["expert_selections"],
+            expert_source=value["expert_source"],
+            host_override=value["host_override"],
+            project_override=value["project_override"],
+            cli_override=value["cli_override"],
+            interactive_override=value["interactive_override"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise InitProfileError("expert init configuration is invalid") from exc
+    if value != expected:
+        raise InitProfileError("expert init is not normalized or self-consistent")
+    return expected

@@ -64,6 +64,12 @@ _PHYSICAL_CORPUS_RECIPE = "representative-operational-text-v3"
 _EXACT_PHYSICAL_FILES = 100_000
 _EXACT_CORE_VALID_RELATIONS = 198_999
 _EXACT_RUNTIME_QUERIES = 600
+_CONTINUATION_STATE_ROWS_MAX = 10_000
+_CONTINUATION_STATE_BYTES_MAX = 16_384
+_CONTINUATION_STATE_TOTAL_BYTES_MAX = (
+    _CONTINUATION_STATE_ROWS_MAX * _CONTINUATION_STATE_BYTES_MAX
+)
+_CONTINUATION_STATE_OBSERVATIONS_MAX = 100_000
 _SATURATION_CONTINUATION_TTL_SECONDS = 900
 _SEARCH_FIXTURE_TASK_COUNT = 32
 _SEARCH_FIXTURE_RELATION_COUNT = 28
@@ -3251,6 +3257,8 @@ def _mixed_query_budget(ceiling: Mapping[str, int]) -> dict[str, int]:
 
 
 def _continuation_state_files(workspace: Path) -> dict[str, int]:
+    # Compatibility-only for historical JSON-state tests. The saturation run uses
+    # _ContinuationStateObserver and the projection SQLite database below.
     root = workspace / ".promin" / "state" / "continuations"
     if not root.exists():
         return {}
@@ -3331,6 +3339,157 @@ def _continuation_state_rows(
     return rows
 
 
+class _ContinuationStateObserver:
+    """Capture bounded SQLite continuation measurements before resume consumes rows."""
+
+    _DATABASE_RELATIVE = ".promin/state/projection/promin.sqlite3"
+    _ROW_LOCATOR_PREFIX = _DATABASE_RELATIVE + "#continuations/"
+    _HANDLE_BYTES_MAX = 256
+
+    def __init__(self, workspace: Path) -> None:
+        self._database = Path(workspace).resolve() / Path(
+            ".promin/state/projection/promin.sqlite3"
+        )
+        self._rows: dict[str, dict[str, Any]] = {}
+        self._measurements: list[dict[str, int]] = []
+        self._assert_empty_baseline()
+
+    def _open_readonly(self) -> sqlite3.Connection:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                self._database.as_uri() + "?mode=ro",
+                uri=True,
+                isolation_level=None,
+            )
+            connection.execute("PRAGMA query_only=ON")
+            return connection
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            if connection is not None:
+                connection.close()
+            raise SaturationError(
+                "continuation projection database cannot be opened read-only"
+            ) from exc
+
+    def _assert_empty_baseline(self) -> None:
+        connection = self._open_readonly()
+        try:
+            count = connection.execute("SELECT count(*) FROM continuations").fetchone()
+        except sqlite3.Error as exc:
+            raise SaturationError("continuation baseline cannot be measured") from exc
+        finally:
+            connection.close()
+        if count != (0,):
+            raise SaturationError("physical saturation continuation baseline is not empty")
+
+    @staticmethod
+    def _token_locator(continuation: Mapping[str, Any]) -> tuple[str, str]:
+        token = continuation.get("token")
+        if not isinstance(token, str):
+            raise SaturationError("continuation token format is invalid")
+        try:
+            token_bytes = token.encode("ascii")
+        except UnicodeError as exc:
+            raise SaturationError("continuation token format is invalid") from exc
+        if len(token_bytes) > 256:
+            raise SaturationError("continuation token format is invalid")
+        parts = token.split(".")
+        if len(parts) != 4 or parts[0] != "promin-v2" or not parts[1] or not parts[3]:
+            raise SaturationError("continuation token format is invalid")
+        digest = _hex_digest(parts[2], "continuation token row digest")
+        if digest != parts[2]:
+            raise SaturationError("continuation token row digest is noncanonical")
+        return parts[1], digest
+
+    def observe(self, continuation: Mapping[str, Any]) -> None:
+        if not isinstance(continuation, Mapping):
+            raise SaturationError("continuation observation envelope is invalid")
+        handle, token_row_digest = self._token_locator(continuation)
+        if len(handle.encode("utf-8")) > self._HANDLE_BYTES_MAX:
+            raise SaturationError("continuation handle exceeds its byte ceiling")
+        connection = self._open_readonly()
+        try:
+            connection.execute("BEGIN")
+            summary = connection.execute(
+                "SELECT count(*),"
+                "coalesce(max(length(CAST(payload_json AS BLOB))),0),"
+                "coalesce(sum(length(CAST(payload_json AS BLOB))),0) "
+                "FROM continuations"
+            ).fetchone()
+            row = connection.execute(
+                "SELECT row_digest,length(CAST(payload_json AS BLOB)) "
+                "FROM continuations WHERE handle=? LIMIT 1",
+                (handle,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise SaturationError("continuation state cannot be measured") from exc
+        finally:
+            connection.close()
+        if (
+            not isinstance(summary, tuple)
+            or len(summary) != 3
+            or any(type(value) is not int or value < 0 for value in summary)
+        ):
+            raise SaturationError("continuation state summary is invalid")
+        row_count, maximum_bytes, total_bytes = summary
+        if row_count < 1 or row_count > _CONTINUATION_STATE_ROWS_MAX:
+            raise SaturationError("continuation state exceeded its row ceiling")
+        if (
+            maximum_bytes < 1
+            or maximum_bytes > _CONTINUATION_STATE_BYTES_MAX
+            or total_bytes < maximum_bytes
+            or total_bytes > _CONTINUATION_STATE_TOTAL_BYTES_MAX
+        ):
+            raise SaturationError("continuation state exceeded its byte ceiling")
+        if not isinstance(row, tuple) or len(row) != 2:
+            raise SaturationError("continuation state row is missing")
+        row_digest, payload_bytes = row
+        try:
+            digest = _hex_digest(row_digest, "continuation row digest")
+        except SaturationError as exc:
+            raise SaturationError("continuation state row digest is invalid") from exc
+        if digest != token_row_digest:
+            raise SaturationError("continuation state row digest differs from token")
+        if (
+            type(payload_bytes) is not int
+            or payload_bytes < 1
+            or payload_bytes > _CONTINUATION_STATE_BYTES_MAX
+        ):
+            raise SaturationError("continuation state row exceeded its byte ceiling")
+        locator = self._ROW_LOCATOR_PREFIX + digest
+        measured = {"path": locator, "sha256": digest, "bytes": payload_bytes}
+        existing = self._rows.get(locator)
+        if existing is not None and existing != measured:
+            raise SaturationError("continuation observation digest collision")
+        if existing is None and len(self._rows) >= _CONTINUATION_STATE_ROWS_MAX:
+            raise SaturationError("continuation manifest exceeded its row ceiling")
+        if len(self._measurements) >= _CONTINUATION_STATE_OBSERVATIONS_MAX:
+            raise SaturationError("continuation measurement exceeded its sample ceiling")
+        self._rows[locator] = measured
+        self._measurements.append(
+            {
+                "rows": row_count,
+                "maximum_bytes": maximum_bytes,
+                "total_bytes": total_bytes,
+            }
+        )
+
+    def manifest_rows(self) -> list[dict[str, Any]]:
+        return [dict(self._rows[path]) for path in sorted(self._rows)]
+
+    def measurement_rows(self) -> list[dict[str, int]]:
+        return [dict(measurement) for measurement in self._measurements]
+
+    def metrics(self) -> dict[str, int]:
+        sizes = [row["bytes"] for row in self.manifest_rows()]
+        return {
+            "files": len(sizes),
+            "maximum_bytes": max(sizes, default=0),
+            "total_bytes": sum(sizes),
+            "preexisting_files_excluded": 0,
+        }
+
+
 def _drain_pages(
     runtime: Any,
     first: Any,
@@ -3338,6 +3497,7 @@ def _drain_pages(
     *,
     query_grant: Mapping[str, Any],
     ttl_seconds: int,
+    continuation_observer: _ContinuationStateObserver | None = None,
 ) -> dict[str, Any]:
     current = first
     seen_atoms: set[str] = set()
@@ -3482,6 +3642,8 @@ def _drain_pages(
             raise SaturationError(
                 "continuation source page omitted its exact search binding"
             )
+        if continuation_observer is not None:
+            continuation_observer.observe(continuation)
         current = runtime.search(
             continuation_query,
             continuation_depth,
@@ -4330,7 +4492,7 @@ def run(
         "max_fanout_per_entity": 1,
         "top_k": 1,
     }
-    continuation_state_baseline = set(_continuation_state_files(workspace))
+    continuation_observer = _ContinuationStateObserver(workspace)
     query_results: list[dict[str, Any]] = []
     search_started = time.perf_counter()
     for index in range(queries):
@@ -4400,6 +4562,7 @@ def run(
             ceiling,
             query_grant=query_grant,
             ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
+            continuation_observer=continuation_observer,
         )
         if reference["selected_closure_complete"]:
             selected_closure_chains += 1
@@ -4430,6 +4593,7 @@ def run(
                 forced_budget,
                 query_grant=query_grant,
                 ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
+                continuation_observer=continuation_observer,
             )
             if forced["selected_closure_complete"]:
                 selected_closure_chains += 1
@@ -4504,10 +4668,16 @@ def run(
         raise SaturationError("bounded queries did not prove explicit truncation and continuation")
     if set(query_depth_counts) != set(range(1, 13)):
         raise SaturationError("mixed runtime queries did not cover every depth 1-12")
-    continuation_state = _continuation_state_metrics(
-        workspace,
-        baseline_files=continuation_state_baseline,
-    )
+    continuation_state = continuation_observer.metrics()
+    continuation_rows = continuation_observer.manifest_rows()
+    if continuation_state["files"] < 1:
+        raise SaturationError(
+            "physical saturation did not observe transient SQLite continuation state"
+        )
+    if not _continuation_state_within_limit(continuation_state):
+        raise SaturationError(
+            "physical saturation continuation state exceeded its verified byte ceiling"
+        )
     final_artifact_binding = build_artifact_binding(PACKAGE_ROOT, archive)
     if final_artifact_binding["binding_digest"] != artifact_binding["binding_digest"]:
         raise SaturationError("exact package/archive identity changed during saturation")
@@ -4885,10 +5055,6 @@ def run(
         ],
     }
     _write_json(output / "raw" / "process-samples.json", process_samples)
-    continuation_rows = _continuation_state_rows(
-        workspace,
-        baseline_files=continuation_state_baseline,
-    )
     _write_jsonl(
         output / "raw" / "continuation-state-manifest.jsonl",
         continuation_rows,

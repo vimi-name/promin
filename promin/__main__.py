@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
+import base64
 import sys
 import time
 from pathlib import Path
@@ -10,24 +9,28 @@ from typing import Any, Mapping
 
 from . import __version__
 from .audit import audit_project
-from .canonical import canonical_bytes, load_json_strict
+from .canonical import CanonicalError, ParseLimits, canonical_bytes, digest_bytes
+from .canonical import load_json_strict, parse_json_strict
 from .context_index import query_context
 from .experience import (
     apply_plan,
     bind_init_capability_selection,
     emit_expert_config,
     experience_status,
+    load_resolved_plan,
     next_proposal,
     resolve_plan,
     write_plan,
 )
 from .init_profiles import (
     InitProfileError,
+    import_expert_init_bundle,
     load_init_profile,
     negotiate_language_capabilities,
     resolve_init_experience,
     resolve_init_profile,
 )
+from .language_catalog import languages_for_detected_technologies
 from .resources import bundle_root
 from .init import InitRequest, emit_canonical_init_plans, review_init_request
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
@@ -82,11 +85,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="strict JSON object of complete registered selections for --init-experience expert",
     )
-    init.add_argument("--max-preflight-files", type=int, default=PREFLIGHT_FILE_ITEMS_MAX)
+    init.add_argument("--max-preflight-files", type=int)
     init.add_argument("--apply", "--yes", dest="apply", action="store_true", help="apply the resolved plan")
     init.add_argument("--plan-only", action="store_true", help="never apply the resolved plan")
     init.add_argument("--plan-out", type=Path)
     init.add_argument("--emit-expert-config", type=Path)
+    init.add_argument("--expert-bundle", type=Path, help="exact expert bundle")
 
     # Strict expert/compatibility path. These options are intentionally hidden
     # from the ordinary workflow but preserve full explicit configuration.
@@ -108,6 +112,8 @@ def _parser() -> argparse.ArgumentParser:
     doctor_mode.add_argument("--repair", action="store_true", help="plan reversible portability repair")
     doctor_mode.add_argument("--apply-repair", action="store_true", help="apply reversible repair")
     doctor_mode.add_argument("--checklist", action="store_true", help="run the bounded whole-system alpha checklist")
+    doctor_mode.add_argument("--revalidate", type=Path, metavar="INPUT")
+    doctor.add_argument("--execute-revalidation", action="store_true")
 
     status = sub.add_parser("status", help="show operational and experience state")
     status.add_argument("--watch", action="store_true")
@@ -119,6 +125,29 @@ def _parser() -> argparse.ArgumentParser:
     next_cmd.add_argument("--grant")
     next_cmd.add_argument("--query-grant")
     next_cmd.add_argument("--depth", type=int, choices=range(1, 13))
+    next_cmd.add_argument(
+        "--weak-work",
+        choices=(
+            "prepare",
+            "review",
+            "resume",
+            "record",
+            "pause",
+            "resume-task",
+            "cancel",
+            "owner-decision",
+            "recover-interrupted",
+        ),
+        help="manage a deterministic weak-worker workflow; never invokes a model",
+    )
+    next_cmd.add_argument("--weak-input", type=Path)
+    next_cmd.add_argument("--weak-receipts", type=Path)
+    next_cmd.add_argument("--weak-task-id")
+    next_cmd.add_argument("--weak-outcome", type=Path)
+    next_cmd.add_argument("--weak-authorize-current", action="store_true")
+    next_cmd.add_argument("--weak-decision", choices=("APPROVED", "DECLINED"))
+    next_cmd.add_argument("--weak-confirm-stopped", action="store_true")
+    next_cmd.add_argument("--initial-work", choices=("plan", "execute"))
 
     validate = sub.add_parser("validate", help="validate Core and current operational state")
     validate.add_argument("--no-replay", action="store_true")
@@ -181,6 +210,7 @@ def _parser() -> argparse.ArgumentParser:
     skill_remove.add_argument("name")
     skill_remove.add_argument("--local", action="store_true")
     skill_commands.add_parser("sync", help="refresh native host wrappers and context surfaces")
+
     return parser
 
 
@@ -199,6 +229,47 @@ def _period_seconds(value: str | None) -> int | None:
         raise ServiceError("--since must be non-negative")
     multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 1)
     return amount * multiplier
+
+
+_PUBLIC_INPUT_LIMITS = ParseLimits(max_bytes=4 * 1024 * 1024, max_items=100_000)
+_PUBLIC_PREFLIGHT_FILES_MAX = 1_000_000
+
+
+def _load_canonical_object(path: Path, label: str) -> dict[str, Any]:
+    """Load one ordinary, bounded, byte-canonical JSON object."""
+
+    try:
+        value = load_json_strict(path, root=path.parent, limits=_PUBLIC_INPUT_LIMITS)
+        with path.open("rb") as stream:
+            encoded = stream.read(_PUBLIC_INPUT_LIMITS.max_bytes + 1)
+        if not isinstance(value, dict) or canonical_bytes(
+            value, limits=_PUBLIC_INPUT_LIMITS
+        ) != encoded:
+            raise ServiceError(f"{label} must be one exact canonical JSON object")
+        return value
+    except ServiceError:
+        raise
+    except (CanonicalError, OSError) as exc:
+        raise ServiceError(f"{label} cannot be loaded as canonical JSON") from exc
+
+
+def _input_path(value: object, base: Path, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ServiceError(f"{label} must be a non-empty path")
+    selected = Path(value)
+    return (selected if selected.is_absolute() else base / selected).absolute()
+
+
+def _require_false_claims(value: Mapping[str, Any], label: str) -> None:
+    for field in ("authority_granted", "pass_credit", "acceptance_pass", "product_acceptance_pass"):
+        if value.get(field) is not False:
+            raise ServiceError(f"{label} {field} must remain false")
+
+
+def _bounded_preflight_files(value: object, label: str) -> int:
+    if type(value) is not int or not 1 <= value <= _PUBLIC_PREFLIGHT_FILES_MAX:
+        raise ServiceError(f"{label} is outside 1..{_PUBLIC_PREFLIGHT_FILES_MAX}")
+    return value
 
 
 def _expert_init_requested(args: argparse.Namespace) -> bool:
@@ -229,6 +300,97 @@ def _expert_init_requested(args: argparse.Namespace) -> bool:
             "--activation-proofs, --emit-plan, --review-plan, and --dry-run require complete hidden expert plan inputs"
         )
     return complete
+
+
+def _reject_competing_expert_bundle_options(args: argparse.Namespace) -> None:
+    excluded = (
+        "goal", "brief", "autonomy", "language", "profile", "documentation",
+        "verification", "documentation_tool", "verification_tool",
+        "init_experience", "capability_language", "capability_selections",
+        "max_preflight_files", "standard_bundle", "preset", "project_plan",
+        "standards_plan", "technologies_plan", "licenses_plan", "authority_plan",
+        "activation_proofs", "emit_plan", "review_plan", "dry_run",
+    )
+    if any(getattr(args, name) not in (None, False, []) for name in excluded):
+        raise ServiceError("--expert-bundle cannot be combined with configuration inputs")
+
+
+def _next_initial_project_work(root: Path, *, execute: bool) -> dict[str, Any]:
+    _require_initialized(root)
+    plan = load_resolved_plan(root)
+    if plan is None:
+        raise ServiceError(
+            "initialized project has no resolved plan; run promin doctor --repair"
+        )
+    from .initial_project_work import prepare_initial_project_work
+
+    return prepare_initial_project_work(root, plan, execute=execute)
+
+
+def _run_expert_bundle_init(
+    args: argparse.Namespace, root: Path
+) -> dict[str, Any]:
+    _reject_competing_expert_bundle_options(args)
+    try:
+        imported = import_expert_init_bundle(args.expert_bundle.absolute())
+        inputs = imported["plan_inputs"]
+        plan = resolve_plan(
+            root,
+            goal=inputs["goal"],
+            autonomy=inputs["autonomy"],
+            language=inputs["reporting_language"],
+            explicit_profiles=tuple(inputs["profile_layers"]),
+            brief=dict(inputs["brief"]),
+            max_preflight_files=_bounded_preflight_files(
+                inputs["max_preflight_files"], "expert bundle max_preflight_files"
+            ),
+        )
+        if plan["profile_layers"] != inputs["profile_layers"]:
+            raise ServiceError("expert bundle resolved a different profile order")
+        resolved_experience = imported["resolved_experience"]
+        plan = bind_init_capability_selection(
+            plan, _compact_experience_capability_selection(resolved_experience)
+        )
+    except (InitProfileError, KeyError, TypeError, ValueError) as exc:
+        raise ServiceError(f"expert init bundle is invalid: {exc}") from exc
+
+    if args.plan_out is not None:
+        write_plan(args.plan_out.resolve(), plan)
+    emitted = (
+        None
+        if args.emit_expert_config is None
+        else emit_expert_config(args.emit_expert_config.resolve(), plan, root)
+    )
+    bundle_record = {
+        "record_type": "ImportedExpertInitBundle",
+        "bundle_digest": imported["bundle_digest"],
+        "plan_inputs": inputs,
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+    }
+    if args.apply and not args.plan_only:
+        result = apply_plan(root, plan)
+        result["expert_init_bundle"] = bundle_record
+        result["init_experience"] = resolved_experience
+        if emitted is not None:
+            result["expert_config"] = emitted
+        return result
+    return {
+        "record_type": "GuidedInitReview",
+        "status": "review-required",
+        "resolved_plan": plan,
+        "apply_command": "promin init --expert-bundle PATH --yes",
+        "clarification": "Review the exact imported bundle and resolved plan before applying.",
+        "expert_config": emitted,
+        "expert_init_bundle": bundle_record,
+        "init_experience": resolved_experience,
+        "authority": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+    }
 
 
 def _run_expert_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
@@ -268,29 +430,6 @@ def _run_expert_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     if args.review_plan or args.dry_run:
         return review_init_request(request, run_preflight=args.dry_run)
     return ProminService(root).initialize(request)
-
-
-_REGISTERED_GENERIC_LANGUAGE_ORDER = (
-    "c",
-    "cpp",
-    "csharp",
-    "java",
-    "javascript",
-    "python",
-)
-_DETECTED_TECHNOLOGY_GENERIC_LANGUAGE_IDS: Mapping[str, tuple[str, ...]] = {
-    # ``detect_technologies`` deliberately reports the C family as ``cpp``;
-    # retaining both registered IDs is a deterministic compatibility mapping,
-    # not a semantic decision or a host observation.
-    "cpp": ("c", "cpp"),
-    "cmake": ("c", "cpp"),
-    "dotnet": ("csharp",),
-    "java": ("java",),
-    "javascript": ("javascript",),
-    "typescript": ("javascript",),
-    "node": ("javascript",),
-    "python": ("python",),
-}
 
 
 def _legacy_capability_flags_present(args: argparse.Namespace) -> bool:
@@ -352,22 +491,12 @@ def _guided_capability_mode(args: argparse.Namespace) -> str:
 def _registered_languages_from_detected_technologies(
     plan: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    """Map only deterministic technology facts to registered generic IDs."""
+    """Delegate deterministic technology resolution to bundled catalog truth."""
 
-    detected = {
+    return languages_for_detected_technologies(
         str(item.get("technology", "")).casefold()
         for item in plan.get("detected_technologies", [])
         if isinstance(item, Mapping)
-    }
-    selected = {
-        language
-        for technology in detected
-        for language in _DETECTED_TECHNOLOGY_GENERIC_LANGUAGE_IDS.get(technology, ())
-    }
-    return tuple(
-        language
-        for language in _REGISTERED_GENERIC_LANGUAGE_ORDER
-        if language in selected
     )
 
 
@@ -464,7 +593,12 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         language=args.language,
         explicit_profiles=tuple(args.profile),
         brief=brief,
-        max_preflight_files=args.max_preflight_files,
+        max_preflight_files=_bounded_preflight_files(
+            PREFLIGHT_FILE_ITEMS_MAX
+            if args.max_preflight_files is None
+            else args.max_preflight_files,
+            "--max-preflight-files",
+        ),
     )
     try:
         profile = load_init_profile(bundle_root() / "capability_profiles" / "standard-init.json")
@@ -547,6 +681,315 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     }
 
 
+def _run_weak_work(args: argparse.Namespace) -> dict[str, Any]:
+    from .weak_model_workflow import (
+        WeakModelExecutionOutcome,
+        cancel,
+        execute,
+        pause,
+        prepare,
+        recover_interrupted,
+        resolve_owner_decision,
+        resume,
+        resume_task,
+        review,
+    )
+
+    action = args.weak_work
+    if args.weak_input is None:
+        raise ServiceError("--weak-work requires --weak-input")
+    record_inputs = (args.weak_task_id, args.weak_outcome)
+    controls = {
+        "pause": pause,
+        "resume-task": resume_task,
+        "cancel": cancel,
+    }
+    if action == "prepare" and (
+        args.weak_receipts is not None
+        or any(item is not None for item in record_inputs)
+        or args.weak_authorize_current
+        or args.weak_decision is not None
+        or args.weak_confirm_stopped
+    ):
+        raise ServiceError("weak-work prepare accepts only --weak-input")
+    if action != "prepare" and args.weak_receipts is None:
+        raise ServiceError(f"weak-work {action} requires --weak-receipts")
+    if action in {"review", "resume"} and (
+        any(item is not None for item in record_inputs)
+        or args.weak_authorize_current
+        or args.weak_decision is not None
+        or args.weak_confirm_stopped
+    ):
+        raise ServiceError(f"weak-work {action} rejects record-only inputs")
+    if action == "record" and (
+        any(item is None for item in record_inputs)
+        or args.weak_decision is not None
+        or args.weak_confirm_stopped
+    ):
+        raise ServiceError("weak-work record requires --weak-task-id and --weak-outcome")
+    if action in controls and (
+        args.weak_task_id is None
+        or args.weak_outcome is not None
+        or args.weak_authorize_current
+        or args.weak_decision is not None
+        or args.weak_confirm_stopped
+    ):
+        raise ServiceError(f"weak-work {action} requires only --weak-task-id")
+    if action == "owner-decision" and (
+        args.weak_task_id is None
+        or args.weak_decision is None
+        or args.weak_outcome is not None
+        or args.weak_authorize_current
+        or args.weak_confirm_stopped
+    ):
+        raise ServiceError(
+            "weak-work owner-decision requires --weak-task-id and --weak-decision"
+        )
+    if action == "recover-interrupted" and (
+        args.weak_task_id is None
+        or not args.weak_confirm_stopped
+        or args.weak_outcome is not None
+        or args.weak_authorize_current
+        or args.weak_decision is not None
+    ):
+        raise ServiceError(
+            "weak-work recover-interrupted requires --weak-task-id and "
+            "--weak-confirm-stopped"
+        )
+
+    workflow = prepare(_load_canonical_object(args.weak_input, "weak-work input"))
+    if action == "prepare":
+        return workflow.execution_plan_document()
+    if action == "review":
+        return parse_json_strict(review(workflow, args.weak_receipts).record_json)
+    if action == "resume":
+        return parse_json_strict(resume(workflow, args.weak_receipts).record_json)
+    if action in controls:
+        return controls[action](
+            workflow, args.weak_receipts, task_id=args.weak_task_id
+        )
+    if action == "owner-decision":
+        return resolve_owner_decision(
+            workflow,
+            args.weak_receipts,
+            task_id=args.weak_task_id,
+            decision=args.weak_decision,
+        )
+    if action == "recover-interrupted":
+        return recover_interrupted(
+            workflow,
+            args.weak_receipts,
+            task_id=args.weak_task_id,
+            caller_confirms_stopped=True,
+        ).record_document()
+
+    record = _load_canonical_object(args.weak_outcome, "weak-work recorded outcome")
+    _require_false_claims(record, "weak-work recorded outcome")
+    if (
+        record.get("schema") != "promin.weak-model-recorded-outcome.v1"
+        or record.get("record_type") != "WeakModelRecordedOutcome"
+        or record.get("current_authorization_confirmed") is not False
+    ):
+        raise ServiceError("weak-work recorded outcome identity is invalid")
+    try:
+        output = base64.b64decode(record["output_base64"], validate=True)
+        if (
+            base64.b64encode(output).decode("ascii") != record["output_base64"]
+            or record["output_bytes"] != len(output)
+            or record["output_sha256"] != digest_bytes(output)
+        ):
+            raise ValueError("output identity differs")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ServiceError("weak-work recorded output is invalid") from exc
+
+    def recorded_executor(request):
+        bound = (request.workflow_digest, request.receipt_set_digest, request.card.task_id, request.attempt)
+        fields = ("workflow_digest", "receipt_set_digest", "task_id", "attempt")
+        if tuple(record.get(field) for field in fields) != bound:
+            raise ServiceError("weak-work recorded outcome is not current")
+        return WeakModelExecutionOutcome(record.get("status"), output, record.get("observation"))
+
+    receipt = execute(
+        workflow,
+        args.weak_receipts,
+        task_id=args.weak_task_id,
+        executor=recorded_executor,
+        authorization_check=(lambda _request: True) if args.weak_authorize_current else None,
+    )
+    return receipt.record_document()
+
+
+def _mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(f"{label} must be one JSON object")
+    return dict(value)
+
+
+def _revalidation_receipt(path: Path):
+    from .revalidation import RevalidationReceipt
+    from .revalidation_workflow import RevalidationWorkflowReceipt
+
+    record = _load_canonical_object(path, "revalidation receipt")
+    if record.get("record_type") == "RevalidationWorkflowReceipt":
+        workflow_receipt = RevalidationWorkflowReceipt.from_record(record)
+        if workflow_receipt.result_kind != "RevalidationReceipt":
+            raise ServiceError("workflow receipt has no revalidation result")
+        record = dict(workflow_receipt.result)
+    return RevalidationReceipt.from_record(record)
+
+
+def _revalidation_route(value: object, base: Path) -> dict[str, Any]:
+    from .revalidation import RevalidationPhase, RevalidationPlan
+
+    record = _mapping(value, "revalidation route")
+    phase_values = record.get("phases")
+    prior_values = record.get("prior_receipts", [])
+    if not isinstance(phase_values, list):
+        raise ServiceError("revalidation phases must be an array")
+    if not isinstance(prior_values, list) or len(prior_values) > 16:
+        raise ServiceError("prior receipts must be an array of at most 16 paths")
+    return {
+        "revalidation_plan": RevalidationPlan(
+            plan_id=record.get("plan_id"),
+            input_identity=record.get("input_identity"),
+            phases=tuple(
+                RevalidationPhase(**_mapping(item, "revalidation phase"))
+                for item in phase_values
+            ),
+            total_budget_seconds=record.get("total_budget_seconds"),
+        ),
+        "prior_receipts": tuple(
+            _revalidation_receipt(_input_path(item, base, "prior receipt"))
+            for item in prior_values
+        ),
+        "max_phases": record.get("max_phases"),
+    }
+
+
+def _recorded_revalidation_callbacks(value: object, plan):
+    from .revalidation import (
+        ReadOnlyRevalidationCallback,
+        RevalidationObservation,
+        RevalidationStatus,
+    )
+
+    execution = _mapping(value, "revalidation execution")
+    raw_observations = execution.get("observations")
+    if (
+        execution.get("kind") != "recorded-read-only-observations"
+        or not isinstance(raw_observations, list)
+    ):
+        raise ServiceError("revalidation execution input is invalid")
+    observations = {}
+    for item in raw_observations:
+        record = _mapping(item, "recorded revalidation observation")
+        phase_id = record.get("phase_id")
+        try:
+            status = RevalidationStatus(record.get("status"))
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("recorded revalidation observation is invalid") from exc
+        if status is RevalidationStatus.PASS:
+            raise ServiceError("recorded CLI observations cannot assert PASS")
+        if not isinstance(phase_id, str) or phase_id in observations:
+            raise ServiceError("recorded phase identifiers must be unique")
+        observations[phase_id] = RevalidationObservation(
+            status=status,
+            observed_input_digest=record.get("observed_input_digest"),
+            output_identity=record.get("output_identity"),
+            reason=record.get("reason"),
+        )
+    if set(observations) != set(plan.required_phase_ids):
+        raise ServiceError("recorded observations must exactly cover required phases")
+
+    return tuple(
+        ReadOnlyRevalidationCallback(
+            phase_id, lambda _context, item=observations[phase_id]: item
+        )
+        for phase_id in plan.required_phase_ids
+    )
+
+
+def _run_revalidation(args: argparse.Namespace) -> dict[str, Any]:
+    from .revalidation_workflow import (
+        RevalidationWorkflowAuthority,
+        RevalidationWorkflowMode,
+        RevalidationWorkflowPlan,
+        RevalidationWorkflowReceipt,
+        execute_revalidation_workflow,
+        plan_revalidation_workflow,
+    )
+
+    request = _load_canonical_object(args.revalidate, "revalidation input")
+    _require_false_claims(request, "revalidation input")
+    if (
+        request.get("schema") != "promin.revalidation-cli-input.v1"
+        or request.get("record_type") != "RevalidationCliInput"
+    ):
+        raise ServiceError("revalidation input identity is invalid")
+    if not args.execute_revalidation and request.get("execution") is not None:
+        raise ServiceError("plan-only revalidation cannot carry execution data")
+
+    mode = RevalidationWorkflowMode(request.get("mode"))
+    if mode is RevalidationWorkflowMode.REPAIR:
+        raise ServiceError("repair execution requires the explicit public workflow API")
+    route_name = "report_receipt" if mode is RevalidationWorkflowMode.REPORT else "revalidation"
+    route_names = ("revalidation", "report_receipt", "repair")
+    if request.get(route_name) is None or any(
+        request.get(name) is not None for name in route_names if name != route_name
+    ):
+        raise ServiceError(f"{mode.value} carries incompatible route inputs")
+
+    base = args.revalidate.absolute().parent
+    predecessor_value = request.get("predecessor_receipt")
+    predecessor = (
+        None
+        if predecessor_value is None
+        else RevalidationWorkflowReceipt.from_record(
+            _load_canonical_object(
+                _input_path(predecessor_value, base, "predecessor receipt"),
+                "predecessor receipt",
+            )
+        )
+    )
+    plan_values: dict[str, Any] = {
+        "workflow_id": request.get("workflow_id"),
+        "mode": mode,
+        "authority": RevalidationWorkflowAuthority(
+            **_mapping(request.get("authority"), "revalidation authority")
+        ),
+        "receipt_root": _input_path(
+            request.get("receipt_root"), base, "revalidation receipt root"
+        ),
+        "receipt_name": request.get("receipt_name"),
+        "retry_ordinal": request.get("retry_ordinal"),
+        "predecessor_receipt": predecessor,
+        "predecessor_receipt_digest": (
+            None if predecessor is None else predecessor.receipt_digest
+        ),
+    }
+    if route_name == "revalidation":
+        plan_values.update(_revalidation_route(request[route_name], base))
+    elif route_name == "report_receipt":
+        plan_values["report_receipt"] = _revalidation_receipt(
+            _input_path(request[route_name], base, "report receipt")
+        )
+    plan = RevalidationWorkflowPlan(**plan_values)
+    if not args.execute_revalidation:
+        return plan_revalidation_workflow(plan)
+
+    execution = _mapping(request.get("execution"), "revalidation execution")
+    if mode is RevalidationWorkflowMode.REVALIDATE:
+        receipt = execute_revalidation_workflow(
+            plan,
+            callbacks=_recorded_revalidation_callbacks(execution, plan),
+        )
+    else:
+        if execution.get("kind") != "no-callbacks":
+            raise ServiceError("read-only execution input is invalid")
+        receipt = execute_revalidation_workflow(plan)
+    return receipt.to_record()
+
+
 def _is_initialized(root: Path) -> bool:
     return (root / ".promin" / "init" / "activation.json").is_file()
 
@@ -569,6 +1012,7 @@ def _reject_guided_options_for_full_expert_plan(args: argparse.Namespace) -> Non
             ("--init-experience", args.init_experience is not None),
             ("--capability-language", bool(args.capability_language)),
             ("--capability-selections", args.capability_selections is not None),
+            ("--max-preflight-files", args.max_preflight_files is not None),
             ("--apply/--yes", args.apply),
             ("--plan-only", args.plan_only),
             ("--plan-out", args.plan_out is not None),
@@ -626,14 +1070,43 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
     if workflow in {"status", "context", "validate", "audit", "static-admission"}:
         return False
     if workflow == "doctor":
-        return bool(getattr(args, "apply_repair", False))
+        return bool(
+            getattr(args, "apply_repair", False)
+            or (
+                getattr(args, "revalidate", None) is not None
+                and getattr(args, "execute_revalidation", False)
+            )
+        )
     if workflow == "init":
         return isinstance(result, Mapping) and result.get("record_type") in {"InitializationResult", "InitResult"}
     if workflow == "refresh":
         return not bool(getattr(args, "plan_only", False))
     if workflow == "skills":
         return getattr(args, "skills_action", None) in {"create", "install", "remove", "sync"}
+    if workflow == "next" and getattr(args, "weak_work", None) is not None:
+        return getattr(args, "weak_work", None) in {
+            "record",
+            "pause",
+            "resume-task",
+            "cancel",
+            "owner-decision",
+            "recover-interrupted",
+        }
+    if workflow == "next" and getattr(args, "initial_work", None) is not None:
+        return getattr(args, "initial_work", None) == "execute"
     return True
+
+
+def _public_plan_boundary_disables_telemetry(args: argparse.Namespace) -> bool:
+    """Keep explicit plan/read-only public routes free of hidden project writes."""
+
+    if args.workflow == "doctor" and getattr(args, "revalidate", None) is not None:
+        return not bool(getattr(args, "execute_revalidation", False))
+    if args.workflow == "next" and getattr(args, "weak_work", None) is not None:
+        return getattr(args, "weak_work", None) in {"prepare", "review", "resume"}
+    if args.workflow == "next" and getattr(args, "initial_work", None) is not None:
+        return getattr(args, "initial_work", None) == "plan"
+    return False
 
 
 def _safe_public_reason(exc: Exception, root: Path | None = None) -> str:
@@ -655,13 +1128,23 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.workflow == "init":
             if args.apply and args.plan_only:
                 raise ServiceError("--yes cannot be combined with --plan-only")
-            if _expert_init_requested(args):
+            if args.expert_bundle is not None:
+                result = _run_expert_bundle_init(args, root)
+            elif _expert_init_requested(args):
                 _reject_guided_options_for_full_expert_plan(args)
                 result = _run_expert_init(args, root)
             else:
                 result = _guided_init(args, root)
         elif args.workflow == "doctor":
-            if args.checklist:
+            if args.execute_revalidation and args.revalidate is None:
+                raise ServiceError("--execute-revalidation requires --revalidate INPUT")
+            if args.revalidate is not None:
+                if args.no_replay:
+                    raise ServiceError(
+                        "--no-replay is not applicable to canonical revalidation input"
+                    )
+                result = _run_revalidation(args)
+            elif args.checklist:
                 result = run_system_check(root)
             elif args.apply_repair:
                 result = repair_project(root, apply=True)
@@ -692,11 +1175,33 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             strict_values = (args.subject, args.grant, args.query_grant)
             if any(strict_values) and not all(strict_values):
                 raise ServiceError("strict next requires --subject, --grant and --query-grant together")
-            result = (
-                next_work(root, subject_id=args.subject, grant_id=args.grant, query_grant_id=args.query_grant, depth=args.depth)
-                if all(strict_values)
-                else next_proposal(root)
+            weak_values = (
+                args.weak_input,
+                args.weak_receipts,
+                args.weak_task_id,
+                args.weak_outcome,
+                args.weak_decision,
+                args.weak_authorize_current or None,
+                args.weak_confirm_stopped or None,
             )
+            if args.weak_work is None and any(value is not None for value in weak_values):
+                raise ServiceError("weak-work inputs require --weak-work ACTION")
+            if args.weak_work is not None:
+                if any(strict_values) or args.depth is not None or args.initial_work is not None:
+                    raise ServiceError("weak-work cannot be combined with strict Core next inputs")
+                result = _run_weak_work(args)
+            elif args.initial_work is not None:
+                if any(strict_values) or args.depth is not None:
+                    raise ServiceError("initial-work cannot be combined with strict Core next inputs")
+                result = _next_initial_project_work(
+                    root, execute=args.initial_work == "execute"
+                )
+            else:
+                result = (
+                    next_work(root, subject_id=args.subject, grant_id=args.grant, query_grant_id=args.query_grant, depth=args.depth)
+                    if all(strict_values)
+                    else next_proposal(root)
+                )
         elif args.workflow == "validate":
             _require_initialized(root)
             result = ProminService(root).validate(replay=not args.no_replay)
@@ -791,7 +1296,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             args.workflow,
             initialized=initialized,
             plan_only=not _command_mutates(args, result),
-            explicit_disabled=bool(getattr(args, "no_telemetry", False)),
+            explicit_disabled=(
+                bool(getattr(args, "no_telemetry", False))
+                or _public_plan_boundary_disables_telemetry(args)
+            ),
         ):
             record_observation(root, kind=f"command:{args.workflow}", status="pass", duration_ms=timer.duration_ms, details={"component": "cli"})
         return result
@@ -801,7 +1309,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             args.workflow,
             initialized=initialized,
             plan_only=not _command_mutates(args),
-            explicit_disabled=bool(getattr(args, "no_telemetry", False)),
+            explicit_disabled=(
+                bool(getattr(args, "no_telemetry", False))
+                or _public_plan_boundary_disables_telemetry(args)
+            ),
         ):
             record_observation(root, kind=f"command:{args.workflow}", status="failed", duration_ms=timer.duration_ms, details={"component": "cli", "reason": type(exc).__name__})
         raise

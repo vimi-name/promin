@@ -7,12 +7,12 @@
     "recommended": true,
     "userChoice": "ask",
     "primary": ["public-contract-index", "xml-documentation"],
-    "optional": ["api-documentation-generator"]
+    "optional": ["docfx"]
   },
   "verification": {
     "cheapRequired": ["syntax-and-project-structure"],
-    "recommended": ["compiler-diagnostics", "static-analysis"],
-    "optional": ["format-check", "documentation-check"]
+    "recommended": ["dotnet-compiler", "roslyn-analyzers"],
+    "optional": ["docfx"]
   },
   "artifactPolicy": {
     "defaultMode": "minimal",

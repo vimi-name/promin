@@ -58,7 +58,7 @@ def test_minimal_one_click_is_deterministic_for_every_generic_language() -> None
         "interactive-user",
     ]
     assert first["capability_precedence"] == [
-        "registered-generic-reference",
+        "installed-language-catalog",
         "minimal-one-click",
     ]
     assert first["capability_selection_source"] == "minimal-one-click"
@@ -71,32 +71,23 @@ def test_minimal_one_click_is_deterministic_for_every_generic_language() -> None
     assert len(first["experience_digest"]) == 64
 
     selected = first["capability_selections"]
-    assert [item["capability_id"] for item in selected] == [
-        "c-language",
-        "cpp-language",
-        "csharp-language",
-        "java-language",
-        "javascript-language",
-        "python-language",
+    assert [item["profile_id"] for item in selected] == [
+        "c-family-semantic",
+        "csharp-semantic",
+        "javascript-typescript-semantic",
+        "jvm-semantic",
+        "python-semantic",
     ]
-    assert [item["documentation"][0]["reference_id"] for item in selected] == [
-        "c-language-reference",
-        "cpp-language-reference",
-        "csharp-language-reference",
-        "java-language-specification",
-        "ecmascript-language-specification",
-        "python-language-reference",
+    assert selected[0]["languages"] == ["c", "cpp"]
+    assert [item["tools"]["items"] for item in selected] == [
+        ["canonical-compilation-database", "clangd", "clang-tidy"],
+        ["dotnet-compiler", "roslyn-analyzers"],
+        ["eslint", "typescript-compiler"],
+        ["javac", "checkstyle"],
+        ["python-compileall", "ruff"],
     ]
-    assert [item["tools"][0]["tool_id"] for item in selected] == [
-        "c-syntax-check",
-        "cpp-syntax-check",
-        "csharp-compiler-check",
-        "java-compiler-check",
-        "javascript-syntax-check",
-        "python-compile-check",
-    ]
-    assert all(item["tools"][0]["availability"] == "UNOBSERVED" for item in selected)
-    assert all(item["tools"][0]["pass_credit"] is False for item in selected)
+    assert all(item["tools"]["mode"] == "profile-default" for item in selected)
+    assert all(item["pass_credit"] is False for item in selected)
     assert all(len(item["selection_digest"]) == 64 for item in selected)
 
 
@@ -143,7 +134,7 @@ def test_expert_full_registered_overrides_have_source_precedence_and_stable_dige
     assert result["profile_provenance"]["analysis_profile"] == "cli"
     assert result["applied_profile_sources"] == ["default", "host-profile", "cli"]
     assert result["capability_precedence"] == [
-        "registered-generic-reference",
+        "installed-language-catalog",
         "owner",
     ]
     assert result["capability_selection_source"] == "owner"
@@ -151,22 +142,24 @@ def test_expert_full_registered_overrides_have_source_precedence_and_stable_dige
     assert result["weak_model_semantic_decisions"] is False
 
     java, python = result["capability_selections"]
-    assert [item["reference_id"] for item in java["documentation"]] == [
-        "java-language-specification",
-        "java-documentation-generator",
-    ]
-    assert [item["tool_id"] for item in java["tools"]] == [
-        "java-compiler-check",
-        "java-static-analysis",
-    ]
-    assert [item["reference_id"] for item in python["documentation"]] == [
-        "python-language-reference",
-        "python-documentation-generator",
-    ]
-    assert [item["tool_id"] for item in python["tools"]] == [
-        "python-compile-check",
-        "python-static-analysis",
-    ]
+    assert java["profile_id"] == "jvm-semantic"
+    assert java["documentation"] == {
+        "mode": "accept",
+        "items": ["public-contract-index", "api-documentation"],
+    }
+    assert java["tools"] == {
+        "mode": "accept",
+        "items": ["javac", "checkstyle"],
+    }
+    assert python["profile_id"] == "python-semantic"
+    assert python["documentation"] == {
+        "mode": "accept",
+        "items": ["public-contract-index", "api-documentation"],
+    }
+    assert python["tools"] == {
+        "mode": "accept",
+        "items": ["python-compileall", "ruff"],
+    }
     assert all(item["selection_source"] == "owner" for item in (java, python))
     assert all(item["authority_granted"] is False for item in (java, python))
     assert all(item["acceptance_pass"] is False for item in (java, python))
@@ -177,7 +170,7 @@ def test_expert_full_registered_overrides_have_source_precedence_and_stable_dige
     [
         (
             {"experience": "minimal", "languages": ("rust",)},
-            "unknown generic language",
+            "not a supported language alias",
         ),
         (
             {
@@ -288,7 +281,8 @@ def test_cli_yes_uses_minimal_one_click_and_applies_without_legacy_questions(
     assert experience["authority_granted"] is False
     assert experience["pass_credit"] is False
     assert experience["acceptance_pass"] is False
-    assert [item["language"] for item in experience["capability_selections"]] == ["python"]
+    assert experience["capability_selections"][0]["profile_id"] == "python-semantic"
+    assert experience["capability_selections"][0]["languages"] == ["python"]
 
 
 def test_cli_expert_capabilities_bind_explicit_registered_selections_before_apply(
@@ -353,14 +347,15 @@ def test_cli_expert_capabilities_bind_explicit_registered_selections_before_appl
     assert experience["experience"] == "expert"
     assert experience["languages"] == ["python"]
     selected_python = experience["capability_selections"][0]
-    assert [item["reference_id"] for item in selected_python["documentation"]] == [
-        "python-language-reference",
-        "python-documentation-generator",
-    ]
-    assert [item["tool_id"] for item in selected_python["tools"]] == [
-        "python-compile-check",
-        "python-static-analysis",
-    ]
+    assert selected_python["profile_id"] == "python-semantic"
+    assert selected_python["documentation"] == {
+        "mode": "accept",
+        "items": ["public-contract-index", "api-documentation"],
+    }
+    assert selected_python["tools"] == {
+        "mode": "accept",
+        "items": ["python-compileall", "ruff"],
+    }
     assert selected_python["authority_granted"] is False
     assert selected_python["pass_credit"] is False
     assert selected_python["acceptance_pass"] is False
@@ -378,7 +373,7 @@ def test_cli_expert_capabilities_bind_explicit_registered_selections_before_appl
                     "tools": ["rust-compile-check"],
                 }
             },
-            "unknown generic language",
+            "not a supported language alias",
         ),
         (
             "python",

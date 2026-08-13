@@ -108,10 +108,10 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 226 regular files under 16 declared
-directories, including the nested `skills/example` package. `MANIFEST.json`
-enumerates all payload files; `SHA256SUMS.txt` closes those payloads together
-with the manifest.
+The canonical alpha tree contains exactly 257 regular files under 17 declared
+directories, including the nested `docs/audit` and `skills/example` packages.
+`MANIFEST.json` enumerates the 255 payload files; `MANIFEST.json` and
+`SHA256SUMS.txt` are the two generated root closure files.
 
 | Location | Regular files |
 |---|---:|
@@ -119,17 +119,17 @@ with the manifest.
 | `.github/` | 1 |
 | `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 25 |
+| `docs/` | 26 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `language_profiles/` | 7 |
 | `presets/` | 1 |
 | `profiles/` | 12 |
-| `promin/` | 55 |
+| `promin/` | 59 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 71 |
-| `tools/` | 15 |
+| `tests/` | 100 |
+| `tools/` | 18 |
 
 The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `MACHINE_README.md`, `MANIFEST.json`, `NOTICE`, `pyproject.toml`, `README.md`,
@@ -137,9 +137,9 @@ The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`,
 `VERSION.json`. License, governance, dependency, and notice closure are part of
 the package identity.
 
-Canonical directories are `.github`, `.github/workflows`, `capability_profiles`, `core`, `docs`, `examples`,
-`human`, `language_profiles`, `presets`, `profiles`, `promin`, `prompts`, `skills`, `skills/example`, `tests`, and
-`tools`. Missing or additional paths reject. Project evidence, decisions,
+Canonical directories are `.github`, `.github/workflows`, `capability_profiles`, `core`, `docs`, `docs/audit`,
+`examples`, `human`, `language_profiles`, `presets`, `profiles`, `promin`, `prompts`, `skills`, `skills/example`,
+`tests`, and `tools`. Missing or additional paths reject. Project evidence, decisions,
 operational state, reports, caches, databases, wheelhouses, and secrets stay
 outside the distribution tree.
 

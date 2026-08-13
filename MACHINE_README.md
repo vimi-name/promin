@@ -44,8 +44,10 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 226 regular files under 16 declared
-directories, including the nested `skills/example` directory:
+The canonical alpha tree contains exactly 257 regular files under 17 declared
+directories, including the nested `docs/audit` and `skills/example` directories.
+The manifest enumerates 255 payload files; the manifest and checksum file are
+the two generated root closure files:
 
 | Location | Regular files |
 |---|---:|
@@ -53,17 +55,17 @@ directories, including the nested `skills/example` directory:
 | `.github/` | 1 |
 | `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 25 |
+| `docs/` | 26 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `language_profiles/` | 7 |
 | `presets/` | 1 |
 | `profiles/` | 12 |
-| `promin/` | 55 |
+| `promin/` | 59 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 71 |
-| `tools/` | 15 |
+| `tests/` | 100 |
+| `tools/` | 18 |
 
 Root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,
 `MACHINE_README.md`, `MANIFEST.json`, `NOTICE`, `pyproject.toml`, `README.md`,

@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 246
+CANONICAL_PACKAGE_FILE_COUNT = 257
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -175,6 +175,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/host_integration.py',
         'promin/init.py',
         'promin/init_profiles.py',
+        'promin/initial_project_work.py',
         'promin/input_identity.py',
         'promin/language_analysis.py',
         'promin/language_catalog.py',
@@ -191,6 +192,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/publication.py',
         'promin/recovery.py',
         'promin/revalidation.py',
+        'promin/revalidation_workflow.py',
         'promin/refresh.py',
         'promin/resources.py',
         'promin/selector_shards.py',
@@ -204,6 +206,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/workspace.py',
         'promin/writer_identity.py',
         'promin/weak_model_execution.py',
+        'promin/weak_model_workflow.py',
         'promin/windows_event_history.py',
         'prompts/INIT_PROMPT_EN.txt',
         'prompts/INIT_PROMPT_UA.txt',
@@ -239,6 +242,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_alpha3_workspace_budget.py',
         'tests/test_alpha4_artifact_lifecycle.py',
         'tests/test_alpha4_autonomy_policy.py',
+        'tests/test_alpha4_bundled_language_catalog.py',
         'tests/test_alpha4_clean_reinitialization_operation.py',
         'tests/test_alpha4_cmake_file_api.py',
         'tests/test_alpha4_compilation_database.py',
@@ -247,6 +251,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_alpha4_final_package_admission.py',
         'tests/test_alpha4_gate_admission.py',
         'tests/test_alpha4_genericity.py',
+        'tests/test_alpha4_init_evidence_first_profiles.py',
         'tests/test_alpha4_init_profiles.py',
         'tests/test_alpha4_language_analysis.py',
         'tests/test_alpha4_project_package.py',
@@ -264,6 +269,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_concurrency_crash.py',
         'tests/test_contract_mutations.py',
         'tests/test_events_projection.py',
+        'tests/test_expert_init_bundle_roundtrip.py',
         'tests/test_heavy_artifact_minimality.py',
         'tests/test_heavy_checkpoint_profile.py',
         'tests/test_heavy_comparative_bench.py',
@@ -289,18 +295,23 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_recovery_stress.py',
         'tests/test_heavy_relation_ledger_hotpath.py',
         'tests/test_heavy_revalidation.py',
+        'tests/test_heavy_saturation_continuation_sqlite.py',
         'tests/test_heavy_saturation_storage_budget.py',
         'tests/test_heavy_state_binding_batch_union.py',
         'tests/test_heavy_state_binding_storage.py',
         'tests/test_heavy_state_binding_storage_retention.py',
         'tests/test_heavy_weak_model_execution.py',
+        'tests/test_heavy_weak_model_workflow.py',
         'tests/test_heavy_windows_event_history.py',
         'tests/test_heavy_windows_publication.py',
         'tests/test_heavy_windows_seal_scaling.py',
+        'tests/test_initial_project_work.py',
         'tests/test_installed_distribution.py',
         'tests/test_package_validation.py',
         'tests/test_platform_paths_hotpath.py',
+        'tests/test_public_workflows_cli.py',
         'tests/test_retrieval_continuation_service.py',
+        'tests/test_revalidation_workflow.py',
         'tests/test_saturation_archive_binding.py',
         'tests/test_saturation_raw_artifact_cardinality.py',
         'tests/test_scale_orchestration.py',

@@ -1,6 +1,6 @@
 {
   "canonical_name": "promin",
-  "core_bundle_digest": "04df51b05013baa8a40e1425a13825261924e33d200ca5d1dbf972651b73bcdb",
+  "core_bundle_digest": "3be8f82ca2eeadc4b51738b3647c272c6dd30460efe9ef6bf96d7f4ece859ba1",
   "integrity": {
     "archive_sha256": "external",
     "checksums": "SHA256SUMS.txt",

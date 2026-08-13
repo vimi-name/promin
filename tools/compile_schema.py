@@ -2413,14 +2413,14 @@ def _compile_projection(
             "allowed_paths": {
                 "items": {"maxLength": 4096, "minLength": 1, "type": "string"},
                 "maxItems": 256,
-                "minItems": 1,
+                "minItems": 0,
                 "type": "array",
                 "uniqueItems": True,
             },
             "source_bindings": {
                 "items": {"maxLength": 4096, "minLength": 1, "type": "string"},
                 "maxItems": 256,
-                "minItems": 1,
+                "minItems": 0,
                 "type": "array",
                 "uniqueItems": True,
             },

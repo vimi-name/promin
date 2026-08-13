@@ -10526,7 +10526,7 @@
                   "type": "string"
                 },
                 "maxItems": 256,
-                "minItems": 1,
+                "minItems": 0,
                 "type": "array",
                 "uniqueItems": true
               },
@@ -10557,7 +10557,7 @@
                   "type": "string"
                 },
                 "maxItems": 256,
-                "minItems": 1,
+                "minItems": 0,
                 "type": "array",
                 "uniqueItems": true
               },

@@ -7,12 +7,12 @@
     "recommended": true,
     "userChoice": "ask",
     "primary": ["public-contract-index", "api-documentation"],
-    "optional": ["typed-api-documentation"]
+    "optional": ["typedoc"]
   },
   "verification": {
     "cheapRequired": ["syntax-and-module-structure"],
-    "recommended": ["type-check", "static-analysis"],
-    "optional": ["format-check", "documentation-check"]
+    "recommended": ["eslint", "typescript-compiler"],
+    "optional": ["typedoc"]
   },
   "artifactPolicy": {
     "defaultMode": "minimal",
