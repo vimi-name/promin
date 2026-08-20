@@ -19,6 +19,7 @@ import hashlib
 import os
 import platform
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -1283,6 +1284,39 @@ def _write_report(path: Path | None, value: Mapping[str, Any]) -> None:
             pass
 
 
+def _windows_extended_cleanup_path(path: Path) -> str:
+    """Return a deletion path that preserves the full Windows path length.
+
+    A fixed profile can legitimately create package receipts whose nested path
+    exceeds the legacy Windows path ceiling when its caller supplies a deep
+    ``--work-root``.  Python's default ``TemporaryDirectory`` cleanup walks
+    the normal spelling, which can leave those children behind and finish with
+    WinError 145.  This is only a cleanup spelling: profile inputs, output,
+    and EventStore behavior remain unchanged.
+    """
+
+    resolved = str(path.resolve())
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _cleanup_profile_workdir(temporary: tempfile.TemporaryDirectory[str]) -> None:
+    """Close a disposable profile root without truncating a Windows pathname."""
+
+    if os.name != "nt":
+        temporary.cleanup()
+        return
+    workdir = Path(temporary.name)
+    if workdir.exists():
+        shutil.rmtree(_windows_extended_cleanup_path(workdir))
+    # Detach TemporaryDirectory's finalizer after the extended-path deletion.
+    # Its normal cleanup sees an absent root and is therefore a no-op.
+    temporary.cleanup()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1328,11 +1362,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write_report(args.output, report)
         return 0
-    with tempfile.TemporaryDirectory(
+    temporary = tempfile.TemporaryDirectory(
         prefix="promin-projection-profile-", dir=base
-    ) as temporary:
-        report = run_profile_suite(Path(temporary), sizes)
+    )
+    try:
+        work = Path(temporary.name)
+        report = run_profile_suite(work, sizes)
         _write_report(args.output, report)
+    finally:
+        _cleanup_profile_workdir(temporary)
     return 0
 
 

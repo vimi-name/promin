@@ -32,6 +32,171 @@ def _tiny_public_projection_profile(tmp_path: Path) -> dict:
         store.close()
 
 
+def _profile_projection(
+    tmp_path: Path,
+    *,
+    size: int,
+) -> tuple[object, Projection]:
+    """Build one disposable public projection for hot-path behavior checks."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _inventory_manifest = profile._build_inventory_stream(tmp_path, size)
+    store, _event_manifest = profile._build_event_stream(tmp_path, size, contracts)
+    projection = Projection(
+        tmp_path / "projection" / "promin.sqlite3",
+        profile.TOKEN_KEY,
+        implementation_closure_digest=profile.IMPLEMENTATION_CLOSURE_DIGEST,
+        limits=contracts.projection_limits,
+        relation_domains=contracts.relation_domains,
+    )
+    projection.rebuild(store, inventory=inventory)
+    return store, projection
+
+
+def _resume_binding(projection: Projection) -> dict[str, str]:
+    return {
+        field: f"profile-readonly-{index}"
+        for index, field in enumerate(projection.limits.required_resume_binding_fields)
+    }
+
+
+def test_complete_first_search_uses_only_a_read_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete first page has no continuation state to persist."""
+
+    store, projection = _profile_projection(tmp_path, size=1)
+    try:
+        def unexpected_mutable_connection() -> None:
+            raise AssertionError("complete first search opened a mutable connection")
+
+        monkeypatch.setattr(
+            projection,
+            "_connect_mutable",
+            unexpected_mutable_connection,
+        )
+
+        result = projection.search("synthetic", resume_binding=_resume_binding(projection))
+
+        assert result["truncated"] is False
+        assert result["continuation"] is None
+        assert len(result["entities"]) == 1
+    finally:
+        store.close()
+
+
+def test_truncated_first_search_persists_its_continuation_after_read_probe(
+    tmp_path: Path,
+) -> None:
+    """A first page becomes mutable only when it has resumable state to write."""
+
+    store, projection = _profile_projection(tmp_path, size=16)
+    try:
+        binding = _resume_binding(projection)
+        first = projection.search("synthetic", resume_binding=binding)
+
+        assert first["truncated"] is True
+        assert first["continuation"] is not None
+
+        continued = projection.continue_search(
+            first["continuation"]["token"],
+            resume_binding=binding,
+        )
+
+        assert continued["stream_cursor"] == first["next_stream_cursor"]
+        assert continued["head_digest"] == first["head_digest"]
+    finally:
+        store.close()
+
+
+def test_incremental_reads_relation_does_not_rescan_dependency_dag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only DEPENDS_ON mutations can invalidate the dependency-cycle proof."""
+
+    store, projection = _profile_projection(tmp_path, size=16)
+    try:
+        head = store.head()["batch_digest"]
+        task = profile._task(2, head)
+        store.commit(
+            profile._command(2, task, head),
+            auxiliary_relations=(
+                profile._relation(
+                    99_999,
+                    source_id=task["task_id"],
+                    target_index=0,
+                ),
+            ),
+            created_at=profile.CREATED_AT,
+        )
+
+        def unexpected_dependency_scan(_connection: object) -> None:
+            raise AssertionError("READS-only batch rescanned DEPENDS_ON graph")
+
+        monkeypatch.setattr(
+            Projection,
+            "_validate_dependency_graph_acyclic",
+            staticmethod(unexpected_dependency_scan),
+        )
+
+        result = projection.apply_committed_batch(store)
+
+        assert result["status"] == "updated"
+        assert result["changed_records"] == 2
+        assert projection.require_current(store)["head_sequence"] == store.head()["sequence"]
+    finally:
+        store.close()
+
+
+def test_incremental_dependency_relation_still_validates_acyclicity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DEPENDS_ON mutation keeps the exact acyclicity validation boundary."""
+
+    store, projection = _profile_projection(tmp_path, size=16)
+    try:
+        head = store.head()["batch_digest"]
+        task = profile._task(2, head)
+        dependency = {
+            **profile._relation(
+                100_000,
+                source_id=task["task_id"],
+                target_index=0,
+            ),
+            "kind": "DEPENDS_ON",
+            "target_type": "Task",
+            "target_id": "task:projection-profile:00000001",
+        }
+        store.commit(
+            profile._command(2, task, head),
+            auxiliary_relations=(dependency,),
+            created_at=profile.CREATED_AT,
+        )
+        calls: list[tuple[object, ...]] = []
+        original = Projection._validate_dependency_graph_acyclic
+
+        def observe_dependency_scan(connection: object) -> None:
+            calls.append(())
+            original(connection)
+
+        monkeypatch.setattr(
+            Projection,
+            "_validate_dependency_graph_acyclic",
+            staticmethod(observe_dependency_scan),
+        )
+
+        result = projection.apply_committed_batch(store)
+
+        assert result["status"] == "updated"
+        assert calls == [()]
+        assert projection.require_current(store)["head_sequence"] == store.head()["sequence"]
+    finally:
+        store.close()
+
+
 def test_projection_profiler_uses_real_public_rebuild_and_reports_raw_metrics(
     tmp_path: Path,
 ) -> None:

@@ -38,16 +38,12 @@ from .canonical import (
     parse_json_strict,
     parse_utc_second,
 )
-from .windows_event_history import (
-    WindowsEventHistoryError,
-    WindowsEventHistorySeal,
-    WindowsEventHistoryViolation,
-)
-
-
 _DERIVED_STATE_LIMITS = ParseLimits(max_bytes=16 * 1024 * 1024)
 _DERIVED_ROWS_MANIFEST_LIMITS = ParseLimits(max_bytes=16 * 1024)
 _DERIVED_ROWS_INDEX_VERSION = 1
+_RUNTIME_ROWS_V2_INDEX_VERSION = 2
+_RUNTIME_ROWS_V2_NAME = "runtime"
+_RUNTIME_ROWS_V2_BUCKET_BYTES = 2
 _DERIVED_ROWS_INSERT_BATCH = 512
 _DERIVED_ROWS_TRANSCRIPT_GENESIS = hashlib.sha256(
     b"promin:derived-rows-v1:genesis"
@@ -63,6 +59,15 @@ _STATE_BINDING_INDEX_VERSION = 3
 _STATE_BINDING_ALGORITHM = "typed-sparse-merkle-v1"
 _STATE_TREE_DEPTH = 256
 _STATE_BINDING_STORAGE_STRIDE = 8
+# ``node`` preserves the two byte-boundary levels needed to update the
+# canonical root plus individual leaf witnesses for touched-path recovery.
+# The 29 lower intermediate byte levels are represented as bounded leaf
+# buckets.  This is derived storage only; the public algorithm remains the
+# exact 256-level Core sparse-Merkle tree.
+_STATE_BINDING_COMPACT_PARTITION_BYTES = 2
+_STATE_BINDING_COMPACT_PARTITION_DEPTH = (
+    _STATE_BINDING_COMPACT_PARTITION_BYTES * 8
+)
 _STATE_BINDING_COMMITMENT_LIMITS = ParseLimits(max_bytes=4 * 1024)
 
 _RESERVED_SECRET_FIELDS = {
@@ -787,6 +792,22 @@ class _ValidatedPreparedCommit:
 
 
 @dataclass(frozen=True)
+class _CompactStateBindingOverlay:
+    """One derived compact-index change with the canonical root proof.
+
+    Individual leaves remain separate database rows and are replayed from the
+    journal exactly as before.  Only the disposable intermediate sparse-tree
+    rows below the 16-bit partition boundary are omitted.
+    """
+
+    node_rows: Mapping[tuple[int, bytes], tuple[bytes, bytes]]
+    leaf_deletes: tuple[bytes, ...]
+    leaf_upserts: tuple[tuple[bytes, bytes, bytes], ...]
+    bucket_deletes: tuple[bytes, ...]
+    bucket_upserts: tuple[tuple[bytes, bytes], ...]
+
+
+@dataclass(frozen=True)
 class _CommittedEnvelopeWitness:
     """One-use in-process binding for the envelope just durably committed.
 
@@ -1101,6 +1122,79 @@ def _state_binding_root_from_leaves(
     if root is None or len(current) != 1:
         raise DerivedCheckpointError("state binding leaves did not reduce to one root")
     return root.hex()
+
+
+def _state_binding_partition_root(
+    *,
+    partition: bytes,
+    leaf_values: Mapping[bytes, bytes],
+) -> bytes:
+    """Compute one exact sparse-tree node at the compact partition depth.
+
+    ``compact_leaf`` stores the individual 256-bit leaf keys and exact value
+    digests.  Replaying their lower subtree on demand is deterministic and
+    yields the same node the full byte-boundary representation would have
+    materialised at depth 16.
+    """
+
+    if (
+        not isinstance(partition, bytes)
+        or len(partition) != _STATE_BINDING_COMPACT_PARTITION_BYTES
+    ):
+        raise DerivedCheckpointError("state binding compact partition is invalid")
+    current: dict[bytes, bytes] = {}
+    for key_digest, value_digest in leaf_values.items():
+        if (
+            not isinstance(key_digest, bytes)
+            or len(key_digest) != 32
+            or key_digest[:_STATE_BINDING_COMPACT_PARTITION_BYTES] != partition
+            or not isinstance(value_digest, bytes)
+            or len(value_digest) != 32
+            or key_digest in current
+        ):
+            raise DerivedCheckpointError("state binding compact leaf is invalid")
+        current[key_digest] = hashlib.sha256(
+            b"promin:typed-sparse-merkle-v1:leaf\x00"
+            + key_digest
+            + value_digest
+        ).digest()
+    if not current:
+        return _STATE_DEFAULT_DIGESTS[_STATE_BINDING_COMPACT_PARTITION_DEPTH]
+    for parent_depth in range(
+        _STATE_TREE_DEPTH - 1,
+        _STATE_BINDING_COMPACT_PARTITION_DEPTH - 1,
+        -1,
+    ):
+        child_depth = parent_depth + 1
+        grouped: dict[bytes, list[bytes | None]] = {}
+        for child_prefix, child_digest in current.items():
+            parent_prefix = _state_prefix(child_prefix, parent_depth)
+            pair = grouped.setdefault(parent_prefix, [None, None])
+            side = (
+                1
+                if child_prefix[parent_depth // 8]
+                & (1 << (7 - (parent_depth % 8)))
+                else 0
+            )
+            if pair[side] is not None:
+                raise DerivedCheckpointError(
+                    "state binding compact leaves collide below the current tree depth"
+                )
+            pair[side] = child_digest
+        current = {
+            parent_prefix: _state_internal_digest(
+                parent_depth,
+                pair[0] or _STATE_DEFAULT_DIGESTS[child_depth],
+                pair[1] or _STATE_DEFAULT_DIGESTS[child_depth],
+            )
+            for parent_prefix, pair in grouped.items()
+        }
+    root = current.get(partition)
+    if root is None or len(current) != 1:
+        raise DerivedCheckpointError(
+            "state binding compact partition did not reduce to one root"
+        )
+    return root
 
 
 def _normalize_state_binding_delta(
@@ -1845,16 +1939,6 @@ class EventStore:
         self.lock_timeout = lock_timeout
         self._head = self._empty_head()
         self._committed_envelope_witness: _CommittedEnvelopeWitness | None = None
-        # Optional and strictly Windows-only.  The normal byte-for-byte prefix
-        # verifier remains the authority fallback on every uncertain result.
-        self._windows_event_history: WindowsEventHistorySeal | None = None
-        self._verified_windows_history_control: dict[str, Any] | None = None
-        # A live seal that reaches its bounded native-handle capacity is
-        # deliberately retired for this EventStore instance.  Recreating it
-        # after the append would defeat the capacity fallback and can make a
-        # narrow test cap look like healthy authority.  A fresh EventStore
-        # instance may attempt normal admission again.
-        self._windows_history_capacity_exhausted = False
         self._command_ids: dict[str, tuple[str, dict[str, Any]]] = {}
         self._idempotency: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
         self._batch_ids: set[str] = set()
@@ -2345,11 +2429,8 @@ class EventStore:
         with _WriterLock(self.lock_path, self.lock_timeout):
             # A durable pending record means this open must replay/reconcile
             # the journal rather than first fully load a checkpoint that is
-            # known to reject the same pending record.  Recovery itself
-            # performs the exact replay and, on supported Windows hosts,
-            # admits its rebuilt prefix under one held-handle verifier.
-            # Pending is never trusted here; it merely selects the stricter
-            # recovery path.
+            # known to reject the same pending record.  Pending is never
+            # trusted here; it merely selects the stricter recovery path.
             if _matching_paths(self.pending, "*.json"):
                 self._fallback_reason = (
                     "DerivedCheckpointError: pending transaction requires recovery"
@@ -2357,37 +2438,15 @@ class EventStore:
                 self._recover_locked()
                 self._open_mode = "full-replay-fallback"
                 return
-            provisional_history = self._try_hold_windows_event_history_locked()
             try:
-                try:
-                    self._load_journal_checkpoint_locked()
-                except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-                    self._fallback_reason = f"{type(exc).__name__}: {exc}"
-                    # The provisional seal belongs to the checkpoint
-                    # generation that just failed validation.  Release its
-                    # Windows no-delete handles before replay creates and
-                    # prunes disposable generations; otherwise successful
-                    # fallback must retain the invalid authority directory
-                    # until this outer finally block runs.
-                    if provisional_history is not None:
-                        provisional_history.close()
-                        provisional_history = None
-                    self._recover_locked()
-                    self._open_mode = "full-replay-fallback"
-                else:
-                    self._bind_windows_event_history_locked(provisional_history)
-                    self._fallback_reason = None
-                    self._open_mode = "verified-checkpoint"
-            finally:
-                # Ownership transfers only when `_bind...` stores this exact
-                # object.  Validation exceptions outside the fallback tuple
-                # (notably implementation closure mismatch) must not leak
-                # native no-write handles.
-                if (
-                    provisional_history is not None
-                    and self._windows_event_history is not provisional_history
-                ):
-                    provisional_history.close()
+                self._load_journal_checkpoint_locked()
+            except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+                self._fallback_reason = f"{type(exc).__name__}: {exc}"
+                self._recover_locked()
+                self._open_mode = "full-replay-fallback"
+            else:
+                self._fallback_reason = None
+                self._open_mode = "verified-checkpoint"
 
     def recover(self) -> dict[str, Any]:
         """Validate the full chain, repair HEAD, and remove resolved pending data."""
@@ -2398,321 +2457,13 @@ class EventStore:
             self._fallback_reason = None
             return result
 
-    def _close_windows_event_history(self) -> None:
-        """Forget all physical fast-path state before replay/reopen/fallback."""
-
-        history = self._windows_event_history
-        self._windows_event_history = None
-        if history is not None:
-            history.close()
-
     def close(self) -> None:
-        """Release optional held Windows history handles explicitly."""
+        """Release the transient same-commit continuation explicitly."""
 
         self._clear_committed_envelope_witness()
-        self._close_windows_event_history()
-
-    def _try_hold_windows_event_history_locked(
-        self,
-    ) -> WindowsEventHistorySeal | None:
-        """Take provisional no-write holds *before* a full prefix verifier.
-
-        The authority root is intentionally used only to locate a candidate
-        generation.  It is not trusted until `_load_journal_checkpoint_locked`
-        or the recovery verifier succeeds while the returned handles are held.
-        Any inability to establish the optional seal leaves the normal full
-        byte-prefix path unchanged.
-        """
-
-        if (
-            self._windows_history_capacity_exhausted
-            or os.name != "nt"
-            or not _path_exists(self.head_path)
-            or not _path_exists(self.authority_head_path)
-            or not _path_exists(self.checkpoint_path)
-        ):
-            return None
-        try:
-            candidate_root = self._read_canonical_object(
-                self.authority_head_path,
-                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
-            )
-            generation = candidate_root.get("generation")
-            if not isinstance(generation, str) or not _INDEX_GENERATION.fullmatch(
-                generation
-            ):
-                return None
-            generation_root = self._authority_generation_root(generation)
-            if not _is_directory(generation_root):
-                return None
-            return WindowsEventHistorySeal.try_hold_existing(
-                root=self.root,
-                journal_directory=self.journal,
-                authority_directory=generation_root,
-                journal_files=sorted(_matching_paths(self.journal, "*.json")),
-                authority_files=sorted(_matching_paths(generation_root, "*.json")),
-                max_file_bytes=max(
-                    self.policy.max_command_bytes,
-                    self.policy.max_envelope_bytes,
-                ),
-            )
-        except (
-            CanonicalError,
-            DerivedCheckpointError,
-            OSError,
-            WindowsEventHistoryError,
-        ):
-            return None
-
-    def _reserve_windows_history_append_capacity_locked(self) -> None:
-        """Retire a full seal before an append cannot seal its exact pair.
-
-        A physical history seal has to retain both immutable artifacts of a
-        batch: the journal envelope and its authority segment.  Checking one
-        file only after publishing the journal would leave a valid durable
-        append looking like corruption at the cap boundary.  When the pair
-        does not fit, re-run the existing exact prefix verifier while the
-        current immutable handles still prevent byte/topology substitution,
-        then close the optional seal and complete the normal durable commit.
-        """
-
-        history = self._windows_event_history
-        if history is None:
-            return
-        try:
-            if history.has_capacity_for(2):
-                return
-            # Read the durable HEAD again before the full verifier so this
-            # retirement path cannot continue an append from a stale control
-            # state merely because the fast path was healthy at method entry.
-            if self._read_disk_head() != self._head:
-                raise JournalCorruption(
-                    "durable HEAD changed before Windows history cap fallback"
-                )
-            authority_root = self._verify_authority_prefix_locked(self._head)
-        except (
-            CanonicalError,
-            DerivedCheckpointError,
-            JournalCorruption,
-            OSError,
-            WindowsEventHistoryError,
-        ) as exc:
-            self._windows_history_capacity_exhausted = True
-            self._close_windows_event_history()
-            raise JournalCorruption(
-                "Windows physical history cap fallback could not verify the current prefix"
-            ) from exc
-
-        # The verifier above is the same byte-for-byte prefix authority route
-        # used without a seal.  Preserve its current control facts, then drop
-        # all held handles before any pending/journal file is written.
-        self._authority_generation = authority_root["generation"]
-        self._authority_prefix_digest = authority_root["authority_prefix_digest"]
-        self._state_binding_digest = authority_root["state_binding_digest"]
-        self._state_binding_update_count = authority_root[
-            "state_binding_update_count"
-        ]
-        self._verified_windows_history_control = None
-        self._windows_history_capacity_exhausted = True
-        self._close_windows_event_history()
-
-    def _bind_windows_event_history_locked(
-        self, provisional: WindowsEventHistorySeal | None
-    ) -> None:
-        """Bind a provisional physical hold to bytes just fully verified."""
-
-        self._close_windows_event_history()
-        if provisional is None:
-            return
-        control = self._verified_windows_history_control
-        try:
-            if (
-                not isinstance(control, dict)
-                or not isinstance(control.get("authority_generation"), str)
-                or provisional.authority_generation is not None
-            ):
-                raise WindowsEventHistoryViolation(
-                    "Windows history provisional control is unavailable"
-                )
-            provisional.bind_verified_control(
-                head=self._head,
-                authority_generation=control["authority_generation"],
-                head_payload=control["head_payload"],
-                authority_root_payload=control["authority_root_payload"],
-                checkpoint_payload=control["checkpoint_payload"],
-            )
-        except (
-            KeyError,
-            TypeError,
-            WindowsEventHistoryError,
-        ):
-            provisional.close()
-            return
-        self._windows_event_history = provisional
-
-    def _seal_recovered_windows_history_locked(
-        self,
-        *,
-        authority_root: Mapping[str, Any],
-        journal_checkpoint: Mapping[str, Any],
-    ) -> None:
-        """Seal a recovered prefix, then verify it while held before use."""
-
-        provisional = self._try_hold_windows_event_history_locked()
-        if provisional is None:
-            return
-        try:
-            verified_root = self._verify_authority_prefix_locked(self._head)
-            head_payload = canonical_bytes(self._head)
-            authority_root_payload = canonical_bytes(authority_root)
-            checkpoint_payload = canonical_bytes(journal_checkpoint)
-            if (
-                _read_bytes(self.head_path) != head_payload
-                or _read_bytes(self.authority_head_path) != authority_root_payload
-                or _read_bytes(self.checkpoint_path) != checkpoint_payload
-                or canonical_bytes(verified_root) != authority_root_payload
-            ):
-                raise JournalCorruption(
-                    "history controls changed while recovery seal was acquired"
-                )
-            self._verified_windows_history_control = {
-                "authority_generation": authority_root["generation"],
-                "head_payload": head_payload,
-                "authority_root_payload": authority_root_payload,
-                "checkpoint_payload": checkpoint_payload,
-            }
-            self._bind_windows_event_history_locked(provisional)
-        except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-            provisional.close()
-            raise JournalCorruption(
-                "recovered history changed before physical seal admission"
-            ) from exc
-
-    def _hold_new_windows_history_file_locked(
-        self,
-        *,
-        kind: str,
-        path: Path,
-        payload: bytes,
-    ) -> None:
-        """Admit one just-atomically-published immutable file before HEAD.
-
-        The normal durable temp+replace protocol stays unchanged.  If the
-        physical post-publication hold cannot confirm the exact bytes, this
-        command stops before durable HEAD; recovery will inspect the pending
-        transaction instead of silently accepting an unsealed append.
-        """
-
-        history = self._windows_event_history
-        if history is None:
-            return
-        try:
-            actual = history.hold_new_existing(
-                kind=kind,
-                path=path,
-                payload=payload,
-                max_file_bytes=max(
-                    self.policy.max_command_bytes,
-                    self.policy.max_envelope_bytes,
-                ),
-            )
-            expected = hashlib.sha256(payload).hexdigest()
-            if actual != expected:
-                raise WindowsEventHistoryViolation(
-                    "held immutable history payload digest differs"
-                )
-        except WindowsEventHistoryError as exc:
-            self._close_windows_event_history()
-            raise JournalCorruption(
-                "new immutable history file could not be physically sealed"
-            ) from exc
-
-    def _advance_windows_history_control_locked(
-        self,
-        *,
-        head: Mapping[str, Any],
-        authority_root: Mapping[str, Any],
-        journal_checkpoint: Mapping[str, Any],
-    ) -> None:
-        """Advance control bytes only after all new immutable files are held."""
-
-        history = self._windows_event_history
-        if history is None:
-            return
-        try:
-            if self._authority_generation is None:
-                raise WindowsEventHistoryViolation(
-                    "EventStore has no authority generation for seal advancement"
-                )
-            history.advance_verified_control(
-                head=head,
-                authority_generation=self._authority_generation,
-                head_payload=canonical_bytes(head),
-                authority_root_payload=canonical_bytes(authority_root),
-                checkpoint_payload=canonical_bytes(journal_checkpoint),
-            )
-        except WindowsEventHistoryError as exc:
-            self._close_windows_event_history()
-            raise JournalCorruption(
-                "Windows physical history controls could not advance"
-            ) from exc
-
-    def _try_activate_windows_history_after_commit_locked(
-        self,
-        *,
-        authority_root: Mapping[str, Any],
-        journal_checkpoint: Mapping[str, Any],
-    ) -> None:
-        """Enable the optional seal after the first durable Windows commit.
-
-        A newly created EventStore has no durable ``HEAD.json`` to seal at
-        genesis.  Once the first normal commit has completed, take provisional
-        handles and run the exact verifier while held.  This is an
-        optimization only: an unavailable seal leaves the committed result and
-        the normal full-scan route intact.
-        """
-
-        if self._windows_event_history is not None:
-            return
-        provisional = self._try_hold_windows_event_history_locked()
-        if provisional is None:
-            return
-        try:
-            verified_root = self._verify_authority_prefix_locked(self._head)
-            head_payload = canonical_bytes(self._head)
-            authority_root_payload = canonical_bytes(authority_root)
-            checkpoint_payload = canonical_bytes(journal_checkpoint)
-            if (
-                _read_bytes(self.head_path) != head_payload
-                or _read_bytes(self.authority_head_path) != authority_root_payload
-                or _read_bytes(self.checkpoint_path) != checkpoint_payload
-                or canonical_bytes(verified_root) != authority_root_payload
-            ):
-                raise WindowsEventHistoryViolation(
-                    "post-commit history controls changed before seal admission"
-                )
-            self._verified_windows_history_control = {
-                "authority_generation": authority_root["generation"],
-                "head_payload": head_payload,
-                "authority_root_payload": authority_root_payload,
-                "checkpoint_payload": checkpoint_payload,
-            }
-            self._bind_windows_event_history_locked(provisional)
-        except (
-            CanonicalError,
-            DerivedCheckpointError,
-            JournalCorruption,
-            OSError,
-            WindowsEventHistoryError,
-        ):
-            # The original commit is already durable; do not turn optional
-            # acceleration failure into a false rollback or a success claim.
-            provisional.close()
 
     def _recover_locked(self) -> dict[str, Any]:
         self._clear_committed_envelope_witness()
-        self._close_windows_event_history()
-        self._verified_windows_history_control = None
         head = self._empty_head()
         durable_head_present = _path_exists(self.head_path)
         durable_head = (
@@ -2800,7 +2551,7 @@ class EventStore:
                 semantic_digest = _extend_event_semantic_digest(semantic_digest, event)
                 event_count += 1
             delta = tuple(batch["state_binding_delta"])
-            computed_state_root, state_overlay = self._stage_state_binding_delta(
+            computed_state_root, state_overlay = self._stage_compact_state_binding_delta(
                 index_generation,
                 delta,
                 prior_sequence=batch["sequence"] - 1,
@@ -2831,7 +2582,7 @@ class EventStore:
                 or batch["event_semantic_digest"] != semantic_digest
             ):
                 raise JournalCorruption("journal-owned prefix commitment mismatch")
-            self._publish_state_binding_delta(
+            self._publish_compact_state_binding_delta(
                 index_generation,
                 sequence=batch["sequence"],
                 prior_root_digest=state_binding_digest,
@@ -2935,13 +2686,6 @@ class EventStore:
         self._prune_recovery_generations(
             active_index_generation=index_generation,
             active_authority_generation=authority_generation,
-        )
-        # The recovery replay above is the authority proof.  The optional
-        # Windows optimization now takes handles and runs one exact verifier
-        # while held before it may suppress later old-payload rehashes.
-        self._seal_recovered_windows_history_locked(
-            authority_root=authority_root,
-            journal_checkpoint=journal_checkpoint,
         )
         return self.head()
 
@@ -3566,15 +3310,6 @@ class EventStore:
         self._state_binding_update_count = authority_root[
             "state_binding_update_count"
         ]
-        # These are the exact canonical control bytes consumed by the full
-        # verifier above.  A provisional Windows hold is bound only to these
-        # bytes; a later replacement forces the ordinary full path.
-        self._verified_windows_history_control = {
-            "authority_generation": authority_root["generation"],
-            "head_payload": canonical_bytes(head),
-            "authority_root_payload": canonical_bytes(authority_root),
-            "checkpoint_payload": canonical_bytes(value),
-        }
 
     @staticmethod
     def _index_identity_digest(kind: str, identity: Any) -> str:
@@ -3756,6 +3491,25 @@ class EventStore:
                 "PRIMARY KEY(depth, prefix)) WITHOUT ROWID"
             )
             connection.execute(
+                "CREATE TABLE compact_binding ("
+                "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                "partition_depth INTEGER NOT NULL, head_sequence INTEGER NOT NULL, "
+                "update_count INTEGER NOT NULL, root_digest TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE compact_leaf ("
+                "leaf_key BLOB PRIMARY KEY, bucket BLOB NOT NULL, "
+                "value_digest BLOB NOT NULL) WITHOUT ROWID"
+            )
+            connection.execute(
+                "CREATE INDEX compact_leaf_by_bucket "
+                "ON compact_leaf(bucket, leaf_key)"
+            )
+            connection.execute(
+                "CREATE TABLE compact_bucket ("
+                "bucket BLOB PRIMARY KEY, digest BLOB NOT NULL) WITHOUT ROWID"
+            )
+            connection.execute(
                 "INSERT INTO binding VALUES (1, ?, ?, ?, ?, ?, ?, 0, 0, ?)",
                 (
                     _STATE_BINDING_INDEX_VERSION,
@@ -3798,6 +3552,28 @@ class EventStore:
                 "INSERT INTO node(depth, prefix, digest, children) VALUES (?, ?, ?, ?)",
                 genesis_rows,
             )
+            activation_bucket = activation_key[:_STATE_BINDING_COMPACT_PARTITION_BYTES]
+            activation_value_digest = bytes.fromhex(self.activation_record_digest)
+            activation_partition_digest = _state_binding_partition_root(
+                partition=activation_bucket,
+                leaf_values={activation_key: activation_value_digest},
+            )
+            connection.execute(
+                "INSERT INTO compact_binding VALUES (1, ?, 0, 0, ?)",
+                (
+                    _STATE_BINDING_COMPACT_PARTITION_DEPTH,
+                    self._genesis_state_binding_digest,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO compact_leaf(leaf_key, bucket, value_digest) "
+                "VALUES (?, ?, ?)",
+                (activation_key, activation_bucket, activation_value_digest),
+            )
+            connection.execute(
+                "INSERT INTO compact_bucket(bucket, digest) VALUES (?, ?)",
+                (activation_bucket, activation_partition_digest),
+            )
             connection.execute("COMMIT")
         except sqlite3.Error as exc:
             try:
@@ -3828,6 +3604,458 @@ class EventStore:
         if row is None or len(row) != 9:
             raise DerivedCheckpointError("state binding index binding is missing")
         return row
+
+    @staticmethod
+    def _compact_state_binding_binding(
+        connection: sqlite3.Connection,
+    ) -> tuple[Any, ...]:
+        try:
+            row = connection.execute(
+                "SELECT partition_depth, head_sequence, update_count, root_digest "
+                "FROM compact_binding WHERE singleton = 1"
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError(
+                "compact state binding index binding is unreadable"
+            ) from exc
+        if (
+            row is None
+            or len(row) != 4
+            or row[0] != _STATE_BINDING_COMPACT_PARTITION_DEPTH
+            or not isinstance(row[1], int)
+            or isinstance(row[1], bool)
+            or row[1] < 0
+            or not isinstance(row[2], int)
+            or isinstance(row[2], bool)
+            or row[2] < 0
+            or not isinstance(row[3], str)
+            or not _DIGEST.fullmatch(row[3])
+        ):
+            raise DerivedCheckpointError("compact state binding index binding is invalid")
+        return row
+
+    @staticmethod
+    def _compact_state_rows(
+        connection: sqlite3.Connection,
+        buckets: Iterable[bytes],
+    ) -> dict[bytes, tuple[bytes, dict[bytes, bytes]]]:
+        """Load exact individual leaves for a bounded set of partitions."""
+
+        selected = tuple(sorted(set(buckets)))
+        if (
+            not selected
+            or any(
+                not isinstance(bucket, bytes)
+                or len(bucket) != _STATE_BINDING_COMPACT_PARTITION_BYTES
+                for bucket in selected
+            )
+        ):
+            raise DerivedCheckpointError("compact state binding bucket request is invalid")
+        placeholders = ",".join("?" for _unused in selected)
+        try:
+            leaf_rows = connection.execute(
+                "SELECT bucket, leaf_key, value_digest FROM compact_leaf "
+                f"WHERE bucket IN ({placeholders}) ORDER BY bucket, leaf_key",
+                selected,
+            ).fetchall()
+            bucket_rows = connection.execute(
+                "SELECT bucket, digest FROM compact_bucket "
+                f"WHERE bucket IN ({placeholders}) ORDER BY bucket",
+                selected,
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError(
+                "compact state binding rows are unreadable"
+            ) from exc
+        values: dict[bytes, dict[bytes, bytes]] = {bucket: {} for bucket in selected}
+        for bucket, leaf_key, value_digest in leaf_rows:
+            if (
+                bucket not in values
+                or not isinstance(leaf_key, bytes)
+                or len(leaf_key) != 32
+                or leaf_key[:_STATE_BINDING_COMPACT_PARTITION_BYTES] != bucket
+                or not isinstance(value_digest, bytes)
+                or len(value_digest) != 32
+                or leaf_key in values[bucket]
+            ):
+                raise DerivedCheckpointError("compact state binding leaf row is invalid")
+            values[bucket][leaf_key] = value_digest
+        observed: dict[bytes, bytes] = {}
+        for bucket, digest in bucket_rows:
+            if (
+                bucket not in values
+                or bucket in observed
+                or not isinstance(digest, bytes)
+                or len(digest) != 32
+                or digest
+                == _STATE_DEFAULT_DIGESTS[_STATE_BINDING_COMPACT_PARTITION_DEPTH]
+            ):
+                raise DerivedCheckpointError("compact state binding bucket row is invalid")
+            observed[bucket] = digest
+        result: dict[bytes, tuple[bytes, dict[bytes, bytes]]] = {}
+        default = _STATE_DEFAULT_DIGESTS[_STATE_BINDING_COMPACT_PARTITION_DEPTH]
+        for bucket in selected:
+            calculated = _state_binding_partition_root(
+                partition=bucket,
+                leaf_values=values[bucket],
+            )
+            stored = observed.get(bucket, default)
+            if calculated != stored:
+                raise DerivedCheckpointError(
+                    "compact state binding bucket differs from its leaves"
+                )
+            result[bucket] = (stored, values[bucket])
+        return result
+
+    def _stage_compact_state_binding_delta(
+        self,
+        generation: str,
+        delta: tuple[dict[str, Any], ...],
+        *,
+        prior_sequence: int,
+        prior_root_digest: str | None,
+        prior_update_count: int,
+    ) -> tuple[str, _CompactStateBindingOverlay]:
+        """Stage exact leaf changes without materialising their 240 lower levels."""
+
+        connection = self._state_binding_connection(generation)
+        current_root = bytes.fromhex(
+            _EMPTY_STATE_BINDING_DIGEST
+            if prior_root_digest is None
+            else prior_root_digest
+        )
+        try:
+            expected_binding = (
+                _STATE_BINDING_INDEX_VERSION,
+                _STATE_BINDING_ALGORITHM,
+                self.active_activation_digest,
+                self.activation_record_digest,
+                self.implementation_closure_digest,
+                generation,
+                prior_sequence,
+                prior_update_count,
+                current_root.hex(),
+            )
+            if self._state_binding_binding(connection) != expected_binding:
+                raise DerivedCheckpointError(
+                    "state binding index is not at the previous HEAD"
+                )
+            if self._compact_state_binding_binding(connection) != (
+                _STATE_BINDING_COMPACT_PARTITION_DEPTH,
+                prior_sequence,
+                prior_update_count,
+                current_root.hex(),
+            ):
+                raise DerivedCheckpointError(
+                    "compact state binding index is not at the previous HEAD"
+                )
+            leaf_keys = tuple(_state_leaf_key_digest(update) for update in delta)
+            if len(leaf_keys) != len(set(leaf_keys)):
+                raise DerivedCheckpointError("state binding leaf keys collide")
+            buckets = tuple(
+                sorted(
+                    {
+                        key[:_STATE_BINDING_COMPACT_PARTITION_BYTES]
+                        for key in leaf_keys
+                    }
+                )
+            )
+            compact_rows = self._compact_state_rows(connection, buckets)
+            legacy_leaf_rows = self._state_storage_rows(
+                connection,
+                _STATE_TREE_DEPTH,
+                leaf_keys,
+            )
+            for key_digest in leaf_keys:
+                bucket = key_digest[:_STATE_BINDING_COMPACT_PARTITION_BYTES]
+                previous_value_digest = compact_rows[bucket][1].get(key_digest)
+                expected_leaf = (
+                    _STATE_DEFAULT_DIGESTS[_STATE_TREE_DEPTH]
+                    if previous_value_digest is None
+                    else hashlib.sha256(
+                        b"promin:typed-sparse-merkle-v1:leaf\x00"
+                        + key_digest
+                        + previous_value_digest
+                    ).digest()
+                )
+                if legacy_leaf_rows[key_digest][0] != expected_leaf:
+                    raise DerivedCheckpointError(
+                        "state binding touched compact leaf differs from its commitment"
+                    )
+            top_prefixes = tuple(sorted({bucket[:1] for bucket in buckets}))
+            top_rows = self._state_storage_rows(connection, 8, top_prefixes)
+            root_row = self._state_storage_rows(connection, 0, (b"",))[b""]
+            if root_row[0] != current_root:
+                raise DerivedCheckpointError("state binding index root is stale")
+
+            updated_values = {
+                bucket: dict(values)
+                for bucket, (_digest, values) in compact_rows.items()
+            }
+            for update, key_digest in zip(delta, leaf_keys):
+                bucket = key_digest[:_STATE_BINDING_COMPACT_PARTITION_BYTES]
+                if update["operation"] == "set":
+                    updated_values[bucket][key_digest] = bytes.fromhex(
+                        update["value_digest"]
+                    )
+                else:
+                    updated_values[bucket].pop(key_digest, None)
+
+            leaf_deletes: list[bytes] = []
+            leaf_upserts: list[tuple[bytes, bytes, bytes]] = []
+            bucket_deletes: list[bytes] = []
+            bucket_upserts: list[tuple[bytes, bytes]] = []
+            bucket_changes: dict[bytes, tuple[bytes, bytes]] = {}
+            default_partition = _STATE_DEFAULT_DIGESTS[
+                _STATE_BINDING_COMPACT_PARTITION_DEPTH
+            ]
+            for bucket in buckets:
+                old_digest, old_values = compact_rows[bucket]
+                new_values = updated_values[bucket]
+                for leaf_key in sorted(set(old_values) - set(new_values)):
+                    leaf_deletes.append(leaf_key)
+                for leaf_key in sorted(new_values):
+                    if old_values.get(leaf_key) != new_values[leaf_key]:
+                        leaf_upserts.append((leaf_key, bucket, new_values[leaf_key]))
+                new_digest = _state_binding_partition_root(
+                    partition=bucket,
+                    leaf_values=new_values,
+                )
+                if new_digest == default_partition:
+                    if old_digest != default_partition:
+                        bucket_deletes.append(bucket)
+                elif old_digest != new_digest:
+                    bucket_upserts.append((bucket, new_digest))
+                bucket_changes[bucket] = (old_digest, new_digest)
+
+            node_rows: dict[tuple[int, bytes], tuple[bytes, bytes]] = {}
+            parent_changes: dict[bytes, tuple[bytes, bytes]] = {}
+            for parent_prefix in top_prefixes:
+                old_parent, existing_children = top_rows[parent_prefix]
+                children = dict(existing_children)
+                for bucket in (
+                    item for item in buckets if item[:1] == parent_prefix
+                ):
+                    old_child, new_child = bucket_changes[bucket]
+                    edge = bucket[1]
+                    if children.get(edge, default_partition) != old_child:
+                        raise DerivedCheckpointError(
+                            "compact state binding bucket differs from top tree"
+                        )
+                    if new_child == default_partition:
+                        children.pop(edge, None)
+                    else:
+                        children[edge] = new_child
+                new_parent = _state_storage_parent_digest(8, children)
+                node_rows[(8, parent_prefix)] = (
+                    new_parent,
+                    _encode_state_storage_children(children),
+                )
+                parent_changes[parent_prefix] = (old_parent, new_parent)
+
+            root_children = dict(root_row[1])
+            default_parent = _STATE_DEFAULT_DIGESTS[8]
+            for parent_prefix in sorted(parent_changes):
+                old_parent, new_parent = parent_changes[parent_prefix]
+                edge = parent_prefix[0]
+                if root_children.get(edge, default_parent) != old_parent:
+                    raise DerivedCheckpointError(
+                        "compact state binding top node differs from root"
+                    )
+                if new_parent == default_parent:
+                    root_children.pop(edge, None)
+                else:
+                    root_children[edge] = new_parent
+            next_root = _state_storage_parent_digest(0, root_children)
+            node_rows[(0, b"")] = (
+                next_root,
+                _encode_state_storage_children(root_children),
+            )
+            for key_digest in leaf_keys:
+                bucket = key_digest[:_STATE_BINDING_COMPACT_PARTITION_BYTES]
+                value_digest = updated_values[bucket].get(key_digest)
+                leaf_digest = (
+                    _STATE_DEFAULT_DIGESTS[_STATE_TREE_DEPTH]
+                    if value_digest is None
+                    else hashlib.sha256(
+                        b"promin:typed-sparse-merkle-v1:leaf\x00"
+                        + key_digest
+                        + value_digest
+                    ).digest()
+                )
+                node_rows[(_STATE_TREE_DEPTH, key_digest)] = (leaf_digest, b"")
+            return (
+                next_root.hex(),
+                _CompactStateBindingOverlay(
+                    node_rows=MappingProxyType(dict(node_rows)),
+                    leaf_deletes=tuple(sorted(leaf_deletes)),
+                    leaf_upserts=tuple(sorted(leaf_upserts)),
+                    bucket_deletes=tuple(sorted(bucket_deletes)),
+                    bucket_upserts=tuple(sorted(bucket_upserts)),
+                ),
+            )
+        finally:
+            connection.close()
+
+    def _publish_compact_state_binding_delta(
+        self,
+        generation: str,
+        *,
+        sequence: int,
+        prior_root_digest: str | None,
+        prior_update_count: int,
+        root_digest: str,
+        delta_count: int,
+        overlay: _CompactStateBindingOverlay,
+    ) -> tuple[int, int]:
+        """Publish one fully staged compact derived index transaction."""
+
+        if not isinstance(overlay, _CompactStateBindingOverlay):
+            raise DerivedCheckpointError("compact state binding overlay is invalid")
+        connection = self._state_binding_connection(generation)
+        previous_root = (
+            _EMPTY_STATE_BINDING_DIGEST
+            if prior_root_digest is None
+            else prior_root_digest
+        )
+        try:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            expected_binding = (
+                _STATE_BINDING_INDEX_VERSION,
+                _STATE_BINDING_ALGORITHM,
+                self.active_activation_digest,
+                self.activation_record_digest,
+                self.implementation_closure_digest,
+                generation,
+                sequence - 1,
+                prior_update_count,
+                previous_root,
+            )
+            if self._state_binding_binding(connection) != expected_binding:
+                raise DerivedCheckpointError("state binding index publication is stale")
+            if self._compact_state_binding_binding(connection) != (
+                _STATE_BINDING_COMPACT_PARTITION_DEPTH,
+                sequence - 1,
+                prior_update_count,
+                previous_root,
+            ):
+                raise DerivedCheckpointError(
+                    "compact state binding index publication is stale"
+                )
+            root_row = overlay.node_rows.get((0, b""))
+            if root_row is None or root_row[0].hex() != root_digest:
+                raise DerivedCheckpointError(
+                    "compact state binding overlay root differs from publication binding"
+                )
+            node_deletes: list[tuple[int, bytes]] = []
+            node_upserts: list[tuple[int, bytes, bytes, bytes]] = []
+            for (depth, prefix), (node_digest, children_payload) in sorted(
+                overlay.node_rows.items(), key=lambda item: (item[0][0], item[0][1])
+            ):
+                if (
+                    depth not in {0, 8, _STATE_TREE_DEPTH}
+                    or not isinstance(prefix, bytes)
+                    or len(prefix) != depth // 8
+                    or not isinstance(node_digest, bytes)
+                    or len(node_digest) != 32
+                ):
+                    raise DerivedCheckpointError("compact state binding node is invalid")
+                children = _decode_state_storage_children(children_payload)
+                if depth == _STATE_TREE_DEPTH:
+                    if children:
+                        raise DerivedCheckpointError(
+                            "compact state binding leaf has children"
+                        )
+                else:
+                    child_default = _STATE_DEFAULT_DIGESTS[depth + 8]
+                    if any(value == child_default for value in children.values()):
+                        raise DerivedCheckpointError(
+                            "compact state binding node retains a default child"
+                        )
+                    if _state_storage_parent_digest(depth, children) != node_digest:
+                        raise DerivedCheckpointError(
+                            "compact state binding node children differ from its digest"
+                        )
+                if node_digest == _STATE_DEFAULT_DIGESTS[depth]:
+                    node_deletes.append((depth, prefix))
+                else:
+                    node_upserts.append((depth, prefix, node_digest, children_payload))
+            if node_deletes:
+                connection.executemany(
+                    "DELETE FROM node WHERE depth = ? AND prefix = ?", node_deletes
+                )
+            if node_upserts:
+                connection.executemany(
+                    "INSERT INTO node(depth, prefix, digest, children) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(depth, prefix) DO UPDATE SET "
+                    "digest=excluded.digest, children=excluded.children",
+                    node_upserts,
+                )
+            if overlay.leaf_deletes:
+                connection.executemany(
+                    "DELETE FROM compact_leaf WHERE leaf_key = ?",
+                    ((leaf_key,) for leaf_key in overlay.leaf_deletes),
+                )
+            if overlay.leaf_upserts:
+                connection.executemany(
+                    "INSERT INTO compact_leaf(leaf_key, bucket, value_digest) "
+                    "VALUES (?, ?, ?) ON CONFLICT(leaf_key) DO UPDATE SET "
+                    "bucket=excluded.bucket, value_digest=excluded.value_digest",
+                    overlay.leaf_upserts,
+                )
+            if overlay.bucket_deletes:
+                connection.executemany(
+                    "DELETE FROM compact_bucket WHERE bucket = ?",
+                    ((bucket,) for bucket in overlay.bucket_deletes),
+                )
+            if overlay.bucket_upserts:
+                connection.executemany(
+                    "INSERT INTO compact_bucket(bucket, digest) VALUES (?, ?) "
+                    "ON CONFLICT(bucket) DO UPDATE SET digest=excluded.digest",
+                    overlay.bucket_upserts,
+                )
+            connection.execute(
+                "UPDATE binding SET head_sequence = ?, update_count = ?, "
+                "root_digest = ? WHERE singleton = 1",
+                (sequence, prior_update_count + delta_count, root_digest),
+            )
+            connection.execute(
+                "UPDATE compact_binding SET head_sequence = ?, update_count = ?, "
+                "root_digest = ? WHERE singleton = 1",
+                (sequence, prior_update_count + delta_count, root_digest),
+            )
+            connection.execute("COMMIT")
+        except DerivedCheckpointError:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        except sqlite3.Error as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise DerivedCheckpointError(
+                "compact state binding index publication failed"
+            ) from exc
+        finally:
+            connection.close()
+        logical_bytes = (
+            sum(
+                2 + len(prefix) + len(node_digest) + len(children_payload)
+                for (depth, prefix), (node_digest, children_payload) in overlay.node_rows.items()
+            )
+            + sum(len(leaf_key) for leaf_key in overlay.leaf_deletes)
+            + sum(
+                len(leaf_key) + len(bucket) + len(value_digest)
+                for leaf_key, bucket, value_digest in overlay.leaf_upserts
+            )
+            + sum(len(bucket) for bucket in overlay.bucket_deletes)
+            + sum(len(bucket) + len(digest) for bucket, digest in overlay.bucket_upserts)
+        )
+        return logical_bytes, len(overlay.node_rows)
 
     @staticmethod
     def _state_storage_rows(
@@ -4218,6 +4446,15 @@ class EventStore:
             )
             if self._state_binding_binding(connection) != expected:
                 raise DerivedCheckpointError("state binding index binding is stale")
+            if self._compact_state_binding_binding(connection) != (
+                _STATE_BINDING_COMPACT_PARTITION_DEPTH,
+                head_sequence,
+                update_count,
+                expected_root,
+            ):
+                raise DerivedCheckpointError(
+                    "compact state binding index binding is stale"
+                )
             root_node = self._state_storage_rows(connection, 0, (b"",))[b""][0]
             if root_node.hex() != expected_root:
                 raise DerivedCheckpointError("state binding index root node is stale")
@@ -4733,8 +4970,6 @@ class EventStore:
         """
 
         self._clear_committed_envelope_witness()
-        self._close_windows_event_history()
-        self._verified_windows_history_control = None
         checked_head = self._validate_head_value(dict(new_head))
         try:
             if self._read_disk_head() != checked_head:
@@ -4943,7 +5178,7 @@ class EventStore:
             prior_state_binding_update_count = self._state_binding_update_count
             try:
                 state_binding_digest, state_binding_overlay = (
-                    self._stage_state_binding_delta(
+                    self._stage_compact_state_binding_delta(
                         state_generation,
                         prepared.state_binding_delta,
                         prior_sequence=self._head["sequence"],
@@ -4961,7 +5196,7 @@ class EventStore:
                 prior_state_binding_digest = self._state_binding_digest
                 prior_state_binding_update_count = self._state_binding_update_count
                 state_binding_digest, state_binding_overlay = (
-                    self._stage_state_binding_delta(
+                    self._stage_compact_state_binding_delta(
                         state_generation,
                         prepared.state_binding_delta,
                         prior_sequence=self._head["sequence"],
@@ -5012,7 +5247,7 @@ class EventStore:
                 state_generation = self._index_generation
                 prior_state_binding_digest = self._state_binding_digest
                 prior_state_binding_update_count = self._state_binding_update_count
-                recovered_root, state_binding_overlay = self._stage_state_binding_delta(
+                recovered_root, state_binding_overlay = self._stage_compact_state_binding_delta(
                     state_generation,
                     prepared.state_binding_delta,
                     prior_sequence=self._head["sequence"],
@@ -5036,18 +5271,9 @@ class EventStore:
                 raise EventStoreError(
                     f"journal envelope exceeds its canonical byte ceiling: {exc}"
                 ) from exc
-            # Reserve both immutable files before the first pending/journal
-            # write.  A cap boundary is an optimization transition, never a
-            # reason to leave one otherwise valid batch half-sealed.
-            self._reserve_windows_history_append_capacity_locked()
             _write_atomic(pending_path, payload)
             self._crash(crash_hook, "after_pending")
             _write_atomic(journal_path, payload)
-            self._hold_new_windows_history_file_locked(
-                kind="journal",
-                path=journal_path,
-                payload=payload,
-            )
             self._crash(crash_hook, "after_batch")
             new_head = {"sequence": batch["sequence"], "batch_id": batch["batch_id"], "batch_digest": batch_digest}
             if self._authority_generation is None:
@@ -5057,14 +5283,6 @@ class EventStore:
                 envelope=envelope,
                 journal_path=journal_path,
                 journal_payload=payload,
-            )
-            authority_segment_path = self._authority_segment_path(
-                self._authority_generation, batch["sequence"]
-            )
-            self._hold_new_windows_history_file_locked(
-                kind="authority",
-                path=authority_segment_path,
-                payload=canonical_bytes(authority_segment),
             )
             self._crash(crash_hook, "after_authority_segment")
             authority_root = self._write_authority_root(
@@ -5098,7 +5316,7 @@ class EventStore:
                     self._index_generation,
                 )
                 state_index_bytes, state_node_writes = (
-                    self._publish_state_binding_delta(
+                    self._publish_compact_state_binding_delta(
                         state_generation,
                         sequence=batch["sequence"],
                         prior_root_digest=prior_state_binding_digest,
@@ -5138,11 +5356,6 @@ class EventStore:
                     last_journal_file_digest=hashlib.sha256(payload).hexdigest(),
                     authority_root=authority_root,
                     state_binding_update_count=new_state_binding_update_count,
-                )
-                self._advance_windows_history_control_locked(
-                    head=new_head,
-                    authority_root=authority_root,
-                    journal_checkpoint=journal_checkpoint,
                 )
                 journal_checkpoint_bytes = len(
                     canonical_bytes(journal_checkpoint)
@@ -5191,10 +5404,6 @@ class EventStore:
             self._idempotency[id_key] = (command_digest, result)
             self._batch_ids.add(batch["batch_id"])
             self._event_ids.update(event["event_id"] for event in batch["events"])
-            self._try_activate_windows_history_after_commit_locked(
-                authority_root=authority_root,
-                journal_checkpoint=journal_checkpoint,
-            )
             authority_bytes = len(canonical_bytes(authority_segment)) + len(
                 canonical_bytes(authority_root)
             )
@@ -5495,19 +5704,7 @@ class EventStore:
     ) -> Iterator[dict[str, Any]]:
         previous: str | None = None
         sequence = 1
-        history = self._windows_event_history
-        if history is None:
-            paths = sorted(_matching_paths(self.journal, "*.json"))
-        else:
-            try:
-                paths = [
-                    history.journal_path_for_sequence(item)
-                    for item in range(1, self._head["sequence"] + 1)
-                ]
-            except WindowsEventHistoryError as exc:
-                raise JournalCorruption(
-                    "sealed journal sequence closure is invalid"
-                ) from exc
+        paths = sorted(_matching_paths(self.journal, "*.json"))
         for path in paths:
             envelope = self._read_envelope(path)
             if validate:
@@ -5533,56 +5730,26 @@ class EventStore:
             yield from self._iter_envelopes_locked(validate=True)
 
     def _journal_path_for_sequence(self, sequence: int) -> Path:
-        history = self._windows_event_history
-        if history is not None:
-            try:
-                return history.journal_path_for_sequence(sequence)
-            except WindowsEventHistoryError as exc:
-                raise JournalCorruption(
-                    f"sealed journal sequence {sequence} is missing or ambiguous"
-                ) from exc
         matches = _matching_paths(self.journal, f"{sequence:020d}-*.json")
         if len(matches) != 1:
             raise JournalCorruption(f"journal sequence {sequence} is missing or ambiguous")
         return matches[0]
 
     def _refresh_from_disk_locked(self) -> None:
+        """Refresh deterministic journal authority from durable control files."""
+
         self._clear_committed_envelope_witness()
         try:
             disk_head = self._read_disk_head()
         except JournalCorruption as exc:
-            self._close_windows_event_history()
             self._fallback_reason = f"{type(exc).__name__}: {exc}"
             self._recover_locked()
             self._open_mode = "full-replay-fallback"
             return
         if disk_head == self._head:
-            history = self._windows_event_history
-            if history is not None:
-                try:
-                    if self._authority_generation is None:
-                        raise WindowsEventHistoryViolation(
-                            "EventStore has no active authority generation"
-                        )
-                    history.validate_fast(
-                        head=disk_head,
-                        authority_generation=self._authority_generation,
-                        head_payload=_read_bytes(self.head_path),
-                        authority_root_payload=_read_bytes(self.authority_head_path),
-                        checkpoint_payload=_read_bytes(self.checkpoint_path),
-                    )
-                except (OSError, WindowsEventHistoryError):
-                    # A physical witness is optional.  Drop it before the
-                    # mandatory existing verifier; do not reinterpret a
-                    # metadata mismatch as a healthy prefix.
-                    self._close_windows_event_history()
-                else:
-                    self._fallback_reason = None
-                    return
             try:
                 authority_root = self._verify_authority_prefix_locked(disk_head)
             except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-                self._close_windows_event_history()
                 self._fallback_reason = f"{type(exc).__name__}: {exc}"
                 self._recover_locked()
                 self._open_mode = "full-replay-fallback"
@@ -5596,25 +5763,15 @@ class EventStore:
                 "state_binding_update_count"
             ]
             return
-        self._close_windows_event_history()
-        provisional_history = self._try_hold_windows_event_history_locked()
         try:
-            try:
-                self._load_journal_checkpoint_locked()
-            except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
-                self._fallback_reason = f"{type(exc).__name__}: {exc}"
-                self._recover_locked()
-                self._open_mode = "full-replay-fallback"
-            else:
-                self._bind_windows_event_history_locked(provisional_history)
-                self._fallback_reason = None
-                self._open_mode = "verified-checkpoint"
-        finally:
-            if (
-                provisional_history is not None
-                and self._windows_event_history is not provisional_history
-            ):
-                provisional_history.close()
+            self._load_journal_checkpoint_locked()
+        except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+            self._fallback_reason = f"{type(exc).__name__}: {exc}"
+            self._recover_locked()
+            self._open_mode = "full-replay-fallback"
+        else:
+            self._fallback_reason = None
+            self._open_mode = "verified-checkpoint"
 
     def envelope_at_head(self) -> dict[str, Any] | None:
         """Read only the authoritative envelope named by current HEAD."""
@@ -5942,12 +6099,38 @@ class EventStore:
         return self.derived_rows_root / f"{identity}.sqlite3"
 
     @staticmethod
-    def _validate_derived_rows_schema(connection: sqlite3.Connection) -> None:
+    def _derived_rows_layout(connection: sqlite3.Connection) -> str:
+        """Identify the disposable layout without silently accepting drift."""
+
         try:
             objects = connection.execute(
                 "SELECT type, name, tbl_name FROM sqlite_master "
                 "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
             ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("derived rows schema is unreadable") from exc
+        if not objects:
+            return "empty"
+        if objects == [
+            ("table", "binding", "binding"),
+            ("table", "derived_row", "derived_row"),
+        ]:
+            return "v1"
+        if objects == [
+            ("index", "runtime_v2_row_bucket", "derived_row"),
+            ("table", "binding", "binding"),
+            ("table", "derived_row", "derived_row"),
+            ("table", "runtime_v2_bucket", "runtime_v2_bucket"),
+            ("table", "runtime_v2_node", "runtime_v2_node"),
+        ]:
+            return "runtime-v2"
+        raise DerivedCheckpointError("derived rows schema objects mismatch")
+
+    @staticmethod
+    def _validate_derived_rows_schema(connection: sqlite3.Connection) -> None:
+        if EventStore._derived_rows_layout(connection) != "v1":
+            raise DerivedCheckpointError("derived rows schema is not v1")
+        try:
             binding_columns = connection.execute(
                 "PRAGMA table_info(binding)"
             ).fetchall()
@@ -5956,11 +6139,6 @@ class EventStore:
             ).fetchall()
         except sqlite3.Error as exc:
             raise DerivedCheckpointError("derived rows schema is unreadable") from exc
-        if objects != [
-            ("table", "binding", "binding"),
-            ("table", "derived_row", "derived_row"),
-        ]:
-            raise DerivedCheckpointError("derived rows schema objects mismatch")
         if [
             (row[1], row[2], row[3], row[5]) for row in binding_columns
         ] != [
@@ -5977,10 +6155,51 @@ class EventStore:
             raise DerivedCheckpointError("derived rows row schema mismatch")
 
     @staticmethod
+    def _validate_runtime_rows_v2_schema(connection: sqlite3.Connection) -> None:
+        if EventStore._derived_rows_layout(connection) != "runtime-v2":
+            raise DerivedCheckpointError("derived rows schema is not runtime v2")
+        try:
+            binding_columns = connection.execute("PRAGMA table_info(binding)").fetchall()
+            row_columns = connection.execute("PRAGMA table_info(derived_row)").fetchall()
+            bucket_columns = connection.execute(
+                "PRAGMA table_info(runtime_v2_bucket)"
+            ).fetchall()
+            node_columns = connection.execute(
+                "PRAGMA table_info(runtime_v2_node)"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("runtime v2 schema is unreadable") from exc
+        if [(row[1], row[2], row[3], row[5]) for row in binding_columns] != [
+            ("singleton", "INTEGER", 0, 1),
+            ("manifest", "BLOB", 1, 0),
+        ]:
+            raise DerivedCheckpointError("runtime v2 binding schema mismatch")
+        if [(row[1], row[2], row[3], row[5]) for row in row_columns] != [
+            ("section", "TEXT", 1, 1),
+            ("key", "TEXT", 1, 2),
+            ("payload", "BLOB", 1, 0),
+            ("payload_digest", "TEXT", 1, 0),
+            ("identity_digest", "BLOB", 1, 0),
+            ("bucket", "BLOB", 1, 0),
+        ]:
+            raise DerivedCheckpointError("runtime v2 row schema mismatch")
+        if [(row[1], row[2], row[3], row[5]) for row in bucket_columns] != [
+            ("bucket", "BLOB", 1, 1),
+            ("digest", "BLOB", 1, 0),
+        ]:
+            raise DerivedCheckpointError("runtime v2 bucket schema mismatch")
+        if [(row[1], row[2], row[3], row[5]) for row in node_columns] != [
+            ("depth", "INTEGER", 1, 1),
+            ("prefix", "BLOB", 1, 2),
+            ("digest", "BLOB", 1, 0),
+            ("children", "BLOB", 1, 0),
+        ]:
+            raise DerivedCheckpointError("runtime v2 node schema mismatch")
+
+    @staticmethod
     def _read_derived_rows_manifest(
         connection: sqlite3.Connection,
     ) -> dict[str, Any]:
-        EventStore._validate_derived_rows_schema(connection)
         try:
             rows = connection.execute(
                 "SELECT singleton, manifest FROM binding"
@@ -6109,6 +6328,281 @@ class EventStore:
         ):
             raise DerivedCheckpointError("derived rows manifest content is stale")
         return value
+
+    def _validate_runtime_rows_v2_manifest_locked(
+        self,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate the versioned runtime-only derived binding.
+
+        V2 deliberately has its own keyed commitment instead of reusing the
+        v1 ordered transcript.  The v1 chain makes any middle update O(N),
+        while this disposable cache must update only touched keys.  Journal
+        ownership, HEAD binding, and all recovery behaviour remain identical.
+        """
+
+        value = copy.deepcopy(dict(manifest))
+        required = {
+            "record_type",
+            "version",
+            "authoritative",
+            "name",
+            "activation_digest",
+            "implementation_closure_digest",
+            "head",
+            "batch_count",
+            "event_count",
+            "event_semantic_digest",
+            "authority_state_binding_digest",
+            "checkpoint_count",
+            "row_count",
+            "row_merkle_digest",
+            "checkpoint_digest",
+        }
+        if (
+            set(value) != required
+            or value.get("record_type") != "DerivedRowsCheckpoint"
+            or value.get("version") != _RUNTIME_ROWS_V2_INDEX_VERSION
+            or value.get("name") != _RUNTIME_ROWS_V2_NAME
+        ):
+            raise DerivedCheckpointError("runtime v2 manifest fields mismatch")
+        supplied_digest = value.pop("checkpoint_digest")
+        if (
+            not isinstance(supplied_digest, str)
+            or not _DIGEST.fullmatch(supplied_digest)
+            or digest_value(value) != supplied_digest
+        ):
+            raise DerivedCheckpointError("runtime v2 manifest digest mismatch")
+        value["checkpoint_digest"] = supplied_digest
+        if (
+            value["authoritative"] is not False
+            or value["activation_digest"] != self.active_activation_digest
+            or value["implementation_closure_digest"]
+            != self.implementation_closure_digest
+        ):
+            raise DerivedCheckpointError("runtime v2 manifest binding mismatch")
+        head = self._validate_head_value(value["head"])
+        value["head"] = head
+        current = self._head
+        if head["sequence"] > current["sequence"]:
+            raise DerivedCheckpointError("runtime v2 checkpoint is ahead of HEAD")
+        if head["sequence"] == current["sequence"] and head != current:
+            raise DerivedCheckpointError(
+                "runtime v2 checkpoint is bound to another HEAD"
+            )
+        if head["sequence"] == 0:
+            event_count = 0
+            event_semantic_digest = self.policy.genesis_event_semantic_digest
+            state_binding_digest = self._genesis_state_binding_digest
+        else:
+            envelope = self._read_envelope(
+                self._journal_path_for_sequence(head["sequence"])
+            )
+            batch = envelope["batch"]
+            batch_digest = self._validate_envelope(
+                envelope,
+                expected_sequence=head["sequence"],
+                expected_previous_digest=batch.get("previous_digest"),
+                validate_runtime=False,
+            )
+            if (
+                batch["batch_id"] != head["batch_id"]
+                or batch_digest != head["batch_digest"]
+            ):
+                raise DerivedCheckpointError(
+                    "runtime v2 checkpoint HEAD differs from journal"
+                )
+            event_count = batch["cumulative_event_count"]
+            event_semantic_digest = batch["event_semantic_digest"]
+            state_binding_digest = batch["state_binding_digest"]
+        for field in ("batch_count", "event_count", "checkpoint_count", "row_count"):
+            item = value[field]
+            if (
+                not isinstance(item, int)
+                or isinstance(item, bool)
+                or item < (1 if field == "checkpoint_count" else 0)
+            ):
+                raise DerivedCheckpointError(
+                    f"runtime v2 manifest {field} is invalid"
+                )
+        if (
+            value["batch_count"] != head["sequence"]
+            or value["event_count"] != event_count
+            or value["event_semantic_digest"] != event_semantic_digest
+            or value["authority_state_binding_digest"] != state_binding_digest
+            or not isinstance(value["row_merkle_digest"], str)
+            or not _DIGEST.fullmatch(value["row_merkle_digest"])
+        ):
+            raise DerivedCheckpointError("runtime v2 manifest content is stale")
+        return value
+
+    @staticmethod
+    def _runtime_rows_v2_identity_digest(section: str, key: str) -> bytes:
+        return hashlib.sha256(
+            b"promin:runtime-rows-v2:identity\x00"
+            + canonical_bytes({"section": section, "key": key})
+        ).digest()
+
+    @staticmethod
+    def _runtime_rows_v2_leaf_digest(
+        identity_digest: bytes,
+        payload_digest: str,
+    ) -> bytes:
+        if (
+            not isinstance(identity_digest, bytes)
+            or len(identity_digest) != 32
+            or not isinstance(payload_digest, str)
+            or not _DIGEST.fullmatch(payload_digest)
+        ):
+            raise DerivedCheckpointError("runtime v2 leaf identity is invalid")
+        return hashlib.sha256(
+            b"promin:runtime-rows-v2:leaf\x00"
+            + identity_digest
+            + bytes.fromhex(payload_digest)
+        ).digest()
+
+    @staticmethod
+    def _runtime_rows_v2_empty_bucket_digest() -> bytes:
+        return hashlib.sha256(b"promin:runtime-rows-v2:empty-bucket").digest()
+
+    @classmethod
+    def _runtime_rows_v2_bucket_digest(
+        cls,
+        leaves: Mapping[bytes, str],
+    ) -> bytes:
+        digest = hashlib.sha256(b"promin:runtime-rows-v2:bucket\x00")
+        for identity_digest, payload_digest in sorted(leaves.items()):
+            digest.update(cls._runtime_rows_v2_leaf_digest(identity_digest, payload_digest))
+        return digest.digest() if leaves else cls._runtime_rows_v2_empty_bucket_digest()
+
+    @classmethod
+    def _runtime_rows_v2_node_digest(
+        cls,
+        depth: int,
+        children: Mapping[int, bytes],
+    ) -> bytes:
+        if depth not in {0, 8}:
+            raise DerivedCheckpointError("runtime v2 node depth is invalid")
+        payload = _encode_state_storage_children(children)
+        return hashlib.sha256(
+            b"promin:runtime-rows-v2:node\x00" + bytes((depth,)) + payload
+        ).digest()
+
+    @classmethod
+    def _runtime_rows_v2_empty_node_digest(cls, depth: int) -> bytes:
+        return cls._runtime_rows_v2_node_digest(depth, {})
+
+    @staticmethod
+    def _create_runtime_rows_v2_schema(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE binding ("
+            "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+            "manifest BLOB NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE derived_row ("
+            "section TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL, "
+            "payload_digest TEXT NOT NULL, identity_digest BLOB NOT NULL, "
+            "bucket BLOB NOT NULL, PRIMARY KEY(section, key)) WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE INDEX runtime_v2_row_bucket "
+            "ON derived_row(bucket, identity_digest)"
+        )
+        connection.execute(
+            "CREATE TABLE runtime_v2_bucket ("
+            "bucket BLOB PRIMARY KEY, digest BLOB NOT NULL) WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE runtime_v2_node ("
+            "depth INTEGER NOT NULL, prefix BLOB NOT NULL, digest BLOB NOT NULL, "
+            "children BLOB NOT NULL, PRIMARY KEY(depth, prefix)) WITHOUT ROWID"
+        )
+
+    @classmethod
+    def _runtime_rows_v2_node(
+        cls,
+        connection: sqlite3.Connection,
+        depth: int,
+        prefix: bytes,
+    ) -> tuple[bytes, dict[int, bytes]]:
+        try:
+            row = connection.execute(
+                "SELECT digest, children FROM runtime_v2_node "
+                "WHERE depth = ? AND prefix = ?",
+                (depth, prefix),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("runtime v2 node is unreadable") from exc
+        if row is None:
+            return cls._runtime_rows_v2_empty_node_digest(depth), {}
+        digest, children_payload = row
+        if not isinstance(digest, bytes) or len(digest) != 32:
+            raise DerivedCheckpointError("runtime v2 node digest is invalid")
+        children = _decode_state_storage_children(children_payload)
+        if cls._runtime_rows_v2_node_digest(depth, children) != digest:
+            raise DerivedCheckpointError("runtime v2 node differs from its children")
+        return digest, children
+
+    @classmethod
+    def _runtime_rows_v2_bucket_rows(
+        cls,
+        connection: sqlite3.Connection,
+        buckets: Iterable[bytes],
+    ) -> dict[bytes, tuple[bytes, dict[bytes, str]]]:
+        selected = tuple(sorted(set(buckets)))
+        if not selected or any(
+            not isinstance(bucket, bytes)
+            or len(bucket) != _RUNTIME_ROWS_V2_BUCKET_BYTES
+            for bucket in selected
+        ):
+            raise DerivedCheckpointError("runtime v2 bucket request is invalid")
+        values: dict[bytes, dict[bytes, str]] = {bucket: {} for bucket in selected}
+        stored: dict[bytes, bytes] = {}
+        try:
+            for offset in range(0, len(selected), 512):
+                current = selected[offset : offset + 512]
+                placeholders = ",".join("?" for _unused in current)
+                for bucket, identity_digest, payload_digest in connection.execute(
+                    "SELECT bucket, identity_digest, payload_digest FROM derived_row "
+                    f"WHERE bucket IN ({placeholders}) ORDER BY bucket, identity_digest",
+                    current,
+                ):
+                    if (
+                        bucket not in values
+                        or not isinstance(identity_digest, bytes)
+                        or len(identity_digest) != 32
+                        or identity_digest[:_RUNTIME_ROWS_V2_BUCKET_BYTES] != bucket
+                        or not isinstance(payload_digest, str)
+                        or not _DIGEST.fullmatch(payload_digest)
+                        or identity_digest in values[bucket]
+                    ):
+                        raise DerivedCheckpointError("runtime v2 row bucket is invalid")
+                    values[bucket][identity_digest] = payload_digest
+                for bucket, digest in connection.execute(
+                    "SELECT bucket, digest FROM runtime_v2_bucket "
+                    f"WHERE bucket IN ({placeholders}) ORDER BY bucket",
+                    current,
+                ):
+                    if (
+                        bucket not in values
+                        or bucket in stored
+                        or not isinstance(digest, bytes)
+                        or len(digest) != 32
+                    ):
+                        raise DerivedCheckpointError("runtime v2 bucket row is invalid")
+                    stored[bucket] = digest
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("runtime v2 buckets are unreadable") from exc
+        result: dict[bytes, tuple[bytes, dict[bytes, str]]] = {}
+        empty = cls._runtime_rows_v2_empty_bucket_digest()
+        for bucket in selected:
+            calculated = cls._runtime_rows_v2_bucket_digest(values[bucket])
+            observed = stored.get(bucket, empty)
+            if calculated != observed:
+                raise DerivedCheckpointError("runtime v2 bucket differs from its rows")
+            result[bucket] = (observed, values[bucket])
+        return result
 
     @staticmethod
     def _normalize_derived_row(row: Mapping[str, Any]) -> tuple[dict[str, Any], bytes, str]:
@@ -6305,6 +6799,335 @@ class EventStore:
                 _unlink(temporary, missing_ok=True)
                 _unlink(Path(str(temporary) + "-journal"), missing_ok=True)
 
+    def write_runtime_rows_v2(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        expected_head: Mapping[str, Any],
+        checkpoint_count: int,
+        replace: bool = False,
+        crash_hook: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Incrementally persist the runtime-only v2 derived row layout.
+
+        Generic ``write_derived_rows`` stays v1 and deliberately retains its
+        complete-file replacement contract.  Runtime v2 is a private derived
+        acceleration: rows use stable identities, touched 16-bit keyed-Merkle
+        partitions are recomputed, and only their two bounded ancestor levels
+        are published.  The journal remains the sole authority; any malformed
+        v2 layout is a cache miss and callers replay from it.
+        """
+
+        path = self._derived_rows_path(_RUNTIME_ROWS_V2_NAME)
+        checked_head = self._validate_head_value(dict(expected_head))
+        if (
+            not isinstance(checkpoint_count, int)
+            or isinstance(checkpoint_count, bool)
+            or checkpoint_count < 1
+            or not isinstance(replace, bool)
+        ):
+            raise EventStoreError("runtime v2 checkpoint arguments are invalid")
+        try:
+            row_iterator = iter(rows)
+        except TypeError as exc:
+            raise EventStoreError("runtime v2 rows must be iterable") from exc
+
+        with _WriterLock(self.lock_path, self.lock_timeout):
+            self._refresh_from_disk_locked()
+            if checked_head != self._head:
+                raise DerivedCheckpointError(
+                    "runtime v2 rows were computed for a stale authoritative HEAD"
+                )
+            state_binding_digest = self._journal_state_binding_for_head_locked(
+                checked_head
+            )
+            if state_binding_digest is None:
+                raise DerivedCheckpointError(
+                    "runtime v2 authoritative HEAD has no semantic state binding"
+                )
+            connection: sqlite3.Connection | None = None
+            committed = False
+            try:
+                connection = sqlite3.connect(
+                    _native_os_path(path),
+                    timeout=self.lock_timeout,
+                    isolation_level=None,
+                )
+                connection.execute(f"PRAGMA busy_timeout={int(self.lock_timeout * 1000)}")
+                connection.execute("PRAGMA journal_mode=DELETE")
+                connection.execute("PRAGMA synchronous=FULL")
+                connection.execute("BEGIN IMMEDIATE")
+                layout = self._derived_rows_layout(connection)
+                bootstrap = layout in {"empty", "v1"}
+                if layout == "v1":
+                    # A valid v1 runtime cache is non-authoritative.  The
+                    # supplied full bootstrap replaces it inside one SQLite
+                    # transaction, never via a separate temporary file.
+                    connection.execute("DROP TABLE derived_row")
+                    connection.execute("DROP TABLE binding")
+                    self._create_runtime_rows_v2_schema(connection)
+                elif layout == "empty":
+                    self._create_runtime_rows_v2_schema(connection)
+                elif layout == "runtime-v2":
+                    self._validate_runtime_rows_v2_schema(connection)
+                    if replace:
+                        connection.execute("DELETE FROM runtime_v2_node")
+                        connection.execute("DELETE FROM runtime_v2_bucket")
+                        connection.execute("DELETE FROM derived_row")
+                        connection.execute("DELETE FROM binding")
+                        bootstrap = True
+                    else:
+                        existing_manifest = self._validate_runtime_rows_v2_manifest_locked(
+                            self._read_derived_rows_manifest(connection)
+                        )
+                        root_digest, _root_children = self._runtime_rows_v2_node(
+                            connection,
+                            0,
+                            b"",
+                        )
+                        if root_digest.hex() != existing_manifest["row_merkle_digest"]:
+                            raise DerivedCheckpointError(
+                                "runtime v2 root differs from its manifest"
+                            )
+                else:  # pragma: no cover - layout validation above is exhaustive.
+                    raise DerivedCheckpointError("runtime v2 layout is unresolved")
+
+                normalized_rows: dict[tuple[str, str], tuple[bytes, str, bytes]] = {}
+                for row in row_iterator:
+                    normalized, payload, payload_digest = self._normalize_derived_row(row)
+                    identity = (normalized["section"], normalized["key"])
+                    if identity in normalized_rows:
+                        raise DerivedCheckpointError(
+                            "runtime v2 rows use duplicate stable identities"
+                        )
+                    identity_digest = self._runtime_rows_v2_identity_digest(*identity)
+                    normalized_rows[identity] = (payload, payload_digest, identity_digest)
+                if not normalized_rows:
+                    raise DerivedCheckpointError("runtime v2 checkpoint has no rows")
+                if bootstrap and ("00.runtime", "header") not in normalized_rows:
+                    raise DerivedCheckpointError(
+                        "runtime v2 bootstrap lacks its runtime header"
+                    )
+
+                changed: dict[tuple[str, str], tuple[bytes, str, bytes]] = {}
+                inserted = 0
+                if bootstrap:
+                    changed = dict(normalized_rows)
+                    inserted = len(changed)
+                else:
+                    for identity, value in normalized_rows.items():
+                        try:
+                            row = connection.execute(
+                                "SELECT payload_digest, identity_digest FROM derived_row "
+                                "WHERE section = ? AND key = ?",
+                                identity,
+                            ).fetchone()
+                        except sqlite3.Error as exc:
+                            raise DerivedCheckpointError(
+                                "runtime v2 rows are unreadable"
+                            ) from exc
+                        if row is None:
+                            changed[identity] = value
+                            inserted += 1
+                        else:
+                            previous_digest, previous_identity = row
+                            if (
+                                not isinstance(previous_digest, str)
+                                or not _DIGEST.fullmatch(previous_digest)
+                                or previous_identity != value[2]
+                            ):
+                                raise DerivedCheckpointError(
+                                    "runtime v2 row identity is invalid"
+                                )
+                            if previous_digest != value[1]:
+                                changed[identity] = value
+
+                if not bootstrap and not changed:
+                    raise DerivedCheckpointError(
+                        "runtime v2 incremental checkpoint has no changed rows"
+                    )
+                touched_buckets = tuple(
+                    sorted(
+                        {
+                            value[2][:_RUNTIME_ROWS_V2_BUCKET_BYTES]
+                            for value in changed.values()
+                        }
+                    )
+                )
+                bucket_rows = (
+                    self._runtime_rows_v2_bucket_rows(connection, touched_buckets)
+                    if touched_buckets
+                    else {}
+                )
+                updated_bucket_values = {
+                    bucket: dict(values)
+                    for bucket, (_digest, values) in bucket_rows.items()
+                }
+                for _identity, (_payload, payload_digest, identity_digest) in changed.items():
+                    updated_bucket_values[
+                        identity_digest[:_RUNTIME_ROWS_V2_BUCKET_BYTES]
+                    ][identity_digest] = payload_digest
+
+                empty_bucket = self._runtime_rows_v2_empty_bucket_digest()
+                bucket_changes: dict[bytes, tuple[bytes, bytes]] = {}
+                bucket_deletes: list[bytes] = []
+                bucket_upserts: list[tuple[bytes, bytes]] = []
+                for bucket, values in updated_bucket_values.items():
+                    old_digest = bucket_rows[bucket][0]
+                    new_digest = self._runtime_rows_v2_bucket_digest(values)
+                    bucket_changes[bucket] = (old_digest, new_digest)
+                    if new_digest == empty_bucket:
+                        if old_digest != empty_bucket:
+                            bucket_deletes.append(bucket)
+                    elif new_digest != old_digest:
+                        bucket_upserts.append((bucket, new_digest))
+
+                top_prefixes = tuple(sorted({bucket[:1] for bucket in touched_buckets}))
+                top_changes: dict[bytes, tuple[bytes, bytes, bytes]] = {}
+                node_updates: dict[tuple[int, bytes], tuple[bytes, bytes]] = {}
+                for prefix in top_prefixes:
+                    old_digest, children = self._runtime_rows_v2_node(connection, 8, prefix)
+                    next_children = dict(children)
+                    for bucket in (item for item in touched_buckets if item[:1] == prefix):
+                        old_child, new_child = bucket_changes[bucket]
+                        edge = bucket[1]
+                        if next_children.get(edge, empty_bucket) != old_child:
+                            raise DerivedCheckpointError(
+                                "runtime v2 bucket differs from its parent node"
+                            )
+                        if new_child == empty_bucket:
+                            next_children.pop(edge, None)
+                        else:
+                            next_children[edge] = new_child
+                    new_digest = self._runtime_rows_v2_node_digest(8, next_children)
+                    children_payload = _encode_state_storage_children(next_children)
+                    node_updates[(8, prefix)] = (new_digest, children_payload)
+                    top_changes[prefix] = (old_digest, new_digest, children_payload)
+
+                old_root, root_children = self._runtime_rows_v2_node(connection, 0, b"")
+                next_root_children = dict(root_children)
+                empty_top = self._runtime_rows_v2_empty_node_digest(8)
+                for prefix, (old_child, new_child, _payload) in top_changes.items():
+                    edge = prefix[0]
+                    if next_root_children.get(edge, empty_top) != old_child:
+                        raise DerivedCheckpointError(
+                            "runtime v2 top node differs from its root"
+                        )
+                    if new_child == empty_top:
+                        next_root_children.pop(edge, None)
+                    else:
+                        next_root_children[edge] = new_child
+                next_root = self._runtime_rows_v2_node_digest(0, next_root_children)
+                node_updates[(0, b"")] = (
+                    next_root,
+                    _encode_state_storage_children(next_root_children),
+                )
+                try:
+                    row_count = int(
+                        connection.execute("SELECT COUNT(*) FROM derived_row").fetchone()[0]
+                    ) + inserted
+                except (sqlite3.Error, TypeError, IndexError) as exc:
+                    raise DerivedCheckpointError("runtime v2 row count is unreadable") from exc
+                manifest = {
+                    "record_type": "DerivedRowsCheckpoint",
+                    "version": _RUNTIME_ROWS_V2_INDEX_VERSION,
+                    "authoritative": False,
+                    "name": _RUNTIME_ROWS_V2_NAME,
+                    "activation_digest": self.active_activation_digest,
+                    "implementation_closure_digest": self.implementation_closure_digest,
+                    "head": copy.deepcopy(checked_head),
+                    "batch_count": self._batch_count,
+                    "event_count": self._event_count,
+                    "event_semantic_digest": self._semantic_digest,
+                    "authority_state_binding_digest": state_binding_digest,
+                    "checkpoint_count": checkpoint_count,
+                    "row_count": row_count,
+                    "row_merkle_digest": next_root.hex(),
+                }
+                manifest["checkpoint_digest"] = digest_value(manifest)
+
+                if changed:
+                    connection.executemany(
+                        "INSERT INTO derived_row("
+                        "section, key, payload, payload_digest, identity_digest, bucket"
+                        ") VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(section, key) "
+                        "DO UPDATE SET payload=excluded.payload, "
+                        "payload_digest=excluded.payload_digest, "
+                        "identity_digest=excluded.identity_digest, bucket=excluded.bucket",
+                        (
+                            (
+                                section,
+                                key,
+                                payload,
+                                payload_digest,
+                                identity_digest,
+                                identity_digest[:_RUNTIME_ROWS_V2_BUCKET_BYTES],
+                            )
+                            for (section, key), (payload, payload_digest, identity_digest) in changed.items()
+                        ),
+                    )
+                if bucket_deletes:
+                    connection.executemany(
+                        "DELETE FROM runtime_v2_bucket WHERE bucket = ?",
+                        ((bucket,) for bucket in bucket_deletes),
+                    )
+                if bucket_upserts:
+                    connection.executemany(
+                        "INSERT INTO runtime_v2_bucket(bucket, digest) VALUES (?, ?) "
+                        "ON CONFLICT(bucket) DO UPDATE SET digest=excluded.digest",
+                        bucket_upserts,
+                    )
+                node_deletes: list[tuple[int, bytes]] = []
+                node_upserts: list[tuple[int, bytes, bytes, bytes]] = []
+                for (depth, prefix), (node_digest, children_payload) in node_updates.items():
+                    if node_digest == self._runtime_rows_v2_empty_node_digest(depth):
+                        node_deletes.append((depth, prefix))
+                    else:
+                        node_upserts.append((depth, prefix, node_digest, children_payload))
+                if node_deletes:
+                    connection.executemany(
+                        "DELETE FROM runtime_v2_node WHERE depth = ? AND prefix = ?",
+                        node_deletes,
+                    )
+                if node_upserts:
+                    connection.executemany(
+                        "INSERT INTO runtime_v2_node(depth, prefix, digest, children) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(depth, prefix) DO UPDATE SET "
+                        "digest=excluded.digest, children=excluded.children",
+                        node_upserts,
+                    )
+                connection.execute("DELETE FROM binding")
+                connection.execute(
+                    "INSERT INTO binding(singleton, manifest) VALUES (1, ?)",
+                    (canonical_bytes(manifest, limits=_DERIVED_ROWS_MANIFEST_LIMITS),),
+                )
+                self._crash(crash_hook, "before_runtime_rows_v2_commit")
+                connection.execute("COMMIT")
+                committed = True
+                connection.close()
+                connection = None
+                with open(_native_os_path(path), "rb+") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._crash(crash_hook, "after_runtime_rows_v2_commit")
+                self._derived_rows_issues[_RUNTIME_ROWS_V2_NAME] = None
+                return copy.deepcopy(manifest)
+            except sqlite3.Error as exc:
+                if connection is not None:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise DerivedCheckpointError("runtime v2 checkpoint write failed") from exc
+            finally:
+                if connection is not None:
+                    if not committed:
+                        try:
+                            connection.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                    connection.close()
+
     @staticmethod
     def _decode_derived_row(
         section: Any,
@@ -6389,6 +7212,119 @@ class EventStore:
                 "derived rows differ from their bound transcript"
             )
 
+    def _scan_runtime_rows_v2_locked(
+        self,
+        connection: sqlite3.Connection,
+        manifest: Mapping[str, Any],
+    ) -> None:
+        """Verify every v2 row and reconstruct its keyed Merkle root.
+
+        Reads intentionally pay the complete validation cost before the
+        callback observes anything.  V2 improves compaction writes, never the
+        evidentiary requirement that a derived cache be independently checked.
+        """
+
+        self._validate_runtime_rows_v2_schema(connection)
+        row_count = 0
+        stored_buckets: dict[bytes, bytes] = {}
+        try:
+            for bucket, digest in connection.execute(
+                "SELECT bucket, digest FROM runtime_v2_bucket ORDER BY bucket"
+            ):
+                if (
+                    not isinstance(bucket, bytes)
+                    or len(bucket) != _RUNTIME_ROWS_V2_BUCKET_BYTES
+                    or bucket in stored_buckets
+                    or not isinstance(digest, bytes)
+                    or len(digest) != 32
+                    or digest == self._runtime_rows_v2_empty_bucket_digest()
+                ):
+                    raise DerivedCheckpointError("runtime v2 bucket storage is invalid")
+                stored_buckets[bucket] = digest
+            cursor = connection.execute(
+                "SELECT section, key, payload, payload_digest, identity_digest, bucket "
+                "FROM derived_row ORDER BY bucket, identity_digest"
+            )
+            current_bucket: bytes | None = None
+            bucket_hash: hashlib._Hash | None = None
+            observed_buckets: dict[bytes, bytes] = {}
+            for section, key, payload, payload_digest, identity_digest, bucket in cursor:
+                normalized, checked_digest = self._decode_derived_row(
+                    section,
+                    key,
+                    payload,
+                    payload_digest,
+                )
+                del normalized
+                expected_identity = self._runtime_rows_v2_identity_digest(section, key)
+                if (
+                    identity_digest != expected_identity
+                    or not isinstance(bucket, bytes)
+                    or len(bucket) != _RUNTIME_ROWS_V2_BUCKET_BYTES
+                    or bucket != expected_identity[:_RUNTIME_ROWS_V2_BUCKET_BYTES]
+                ):
+                    raise DerivedCheckpointError("runtime v2 row identity differs from storage")
+                if current_bucket != bucket:
+                    if current_bucket is not None:
+                        assert bucket_hash is not None
+                        observed_buckets[current_bucket] = bucket_hash.digest()
+                    current_bucket = bucket
+                    bucket_hash = hashlib.sha256(b"promin:runtime-rows-v2:bucket\x00")
+                assert bucket_hash is not None
+                bucket_hash.update(
+                    self._runtime_rows_v2_leaf_digest(identity_digest, checked_digest)
+                )
+                row_count += 1
+            if current_bucket is not None:
+                assert bucket_hash is not None
+                observed_buckets[current_bucket] = bucket_hash.digest()
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("runtime v2 rows are unreadable") from exc
+        if row_count != manifest["row_count"] or observed_buckets != stored_buckets:
+            raise DerivedCheckpointError("runtime v2 rows differ from their commitment")
+
+        expected_nodes: dict[tuple[int, bytes], tuple[bytes, bytes]] = {}
+        root_children: dict[int, bytes] = {}
+        grouped: dict[bytes, dict[int, bytes]] = {}
+        for bucket, digest in observed_buckets.items():
+            grouped.setdefault(bucket[:1], {})[bucket[1]] = digest
+        for prefix, children in grouped.items():
+            digest = self._runtime_rows_v2_node_digest(8, children)
+            expected_nodes[(8, prefix)] = (
+                digest,
+                _encode_state_storage_children(children),
+            )
+            root_children[prefix[0]] = digest
+        expected_nodes[(0, b"")] = (
+            self._runtime_rows_v2_node_digest(0, root_children),
+            _encode_state_storage_children(root_children),
+        )
+        observed_nodes: dict[tuple[int, bytes], tuple[bytes, bytes]] = {}
+        try:
+            for depth, prefix, digest, children in connection.execute(
+                "SELECT depth, prefix, digest, children FROM runtime_v2_node "
+                "ORDER BY depth, prefix"
+            ):
+                if (
+                    depth not in {0, 8}
+                    or not isinstance(prefix, bytes)
+                    or len(prefix) != depth // 8
+                    or not isinstance(digest, bytes)
+                    or len(digest) != 32
+                    or (depth, prefix) in observed_nodes
+                ):
+                    raise DerivedCheckpointError("runtime v2 node storage is invalid")
+                decoded = _decode_state_storage_children(children)
+                if self._runtime_rows_v2_node_digest(depth, decoded) != digest:
+                    raise DerivedCheckpointError("runtime v2 node digest is invalid")
+                observed_nodes[(depth, prefix)] = (digest, children)
+        except sqlite3.Error as exc:
+            raise DerivedCheckpointError("runtime v2 nodes are unreadable") from exc
+        if observed_nodes != expected_nodes:
+            raise DerivedCheckpointError("runtime v2 nodes differ from their rows")
+        if expected_nodes[(0, b"")][0].hex() != manifest["row_merkle_digest"]:
+            raise DerivedCheckpointError("runtime v2 root differs from its manifest")
+
     def consume_derived_rows(
         self,
         name: str,
@@ -6423,11 +7359,23 @@ class EventStore:
                 )
                 connection.execute("PRAGMA query_only=ON")
                 connection.execute("BEGIN")
-                manifest = self._validate_derived_rows_manifest_locked(
-                    name,
-                    self._read_derived_rows_manifest(connection),
-                )
-                self._scan_derived_rows_locked(connection, manifest)
+                layout = self._derived_rows_layout(connection)
+                if layout == "v1":
+                    self._validate_derived_rows_schema(connection)
+                raw_manifest = self._read_derived_rows_manifest(connection)
+                if layout == "v1":
+                    manifest = self._validate_derived_rows_manifest_locked(
+                        name,
+                        raw_manifest,
+                    )
+                    self._scan_derived_rows_locked(connection, manifest)
+                elif layout == "runtime-v2" and name == _RUNTIME_ROWS_V2_NAME:
+                    manifest = self._validate_runtime_rows_v2_manifest_locked(
+                        raw_manifest
+                    )
+                    self._scan_runtime_rows_v2_locked(connection, manifest)
+                else:
+                    raise DerivedCheckpointError("derived rows layout is unsupported")
             except (
                 CanonicalError,
                 DerivedCheckpointError,
@@ -6487,10 +7435,21 @@ class EventStore:
                     )
                     connection.execute("PRAGMA query_only=ON")
                     connection.execute("BEGIN")
-                    manifest = self._validate_derived_rows_manifest_locked(
-                        name,
-                        self._read_derived_rows_manifest(connection),
-                    )
+                    layout = self._derived_rows_layout(connection)
+                    if layout == "v1":
+                        self._validate_derived_rows_schema(connection)
+                    raw_manifest = self._read_derived_rows_manifest(connection)
+                    if layout == "v1":
+                        manifest = self._validate_derived_rows_manifest_locked(
+                            name,
+                            raw_manifest,
+                        )
+                    elif layout == "runtime-v2" and name == _RUNTIME_ROWS_V2_NAME:
+                        manifest = self._validate_runtime_rows_v2_manifest_locked(
+                            raw_manifest
+                        )
+                    else:
+                        raise DerivedCheckpointError("derived rows layout is unsupported")
                     connection.execute("COMMIT")
                 except (
                     CanonicalError,
@@ -6889,15 +7848,10 @@ class EventStore:
 
     def _read_envelope(self, path: Path) -> dict[str, Any]:
         try:
-            history = self._windows_event_history
-            raw = (
-                history.read_held_bytes(path)
-                if history is not None
-                else _read_bytes(path)
-            )
+            raw = _read_bytes(path)
             limits = ParseLimits(max_bytes=self.policy.max_envelope_bytes)
             value = parse_json_strict(raw, limits=limits)
-        except (OSError, CanonicalError, WindowsEventHistoryError) as exc:
+        except (OSError, CanonicalError) as exc:
             raise JournalCorruption(f"journal envelope is unreadable: {path.name}") from exc
         if canonical_bytes(value, limits=limits) != raw:
             raise JournalCorruption(f"journal envelope is not canonical: {path.name}")

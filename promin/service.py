@@ -187,6 +187,8 @@ class _RuntimeCheckpointCursor:
     checkpoint_count: int
     tail_batches: int
     tail_bytes: int
+    runtime_v2: bool = False
+    runtime_v2_pending_rows: tuple[Mapping[str, Any], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -652,6 +654,118 @@ def _runtime_checkpoint_rows(
     return rows()
 
 
+def _runtime_rows_v2_relation_row(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Encode one append-only Relation under its stable runtime-v2 identity."""
+
+    relation_id = value.get("relation_id") if isinstance(value, Mapping) else None
+    if not isinstance(relation_id, str) or not relation_id:
+        raise ServiceError("runtime v2 Relation lacks a canonical identity")
+    return {
+        "section": _runtime_rows_section("relations", "records"),
+        "key": relation_id,
+        "value": deepcopy(dict(value)),
+    }
+
+
+_RUNTIME_V2_DOMAIN_RECORD_SECTIONS = {
+    "Task": _runtime_rows_section("domain", "tasks"),
+    "Candidate": _runtime_rows_section("domain", "candidates"),
+    "Lease": _runtime_rows_section("domain", "leases"),
+    "Finding": _runtime_rows_section("domain", "findings"),
+    "GateResult": _runtime_rows_section("domain", "gate_results"),
+    "Decision": _runtime_rows_section("domain", "decisions"),
+}
+
+
+def _runtime_rows_v2_domain_record_row(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Encode one persistent Domain record under its Core-owned identity."""
+
+    record_type = value.get("record_type") if isinstance(value, Mapping) else None
+    section = _RUNTIME_V2_DOMAIN_RECORD_SECTIONS.get(record_type)
+    identity_field = {
+        "Task": "task_id",
+        "Candidate": "candidate_id",
+        "Lease": "lease_id",
+        "Finding": "finding_id",
+        "Decision": "decision_id",
+    }.get(record_type)
+    if record_type == "GateResult":
+        gate_id = value.get("gate_id")
+        run_id = value.get("run_id")
+        identity = f"{gate_id}/{run_id}" if isinstance(gate_id, str) and isinstance(run_id, str) else None
+    else:
+        identity = value.get(identity_field) if identity_field is not None else None
+    if (
+        section is None
+        or not isinstance(identity, str)
+        or not identity
+    ):
+        raise ServiceError("runtime v2 Domain record lacks a canonical identity")
+    return {"section": section, "key": identity, "value": deepcopy(dict(value))}
+
+
+def _runtime_rows_v2_stable_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace safe v1 positional keys by persistent Core identities."""
+
+    section = row.get("section")
+    value = row.get("value")
+    if section == _runtime_rows_section("relations", "records"):
+        if not isinstance(value, Mapping):
+            raise ServiceError("runtime checkpoint Relation is malformed")
+        return _runtime_rows_v2_relation_row(value)
+    if isinstance(value, Mapping):
+        record_type = value.get("record_type")
+        if record_type in _RUNTIME_V2_DOMAIN_RECORD_SECTIONS:
+            return _runtime_rows_v2_domain_record_row(value)
+    return deepcopy(dict(row))
+
+
+def _runtime_checkpoint_v2_bootstrap_rows(
+    context: ActivationContext,
+    snapshot: _RuntimeSnapshot,
+    *,
+    head: Mapping[str, Any],
+    state_binding_digest: str,
+    compaction: Mapping[str, Any],
+) -> Iterator[dict[str, Any]]:
+    """Translate the complete v1-compatible runtime view to stable v2 rows."""
+
+    for row in _runtime_checkpoint_rows(
+        context,
+        snapshot,
+        head=head,
+        state_binding_digest=state_binding_digest,
+        compaction=compaction,
+    ):
+        yield _runtime_rows_v2_stable_row(row)
+
+
+def _runtime_checkpoint_v2_header_row(
+    context: ActivationContext,
+    snapshot: _RuntimeSnapshot,
+    *,
+    head: Mapping[str, Any],
+    state_binding_digest: str,
+    compaction: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build only the mutable v2 runtime header without walking Relations."""
+
+    rows = _runtime_checkpoint_rows(
+        context,
+        snapshot,
+        head=head,
+        state_binding_digest=state_binding_digest,
+        compaction=compaction,
+    )
+    try:
+        header = next(rows)
+    except StopIteration as exc:  # pragma: no cover - fixed generator contract.
+        raise ServiceError("runtime checkpoint has no header") from exc
+    if header.get("section") != "00.runtime" or header.get("key") != "header":
+        raise ServiceError("runtime checkpoint header identity is invalid")
+    return header
+
+
 class _RuntimeRowsAccumulator:
     """Strictly reconstruct one normalized runtime checkpoint in one pass."""
 
@@ -662,6 +776,7 @@ class _RuntimeRowsAccumulator:
         self._values: dict[str, list[Any]] = {}
         self._relations = _RelationLedger()
         self._relation_buffer: list[Mapping[str, Any]] = []
+        self._stable_keys: dict[str, set[str]] = {}
 
     @staticmethod
     def _valid_digest(value: Any) -> bool:
@@ -767,12 +882,29 @@ class _RuntimeRowsAccumulator:
         if not isinstance(section, str) or section not in self._expected:
             raise ServiceError("runtime row checkpoint contains an unknown section")
         index = self._observed[section]
-        if key != f"{index:0{_RUNTIME_ROWS_INDEX_WIDTH}d}":
+        relation_section = _runtime_rows_section("relations", "records")
+        stable_sections = {
+            relation_section,
+            *_RUNTIME_V2_DOMAIN_RECORD_SECTIONS.values(),
+        }
+        if section in stable_sections:
+            # V1 rows use their ordered index. Runtime-v2 uses the immutable
+            # Relation identity and EventStore supplies its validated keyed
+            # order. Relation order is not a semantic authority claim; the
+            # Ledger still rejects duplicate identities during reconstruction.
+            if not isinstance(key, str) or not key:
+                raise ServiceError("runtime v2 Relation key is invalid")
+            if key != f"{index:0{_RUNTIME_ROWS_INDEX_WIDTH}d}":
+                seen = self._stable_keys.setdefault(section, set())
+                if key in seen:
+                    raise ServiceError("runtime v2 stable row key is duplicated")
+                seen.add(key)
+        elif key != f"{index:0{_RUNTIME_ROWS_INDEX_WIDTH}d}":
             raise ServiceError("runtime row checkpoint key sequence is invalid")
         if index >= self._expected[section]:
             raise ServiceError("runtime row checkpoint exceeds a section count")
         value = deepcopy(row.get("value"))
-        if section == _runtime_rows_section("relations", "records"):
+        if section == relation_section:
             if not isinstance(value, Mapping):
                 raise ServiceError("runtime row Relation is not an object")
             self._relation_buffer.append(value)
@@ -1373,6 +1505,11 @@ def _event_store_validators(context: ActivationContext) -> dict[str, Any]:
 
     bundle = _bundle(context)
     validation_context = _validation_context(context)
+    definition_validator = bundle.definition_validator
+    command_schema_validator = definition_validator("CommandRequest")
+    root_authorization_schema_validator = definition_validator("RootAuthorization")
+    grant_authorization_schema_validator = definition_validator("GrantAuthorization")
+    event_schema_validator = definition_validator("Event")
 
     def compiled_record(
         definition: str,
@@ -1382,7 +1519,12 @@ def _event_store_validators(context: ActivationContext) -> dict[str, Any]:
         operation: str,
     ) -> bool:
         parse_utc_second(evaluation_time)
-        validate_definition(bundle.schema, definition, value)
+        validate_definition(
+            bundle.schema,
+            definition,
+            value,
+            validator=definition_validator(definition),
+        )
         record_type = value.get("record_type")
         ingress_operation = {
             "commit": "command",
@@ -1406,7 +1548,12 @@ def _event_store_validators(context: ActivationContext) -> dict[str, Any]:
     def command(value: Mapping[str, Any], *, evaluation_time: str) -> bool:
         if value.get("issued_at") != evaluation_time:
             raise ServiceError("journal command evaluation time is detached")
-        validate_definition(bundle.schema, "CommandRequest", value)
+        validate_definition(
+            bundle.schema,
+            "CommandRequest",
+            value,
+            validator=command_schema_validator,
+        )
         return True
 
     def authorization(value: Mapping[str, Any], *, evaluation_time: str) -> bool:
@@ -1421,6 +1568,11 @@ def _event_store_validators(context: ActivationContext) -> dict[str, Any]:
             if authorization_value.get("kind") == "root"
             else "GrantAuthorization",
             authorization_value,
+            validator=(
+                root_authorization_schema_validator
+                if authorization_value.get("kind") == "root"
+                else grant_authorization_schema_validator
+            ),
         )
         return True
 
@@ -1431,7 +1583,12 @@ def _event_store_validators(context: ActivationContext) -> dict[str, Any]:
         command: Mapping[str, Any],
     ) -> bool:
         parse_utc_second(evaluation_time)
-        validate_definition(bundle.schema, "Event", value)
+        validate_definition(
+            bundle.schema,
+            "Event",
+            value,
+            validator=event_schema_validator,
+        )
         if value.get("activation_digest") != command.get("activation_digest"):
             raise ServiceError("journal Event Activation differs from its command")
         return True
@@ -1646,7 +1803,7 @@ def _runtime_state_binding_leaves(
     )
     leaves.extend(
         {"leaf_type": "Relation", "value": value}
-        for value in snapshot.relations.materialize()
+        for value in snapshot.relations.values()
     )
     leaves.extend(
         {"leaf_type": "Run", "value": value}
@@ -1907,6 +2064,8 @@ class ProminService:
         checkpoint_count: int,
         tail_batches: int,
         tail_bytes: int,
+        runtime_v2: bool = False,
+        runtime_v2_pending_rows: tuple[Mapping[str, Any], ...] | None = None,
     ) -> _RuntimeCheckpointCursor:
         if re.fullmatch(r"[0-9a-f]{64}", state_binding_digest) is None:
             raise ServiceError("runtime checkpoint cursor state binding is invalid")
@@ -1920,6 +2079,8 @@ class ProminService:
             checkpoint_count=checkpoint_count,
             tail_batches=tail_batches,
             tail_bytes=tail_bytes,
+            runtime_v2=runtime_v2,
+            runtime_v2_pending_rows=runtime_v2_pending_rows,
         )
         with self._query_runtime_lock:
             self._runtime_checkpoint_cursor = cursor
@@ -2068,7 +2229,7 @@ class ProminService:
             )
         snapshot = self._runtime_from_envelopes(
             verified,
-            envelopes(),
+            envelopes,
             head_sequence=view.head_sequence,
             head_digest=view.head_digest,
             state_binding_digest=view.current_state_binding_digest,
@@ -3306,19 +3467,47 @@ class ProminService:
     def _runtime_from_envelopes(
         self,
         context: ActivationContext,
-        envelopes: Iterable[Mapping[str, Any]],
+        envelopes: (
+            Iterable[Mapping[str, Any]]
+            | Callable[[], Iterable[Mapping[str, Any]]]
+        ),
         *,
         head_sequence: int,
         head_digest: str | None,
         state_binding_digest: str | None,
         allow_trailing_evidence: bool = False,
     ) -> _RuntimeSnapshot:
-        envelope_values = [dict(value) for value in envelopes]
+        if callable(envelopes):
+            envelope_source = envelopes
+        else:
+            iterator = iter(envelopes)
+            if iterator is envelopes:
+                # Preserve the private iterable seam for one-shot callers.
+                # Service-owned high-volume routes pass a replay factory and
+                # therefore do not retain a second full journal snapshot.
+                envelope_values = tuple(dict(value) for value in iterator)
+                envelope_source = lambda: iter(envelope_values)
+            else:
+                envelope_source = lambda: (dict(value) for value in envelopes)
         evidence = EvidenceStore(_evidence_root(self.root))
-        evidence.reconcile(
-            envelope_values,
-            allow_trailing_records=allow_trailing_evidence,
-        )
+        if evidence.finalized_artifact_ids() or evidence.pending_artifact_ids():
+            evidence.reconcile(
+                (
+                    envelope
+                    for envelope in envelope_source()
+                    if _evidence_artifact(_command_from_envelope(envelope))
+                    is not None
+                ),
+                allow_trailing_records=allow_trailing_evidence,
+            )
+        else:
+            # Evidence reconciliation ignores non-Artifact batches. With no
+            # staged or finalized evidence there is nothing to pre-scan, so
+            # replay consumes the authoritative journal once.
+            evidence.reconcile(
+                (),
+                allow_trailing_records=allow_trailing_evidence,
+            )
         authority, domain = self._new_runtime(context, evidence=evidence)
         decisions = _DecisionBindings()
         relations = _RelationLedger()
@@ -3326,7 +3515,7 @@ class ProminService:
         artifacts = _ArtifactBindings()
         replayed = 0
         observed_state_binding_digest: str | None = None
-        for envelope in envelope_values:
+        for envelope in envelope_source():
             authority.decision_resolver = decisions.resolve
             decisions, relations, runs, artifacts = self._replay_envelope(
                 context,
@@ -3563,6 +3752,12 @@ class ProminService:
                     checkpoint_count=checkpoint_count,
                     tail_batches=tail_batches,
                     tail_bytes=tail_bytes,
+                    runtime_v2=checkpoint.get("version") == 2,
+                    runtime_v2_pending_rows=(
+                        ()
+                        if checkpoint.get("version") == 2 and tail_batches == 0
+                        else None
+                    ),
                 )
                 if store.head() != head:
                     raise ServiceError("event HEAD changed during checkpoint-tail replay")
@@ -3576,7 +3771,7 @@ class ProminService:
         tail_bytes = sum(len(canonical_bytes(value)) for value in tail_envelopes)
         snapshot = self._runtime_from_envelopes(
             verified,
-            tail_envelopes,
+            lambda: iter(tail_envelopes),
             head_sequence=head["sequence"],
             head_digest=head["batch_digest"],
             state_binding_digest=None,
@@ -3806,6 +4001,34 @@ class ProminService:
             r"[0-9a-f]{64}", state_binding_digest
         ) is None:
             trusted_runtime_binding = False
+        current_runtime_rows: tuple[dict[str, Any], ...] = ()
+        incremental_task_relation_commit = False
+        if cursor_matches_commit and isinstance(committed_envelope, Mapping):
+            changed_domain_rows = tuple(
+                _runtime_rows_v2_domain_record_row(item["value"])
+                for item in snapshot.domain.changed_persistent_records()
+                if isinstance(item, Mapping)
+                and item.get("leaf_type") == "Task"
+                and isinstance(item.get("value"), Mapping)
+            )
+            relation_rows = tuple(
+                _runtime_rows_v2_relation_row(value)
+                for value in _relations_from_envelope(committed_envelope)
+            )
+            current_runtime_rows = changed_domain_rows + relation_rows
+            state_delta = batch.get("state_binding_delta") if isinstance(batch, Mapping) else None
+            command = _command_from_envelope(committed_envelope)
+            incremental_task_relation_commit = (
+                bool(current_runtime_rows)
+                and command.get("command_kind") == "task.record"
+                and isinstance(state_delta, list)
+                and bool(state_delta)
+                and all(
+                    isinstance(item, Mapping)
+                    and item.get("leaf_type") in {"Task", "Relation"}
+                    for item in state_delta
+                )
+            )
         if cursor_matches_commit:
             envelope_bytes = len(canonical_bytes(committed_envelope))
             tail_batches = cursor.tail_batches + 1
@@ -3844,6 +4067,27 @@ class ProminService:
             "batch_threshold": policy.derived_tail_batch_threshold,
             "byte_threshold": policy.derived_tail_byte_threshold,
         }
+        pending_runtime_rows: tuple[Mapping[str, Any], ...] | None = None
+        if (
+            cursor_matches_commit
+            and cursor is not None
+            and cursor.runtime_v2
+            and cursor.runtime_v2_pending_rows is not None
+            and incremental_task_relation_commit
+        ):
+            pending_runtime_rows = (
+                cursor.runtime_v2_pending_rows + current_runtime_rows
+            )
+        elif (
+            cursor_matches_current
+            and cursor is not None
+            and cursor.runtime_v2
+            and cursor.runtime_v2_pending_rows
+        ):
+            # A caller may explicitly compact the bounded in-process tail.
+            # It still uses the same journal-bound delta set; restart and
+            # external-writer paths never enter this branch.
+            pending_runtime_rows = cursor.runtime_v2_pending_rows
         if head["sequence"] == 0 or (not force and not tail["compaction_due"]):
             if not trusted_runtime_binding:
                 state_binding_digest = store.validate_state_binding_commitments(
@@ -3857,6 +4101,10 @@ class ProminService:
                 checkpoint_count=previous_count,
                 tail_batches=tail["tail_batches"],
                 tail_bytes=tail["tail_bytes"],
+                runtime_v2=(
+                    bool(cursor.runtime_v2) if cursor_matches_commit and cursor is not None else False
+                ),
+                runtime_v2_pending_rows=pending_runtime_rows,
             )
             return {"written": False, **common}
         envelope = (
@@ -3889,17 +4137,35 @@ class ProminService:
             "batch_threshold": policy.derived_tail_batch_threshold,
             "byte_threshold": policy.derived_tail_byte_threshold,
         }
-        checkpoint = store.write_derived_rows(
-            "runtime",
-            _runtime_checkpoint_rows(
+        use_incremental_v2 = pending_runtime_rows is not None
+        if use_incremental_v2:
+            runtime_rows: Iterable[Mapping[str, Any]] = (
+                _runtime_checkpoint_v2_header_row(
+                    context,
+                    snapshot,
+                    head=head,
+                    state_binding_digest=state_binding_digest,
+                    compaction=compaction,
+                ),
+                *pending_runtime_rows,
+            )
+        else:
+            # Bootstrap, restart/external-writer recovery, and mutations
+            # beyond the Task+Relation slice retain a complete in-place
+            # rebuild.  This is slower but preserves every v1 semantic field
+            # until it has its own independently proven stable delta.
+            runtime_rows = _runtime_checkpoint_v2_bootstrap_rows(
                 context,
                 snapshot,
                 head=head,
                 state_binding_digest=state_binding_digest,
                 compaction=compaction,
-            ),
+            )
+        checkpoint = store.write_runtime_rows_v2(
+            runtime_rows,
             expected_head=head,
             checkpoint_count=compaction["checkpoint_count"],
+            replace=not use_incremental_v2,
         )
         self._bind_runtime_checkpoint_cursor(
             context,
@@ -3908,6 +4174,8 @@ class ProminService:
             checkpoint_count=compaction["checkpoint_count"],
             tail_batches=0,
             tail_bytes=0,
+            runtime_v2=True,
+            runtime_v2_pending_rows=(),
         )
         return {
             "written": True,
@@ -3931,7 +4199,7 @@ class ProminService:
         verified = self._verified_mutation_context(context)
         snapshot = self._runtime_from_envelopes(
             verified,
-            store.iter_envelopes(validate=True),
+            lambda: store.iter_envelopes(validate=True),
             head_sequence=head["sequence"],
             head_digest=head["batch_digest"],
             state_binding_digest=None,
@@ -6236,7 +6504,7 @@ def _semantic_export_material(
         raise ServiceError("semantic export source HEAD is unresolved")
     snapshot = service._runtime_from_envelopes(
         context,
-        envelopes,
+        lambda: iter(envelopes),
         head_sequence=source_head["sequence"],
         head_digest=source_head["batch_digest"],
         state_binding_digest=source_head["state_binding_digest"],

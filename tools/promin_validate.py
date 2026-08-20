@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 257
+CANONICAL_PACKAGE_FILE_COUNT = 262
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -279,6 +279,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_eventstore_lifecycle.py',
         'tests/test_heavy_eventstore_postcommit_index_failure.py',
         'tests/test_heavy_eventstore_prefix_witness.py',
+        'tests/test_heavy_eventstore_validator_cache.py',
         'tests/test_heavy_failclosed_adversarial.py',
         'tests/test_heavy_init_profiles.py',
         'tests/test_heavy_language_analysis.py',
@@ -288,6 +289,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_performance_model.py',
         'tests/test_heavy_product_inspection.py',
         'tests/test_heavy_projection_bulk_rebuild.py',
+        'tests/test_heavy_projection_incremental_shards.py',
         'tests/test_heavy_projection_profile.py',
         'tests/test_heavy_provider_identity.py',
         'tests/test_heavy_query_tail_scale.py',
@@ -295,9 +297,11 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_recovery_stress.py',
         'tests/test_heavy_relation_ledger_hotpath.py',
         'tests/test_heavy_revalidation.py',
+        'tests/test_heavy_runtime_checkpoint_incremental.py',
         'tests/test_heavy_saturation_continuation_sqlite.py',
         'tests/test_heavy_saturation_storage_budget.py',
         'tests/test_heavy_state_binding_batch_union.py',
+        'tests/test_heavy_state_binding_batching.py',
         'tests/test_heavy_state_binding_storage.py',
         'tests/test_heavy_state_binding_storage_retention.py',
         'tests/test_heavy_weak_model_execution.py',
@@ -309,6 +313,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_installed_distribution.py',
         'tests/test_package_validation.py',
         'tests/test_platform_paths_hotpath.py',
+        'tests/test_projection_profile_cleanup.py',
         'tests/test_public_workflows_cli.py',
         'tests/test_retrieval_continuation_service.py',
         'tests/test_revalidation_workflow.py',

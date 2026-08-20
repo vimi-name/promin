@@ -3650,6 +3650,7 @@ def _validate_saturation_raw_artifacts(
         records=operation_binding["records"],
         verification=verification,
     )
+    semantic_ingestion = operation["semantic_ingestion"]
 
     query_binding, query_raw = resolved["query-results"]
     query_rows = _parse_raw_jsonl(

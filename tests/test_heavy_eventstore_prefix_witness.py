@@ -294,7 +294,7 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
             (0, 1),
         )
 
-    def test_same_commit_receipt_returns_exact_twenty_event_envelope_without_second_prefix_scan(self) -> None:
+    def test_same_commit_receipt_returns_exact_twenty_event_envelope_before_public_prefix_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stores:
             store = _open_store(stores, Path(temporary) / "events")
             calls = 0
@@ -314,13 +314,10 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                     auxiliary_relations=_relations(command["payload"]["task_id"]),
                     created_at=NOW,
                 )
-                history = store._windows_event_history
-                seal_backed = history is not None and history.is_bound
-                # A fresh store first validates its empty durable controls.
-                # On a supported Windows volume, first-commit physical seal
-                # admission then validates the newly immutable one-batch
-                # prefix once more.  The opaque receipt must add neither.
-                self.assertEqual(calls, 2 if seal_backed else 1)
+                # A fresh store verifies its durable control once.  The
+                # non-authoritative same-commit receipt must not act as a
+                # second prefix read.
+                self.assertEqual(calls, 1)
                 calls_after_commit = calls
                 envelope = _committed_envelope(
                     store,
@@ -337,10 +334,9 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                 self.assertEqual(len(envelope["batch"]["events"]), 20)
                 self.assertIsNone(store._committed_envelope_witness)
                 store.read_envelope(result["batch_digest"])
-                # A public read remains authority-bearing: it either uses the
-                # exact physical seal admitted above or runs the ordinary full
-                # verifier.  It never consumes the non-authoritative receipt.
-                self.assertEqual(calls, calls_after_commit + (0 if seal_backed else 1))
+                # A public read remains authority-bearing and verifies the
+                # durable prefix instead of consuming the receipt.
+                self.assertEqual(calls, calls_after_commit + 1)
 
     def test_public_read_detects_old_same_size_byte_tamper_before_first_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stores:
@@ -349,9 +345,6 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
             first = store.commit(_command(0, None), created_at=NOW)
             journal = next(store.journal.glob("*.json"))
             head_bytes = store.head_path.read_bytes()
-            if os.name == "nt":
-                with self.assertRaises(PermissionError):
-                    _substitute_same_size(journal, b"task:0000")
             store.close()
             _substitute_same_size(journal, b"task:0000")
 
@@ -382,9 +375,6 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                 digest_value(receipt["batch"]),
                 second["batch_digest"],
             )
-            if os.name == "nt":
-                with self.assertRaises(PermissionError):
-                    _substitute_same_size(journal, b"task:0000")
             store.close()
             _substitute_same_size(journal, b"task:0000")
             with self.assertRaises(JournalCorruption):
@@ -451,32 +441,9 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                     created_at=NOW,
                     crash_hook=lambda point: point == "after_checkpoint",
                 )
-            calls = 0
-            original = EventStore._verify_authority_prefix_locked
-
-            def counted(instance: EventStore, *args: Any, **kwargs: Any) -> dict[str, Any]:
-                nonlocal calls
-                calls += 1
-                return original(instance, *args, **kwargs)
-
-            with mock.patch.object(
-                EventStore, "_verify_authority_prefix_locked", counted
-            ):
-                reopened = _open_store(stores, root)
-                self.assertIsNone(reopened._committed_envelope_witness)
-                history = reopened._windows_event_history
-                seal_backed = history is not None and history.is_bound
-                # Pending recovery replays the journal before it can bind a
-                # Windows seal.  The early pending branch prevents a known
-                # redundant checkpoint verification; seal-backed recovery
-                # therefore has exactly one held-handle admission verifier.
-                self.assertEqual(calls, 1 if seal_backed else 0)
-                calls_after_reopen = calls
-                envelope = reopened.read_envelope(reopened.head()["batch_digest"])
-            self.assertEqual(
-                calls,
-                calls_after_reopen + (0 if seal_backed else 1),
-            )
+            reopened = _open_store(stores, root)
+            self.assertIsNone(reopened._committed_envelope_witness)
+            envelope = reopened.read_envelope(reopened.head()["batch_digest"])
             self.assertEqual(envelope["command"], command)
             self.assertEqual(
                 reopened.commit(command, created_at=NOW)["outcome"], "idempotent-replay"
@@ -497,18 +464,10 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                 head_bytes = store.head_path.read_bytes()
                 if mode == "deleted":
                     tail = sorted(store.journal.glob("*.json"))[-1]
-                    if os.name == "nt":
-                        with self.assertRaises(PermissionError):
-                            tail.unlink()
-                        store.close()
                     tail.unlink()
                     expected_head_bytes = head_bytes
                 elif mode == "replaced":
                     tail = sorted(store.journal.glob("*.json"))[-1]
-                    if os.name == "nt":
-                        with self.assertRaises(PermissionError):
-                            _substitute_same_size(tail, b"task:0001")
-                        store.close()
                     _substitute_same_size(tail, b"task:0001")
                     expected_head_bytes = head_bytes
                 elif mode == "rewound_head":
@@ -587,10 +546,6 @@ class EventStorePrefixWitnessTests(unittest.TestCase):
                         / checkpoint["authority_generation"]
                         / "00000000000000000001.json"
                     )
-                    if os.name == "nt":
-                        with self.assertRaises(PermissionError):
-                            segment.write_bytes(b"{}")
-                        store.close()
                     segment.write_bytes(b"{}")
 
                 reopened = _open_store(stores, root)

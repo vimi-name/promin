@@ -7,6 +7,7 @@ import copy
 from collections import OrderedDict, deque
 import contextlib
 import datetime as _datetime
+import functools
 import hashlib
 import hmac
 import itertools
@@ -48,8 +49,11 @@ _BUDGET_FIELDS = frozenset(
 _QUERY_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SEMANTIC_SHARD_COUNT = 256
-_SEMANTIC_DIGEST_ALGORITHM = "semantic-shards-v1"
-_PROJECTION_STORAGE_LAYOUT = "semantic-row-digest-blob-v2"
+_SEMANTIC_DIGEST_ALGORITHM = "semantic-shards-v2"
+_PROJECTION_STORAGE_LAYOUT = "semantic-row-digest-commitment-v3"
+_SEMANTIC_BUCKET_COUNT = 256
+_SEMANTIC_GROUP_WIDTH = 16
+_SEMANTIC_GROUP_COUNT = _SEMANTIC_BUCKET_COUNT // _SEMANTIC_GROUP_WIDTH
 _BULK_REBUILD_BATCH_ROWS = 512
 _BULK_SQL_VALUE_ROWS = 64
 _SEARCH_ROUTE = "search-v1"
@@ -558,10 +562,12 @@ class Projection:
                 if inventory is not None:
                     self._ingest_inventory_for_rebuild(connection, inventory, stats)
                 self._validate_relation_closure(connection)
-                self._validate_dependency_graph_acyclic(connection)
                 self._create_search_indexes(connection)
+                self._validate_dependency_graph_acyclic(connection)
                 self._recompute_semantic_shards(
-                    connection, range(_SEMANTIC_SHARD_COUNT)
+                    connection,
+                    range(_SEMANTIC_SHARD_COUNT),
+                    full_rebuild=True,
                 )
                 head = event_store.head()
                 projection_digest = self._semantic_digest_connection(connection)
@@ -680,9 +686,25 @@ class Projection:
             ) WITHOUT ROWID;
             CREATE TABLE semantic_rows(
               shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256),
               key TEXT NOT NULL,
               row_digest BLOB NOT NULL CHECK(typeof(row_digest)='blob' AND length(row_digest)=32),
-              PRIMARY KEY(shard,key)
+              PRIMARY KEY(shard,key),
+              UNIQUE(shard,bucket,key)
+            ) WITHOUT ROWID;
+            CREATE TABLE semantic_bucket_commitments(
+              shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256),
+              row_count INTEGER NOT NULL CHECK(row_count>0),
+              digest TEXT NOT NULL,
+              PRIMARY KEY(shard,bucket)
+            ) WITHOUT ROWID;
+            CREATE TABLE semantic_group_commitments(
+              shard INTEGER NOT NULL,
+              group_index INTEGER NOT NULL CHECK(group_index>=0 AND group_index<16),
+              row_count INTEGER NOT NULL CHECK(row_count>0),
+              digest TEXT NOT NULL,
+              PRIMARY KEY(shard,group_index)
             ) WITHOUT ROWID;
             CREATE TABLE semantic_shards(
               shard INTEGER PRIMARY KEY,
@@ -723,6 +745,11 @@ class Projection:
               tokenize='unicode61',
               detail='none'
             );
+            CREATE TEMP TABLE semantic_dirty_buckets(
+              shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
+              PRIMARY KEY(shard,bucket)
+            ) WITHOUT ROWID;
             """
         )
         if not defer_search_indexes:
@@ -732,6 +759,10 @@ class Projection:
     def _create_search_indexes(connection: sqlite3.Connection) -> None:
         """Build relation read indexes after a rebuild's append-only load."""
 
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS relations_dependency_kind "
+            "ON relations(kind,source_id,target_id,id)"
+        )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS relations_source "
             "ON relations(source_id,kind,target_id,id)"
@@ -756,6 +787,7 @@ class Projection:
               event_sequence INTEGER,
               event_index INTEGER,
               shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
               semantic_key TEXT NOT NULL,
               row_digest BLOB NOT NULL
             ) WITHOUT ROWID;
@@ -768,6 +800,7 @@ class Projection:
               event_sequence INTEGER,
               event_index INTEGER,
               shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
               semantic_key TEXT NOT NULL,
               row_digest BLOB NOT NULL
             ) WITHOUT ROWID;
@@ -781,6 +814,7 @@ class Projection:
               created_at TEXT NOT NULL,
               payload_json TEXT NOT NULL,
               shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
               semantic_key TEXT NOT NULL,
               row_digest BLOB NOT NULL
             ) WITHOUT ROWID;
@@ -794,9 +828,24 @@ class Projection:
               created_at TEXT NOT NULL,
               payload_json TEXT NOT NULL,
               shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
               semantic_key TEXT NOT NULL,
               row_digest BLOB NOT NULL
             ) WITHOUT ROWID;
+            """
+        )
+
+    @staticmethod
+    def _ensure_semantic_dirty_buckets(connection: sqlite3.Connection) -> None:
+        """Track only this connection's uncommitted semantic leaf mutations."""
+
+        connection.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS semantic_dirty_buckets(
+              shard INTEGER NOT NULL,
+              bucket INTEGER NOT NULL,
+              PRIMARY KEY(shard,bucket)
+            ) WITHOUT ROWID
             """
         )
 
@@ -849,6 +898,7 @@ class Projection:
         if search_text:
             text += " " + search_text
         semantic_key = f"entity:{entity_id}"
+        semantic_shard, semantic_bucket = self._semantic_location(semantic_key)
         semantic_value = {
             "id": entity_id,
             "entity_type": entity_type,
@@ -863,7 +913,8 @@ class Projection:
             text,
             event_sequence,
             event_index,
-            self._semantic_shard(semantic_key),
+            semantic_shard,
+            semantic_bucket,
             semantic_key,
             hashlib.sha256(canonical_bytes(semantic_value)).digest(),
         )
@@ -901,6 +952,7 @@ class Projection:
         payload = dict(relation)
         payload_json = canonical_bytes(payload).decode("utf-8")
         semantic_key = f"relation:{relation['relation_id']}"
+        semantic_shard, semantic_bucket = self._semantic_location(semantic_key)
         return (
             relation["relation_id"],
             relation["kind"],
@@ -910,7 +962,8 @@ class Projection:
             relation["target_id"],
             relation["created_at"],
             payload_json,
-            self._semantic_shard(semantic_key),
+            semantic_shard,
+            semantic_bucket,
             semantic_key,
             hashlib.sha256(canonical_bytes(payload)).digest(),
         )
@@ -940,6 +993,7 @@ class Projection:
                 "event_sequence",
                 "event_index",
                 "shard",
+                "bucket",
                 "semantic_key",
                 "row_digest",
             ),
@@ -1021,9 +1075,15 @@ class Projection:
             )
         connection.execute(
             """
-            INSERT OR REPLACE INTO semantic_rows(shard,key,row_digest)
-            SELECT shard,semantic_key,row_digest
+            INSERT OR REPLACE INTO semantic_rows(shard,bucket,key,row_digest)
+            SELECT shard,bucket,semantic_key,row_digest
             FROM projection_entity_changes
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO semantic_dirty_buckets(shard,bucket)
+            SELECT shard,bucket FROM projection_entity_changes
             """
         )
 
@@ -1050,6 +1110,7 @@ class Projection:
                 "created_at",
                 "payload_json",
                 "shard",
+                "bucket",
                 "semantic_key",
                 "row_digest",
             ),
@@ -1086,9 +1147,15 @@ class Projection:
         )
         connection.execute(
             """
-            INSERT INTO semantic_rows(shard,key,row_digest)
-            SELECT shard,semantic_key,row_digest
+            INSERT INTO semantic_rows(shard,bucket,key,row_digest)
+            SELECT shard,bucket,semantic_key,row_digest
             FROM projection_relation_changes
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO semantic_dirty_buckets(shard,bucket)
+            SELECT shard,bucket FROM projection_relation_changes
             """
         )
 
@@ -1722,8 +1789,19 @@ class Projection:
         )
 
     @staticmethod
-    def _semantic_shard(key: str) -> int:
-        return int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:2], 16)
+    def _semantic_location(key: str) -> tuple[int, int]:
+        """Locate one row in its immutable two-level shard commitment."""
+
+        key_digest = hashlib.sha256(key.encode("utf-8")).digest()
+        return key_digest[0], key_digest[1]
+
+    @classmethod
+    def _semantic_shard(cls, key: str) -> int:
+        return cls._semantic_location(key)[0]
+
+    @classmethod
+    def _semantic_bucket(cls, key: str) -> int:
+        return cls._semantic_location(key)[1]
 
     @classmethod
     def _upsert_semantic_row(
@@ -1732,43 +1810,343 @@ class Projection:
         key: str,
         value: Mapping[str, Any],
     ) -> int:
-        shard = cls._semantic_shard(key)
+        shard, bucket = cls._semantic_location(key)
         row_digest = hashlib.sha256(canonical_bytes(dict(value))).digest()
         connection.execute(
-            "INSERT INTO semantic_rows(shard,key,row_digest) VALUES (?,?,?) "
-            "ON CONFLICT(shard,key) DO UPDATE SET row_digest=excluded.row_digest",
-            (shard, key, row_digest),
+            "INSERT INTO semantic_rows(shard,bucket,key,row_digest) VALUES (?,?,?,?) "
+            "ON CONFLICT(shard,key) DO UPDATE SET "
+            "bucket=excluded.bucket,row_digest=excluded.row_digest",
+            (shard, bucket, key, row_digest),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO semantic_dirty_buckets(shard,bucket) VALUES (?,?)",
+            (shard, bucket),
         )
         return shard
 
     @staticmethod
+    @functools.lru_cache(maxsize=None)
+    def _empty_semantic_bucket_digest(shard: int, bucket: int) -> str:
+        return digest_value(
+            {
+                "algorithm": _SEMANTIC_DIGEST_ALGORITHM,
+                "shard": shard,
+                "bucket": bucket,
+                "rows": [],
+            }
+        )
+
+    @classmethod
+    def _semantic_bucket_digest(
+        cls,
+        shard: int,
+        bucket: int,
+        rows: Sequence[tuple[str, bytes]],
+    ) -> str:
+        return digest_value(
+            {
+                "algorithm": _SEMANTIC_DIGEST_ALGORITHM,
+                "shard": shard,
+                "bucket": bucket,
+                "rows": [
+                    {"key": key, "row_digest": bytes(row_digest).hex()}
+                    for key, row_digest in rows
+                ],
+            }
+        )
+
+    @staticmethod
+    @functools.lru_cache(maxsize=None)
+    def _empty_semantic_group_digest(shard: int, group_index: int) -> str:
+        buckets = tuple(
+            (
+                bucket,
+                0,
+                Projection._empty_semantic_bucket_digest(shard, bucket),
+            )
+            for bucket in range(
+                group_index * _SEMANTIC_GROUP_WIDTH,
+                (group_index + 1) * _SEMANTIC_GROUP_WIDTH,
+            )
+        )
+        return Projection._semantic_group_digest(shard, group_index, buckets)
+
+    @staticmethod
+    def _semantic_group_digest(
+        shard: int,
+        group_index: int,
+        buckets: Sequence[tuple[int, int, str]],
+    ) -> str:
+        if len(buckets) != _SEMANTIC_GROUP_WIDTH:
+            raise ProjectionError("semantic group cache is incomplete")
+        return digest_value(
+            {
+                "algorithm": _SEMANTIC_DIGEST_ALGORITHM,
+                "shard": shard,
+                "group": group_index,
+                "buckets": [
+                    {
+                        "bucket": bucket,
+                        "row_count": row_count,
+                        "digest": digest,
+                    }
+                    for bucket, row_count, digest in buckets
+                ],
+            }
+        )
+
+    @staticmethod
+    def _semantic_shard_digest(
+        shard: int,
+        groups: Sequence[tuple[int, int, str]],
+    ) -> str:
+        if len(groups) != _SEMANTIC_GROUP_COUNT:
+            raise ProjectionError("semantic shard cache is incomplete")
+        return digest_value(
+            {
+                "algorithm": _SEMANTIC_DIGEST_ALGORITHM,
+                "shard": shard,
+                "groups": [
+                    {
+                        "group": group_index,
+                        "row_count": row_count,
+                        "digest": digest,
+                    }
+                    for group_index, row_count, digest in groups
+                ],
+            }
+        )
+
+    @classmethod
     def _recompute_semantic_shards(
+        cls,
         connection: sqlite3.Connection,
         shards: Iterable[int],
+        *,
+        full_rebuild: bool = False,
     ) -> None:
-        for shard in sorted(set(shards)):
+        requested_shards = sorted(set(shards))
+        for shard in requested_shards:
             if not 0 <= shard < _SEMANTIC_SHARD_COUNT:
                 raise ProjectionError("semantic shard index is outside its bound")
-            rows = list(
+        if full_rebuild:
+            cls._rebuild_semantic_shard_commitments(connection, requested_shards)
+            connection.execute("DELETE FROM semantic_dirty_buckets")
+            return
+
+        placeholders = ",".join("?" for _ in requested_shards)
+        dirty_rows = (
+            list(
                 connection.execute(
-                    "SELECT key,row_digest FROM semantic_rows WHERE shard=? ORDER BY key",
-                    (shard,),
+                    "SELECT shard,bucket FROM semantic_dirty_buckets "
+                    f"WHERE shard IN ({placeholders}) ORDER BY shard,bucket",
+                    tuple(requested_shards),
                 )
             )
-            shard_digest = digest_value(
-                {
-                    "algorithm": _SEMANTIC_DIGEST_ALGORITHM,
-                    "shard": shard,
-                    "rows": [
-                        {"key": key, "row_digest": bytes(row_digest).hex()}
-                        for key, row_digest in rows
-                    ],
-                }
+            if requested_shards
+            else []
+        )
+        if not dirty_rows:
+            return
+        changed_groups: set[tuple[int, int]] = set()
+        for shard, bucket in dirty_rows:
+            rows = list(
+                connection.execute(
+                    "SELECT key,row_digest FROM semantic_rows "
+                    "WHERE shard=? AND bucket=? ORDER BY key",
+                    (shard, bucket),
+                )
+            )
+            if rows:
+                connection.execute(
+                    "INSERT INTO semantic_bucket_commitments(shard,bucket,row_count,digest) "
+                    "VALUES (?,?,?,?) ON CONFLICT(shard,bucket) DO UPDATE SET "
+                    "row_count=excluded.row_count,digest=excluded.digest",
+                    (
+                        shard,
+                        bucket,
+                        len(rows),
+                        cls._semantic_bucket_digest(shard, bucket, rows),
+                    ),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM semantic_bucket_commitments WHERE shard=? AND bucket=?",
+                    (shard, bucket),
+                )
+            changed_groups.add((shard, bucket // _SEMANTIC_GROUP_WIDTH))
+
+        changed_shards: set[int] = set()
+        for shard, group_index in sorted(changed_groups):
+            bucket_rows = {
+                int(bucket): (int(row_count), str(digest))
+                for bucket, row_count, digest in connection.execute(
+                    "SELECT bucket,row_count,digest FROM semantic_bucket_commitments "
+                    "WHERE shard=? AND bucket>=? AND bucket<? ORDER BY bucket",
+                    (
+                        shard,
+                        group_index * _SEMANTIC_GROUP_WIDTH,
+                        (group_index + 1) * _SEMANTIC_GROUP_WIDTH,
+                    ),
+                )
+            }
+            buckets = tuple(
+                (
+                    bucket,
+                    *bucket_rows.get(
+                        bucket,
+                        (0, cls._empty_semantic_bucket_digest(shard, bucket)),
+                    ),
+                )
+                for bucket in range(
+                    group_index * _SEMANTIC_GROUP_WIDTH,
+                    (group_index + 1) * _SEMANTIC_GROUP_WIDTH,
+                )
+            )
+            row_count = sum(value[1] for value in buckets)
+            if row_count:
+                connection.execute(
+                    "INSERT INTO semantic_group_commitments(shard,group_index,row_count,digest) "
+                    "VALUES (?,?,?,?) ON CONFLICT(shard,group_index) DO UPDATE SET "
+                    "row_count=excluded.row_count,digest=excluded.digest",
+                    (
+                        shard,
+                        group_index,
+                        row_count,
+                        cls._semantic_group_digest(shard, group_index, buckets),
+                    ),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM semantic_group_commitments "
+                    "WHERE shard=? AND group_index=?",
+                    (shard, group_index),
+                )
+            changed_shards.add(shard)
+
+        for shard in sorted(changed_shards):
+            group_rows = {
+                int(group_index): (int(row_count), str(digest))
+                for group_index, row_count, digest in connection.execute(
+                    "SELECT group_index,row_count,digest FROM semantic_group_commitments "
+                    "WHERE shard=? ORDER BY group_index",
+                    (shard,),
+                )
+            }
+            groups = tuple(
+                (
+                    group_index,
+                    *group_rows.get(
+                        group_index,
+                        (
+                            0,
+                            cls._empty_semantic_group_digest(shard, group_index),
+                        ),
+                    ),
+                )
+                for group_index in range(_SEMANTIC_GROUP_COUNT)
             )
             connection.execute(
                 "INSERT INTO semantic_shards(shard,row_count,digest) VALUES (?,?,?) "
                 "ON CONFLICT(shard) DO UPDATE SET row_count=excluded.row_count,digest=excluded.digest",
-                (shard, len(rows), shard_digest),
+                (
+                    shard,
+                    sum(value[1] for value in groups),
+                    cls._semantic_shard_digest(shard, groups),
+                ),
+            )
+        connection.execute(
+            "DELETE FROM semantic_dirty_buckets "
+            f"WHERE shard IN ({placeholders})",
+            tuple(requested_shards),
+        )
+
+    @classmethod
+    def _rebuild_semantic_shard_commitments(
+        cls,
+        connection: sqlite3.Connection,
+        shards: Sequence[int],
+    ) -> None:
+        """Build all cache rows in bounded SQLite batches during a full rebuild."""
+
+        connection.execute("DELETE FROM semantic_bucket_commitments")
+        connection.execute("DELETE FROM semantic_group_commitments")
+        connection.execute("DELETE FROM semantic_shards")
+        bucket_commitments: list[tuple[int, int, int, str]] = []
+        group_commitments: list[tuple[int, int, int, str]] = []
+        shard_commitments: list[tuple[int, int, str]] = []
+        for shard in shards:
+            bucket_rows: dict[int, list[tuple[str, bytes]]] = {}
+            for bucket, key, row_digest in connection.execute(
+                "SELECT bucket,key,row_digest FROM semantic_rows "
+                "WHERE shard=? ORDER BY bucket,key",
+                (shard,),
+            ):
+                bucket_rows.setdefault(int(bucket), []).append(
+                    (str(key), bytes(row_digest))
+                )
+            cached_buckets: dict[int, tuple[int, str]] = {}
+            for bucket, rows in sorted(bucket_rows.items()):
+                digest = cls._semantic_bucket_digest(shard, bucket, rows)
+                cached_buckets[bucket] = (len(rows), digest)
+                bucket_commitments.append((shard, bucket, len(rows), digest))
+            cached_groups: dict[int, tuple[int, str]] = {}
+            for group_index in range(_SEMANTIC_GROUP_COUNT):
+                buckets = tuple(
+                    (
+                        bucket,
+                        *cached_buckets.get(
+                            bucket,
+                            (0, cls._empty_semantic_bucket_digest(shard, bucket)),
+                        ),
+                    )
+                    for bucket in range(
+                        group_index * _SEMANTIC_GROUP_WIDTH,
+                        (group_index + 1) * _SEMANTIC_GROUP_WIDTH,
+                    )
+                )
+                row_count = sum(value[1] for value in buckets)
+                if not row_count:
+                    continue
+                digest = cls._semantic_group_digest(shard, group_index, buckets)
+                cached_groups[group_index] = (row_count, digest)
+                group_commitments.append((shard, group_index, row_count, digest))
+            groups = tuple(
+                (
+                    group_index,
+                    *cached_groups.get(
+                        group_index,
+                        (0, cls._empty_semantic_group_digest(shard, group_index)),
+                    ),
+                )
+                for group_index in range(_SEMANTIC_GROUP_COUNT)
+            )
+            shard_commitments.append(
+                (
+                    shard,
+                    sum(value[1] for value in groups),
+                    cls._semantic_shard_digest(shard, groups),
+                )
+            )
+        cls._insert_bulk_values(
+            connection,
+            "semantic_bucket_commitments",
+            ("shard", "bucket", "row_count", "digest"),
+            bucket_commitments,
+        )
+        cls._insert_bulk_values(
+            connection,
+            "semantic_group_commitments",
+            ("shard", "group_index", "row_count", "digest"),
+            group_commitments,
+        )
+        # Keep one observable write per bounded root shard.  The profiler uses
+        # this exact 256-root trace as evidence that a rebuild sealed every
+        # semantic partition; the row/bucket cache inserts above remain bulk.
+        for shard, row_count, digest in shard_commitments:
+            connection.execute(
+                "INSERT INTO semantic_shards(shard,row_count,digest) VALUES (?,?,?)",
+                (shard, row_count, digest),
             )
 
     @staticmethod
@@ -1939,6 +2317,7 @@ class Projection:
         before_bytes = os.stat(filesystem_path(self.db_path)).st_size
         changed_shards: set[int] = set()
         changed_relations: list[str] = []
+        dependency_graph_changed = False
         changed_records = 0
         logical_payload_bytes = 0
         applied_batches = 0
@@ -1948,6 +2327,7 @@ class Projection:
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
+            self._ensure_semantic_dirty_buckets(connection)
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM continuations")
             connection.execute("DELETE FROM ready_frontiers")
@@ -1965,6 +2345,11 @@ class Projection:
                     )
                     changed_shards.update(event_shards)
                     changed_relations.extend(relation_ids)
+                    dependency_graph_changed = dependency_graph_changed or (
+                        event_changed_records > 0
+                        and event["event_kind"] == "relation.recorded"
+                        and event["payload"]["kind"] == "DEPENDS_ON"
+                    )
                     changed_records += event_changed_records
                     logical_payload_bytes += len(canonical_bytes(event["payload"]))
                     applied_events += 1
@@ -1977,7 +2362,7 @@ class Projection:
             if applied_batches == 0:
                 raise ProjectionError("incremental projection tail is empty")
             self._validate_changed_relation_closure(connection, changed_relations)
-            if changed_relations:
+            if dependency_graph_changed:
                 self._validate_dependency_graph_acyclic(connection)
             self._recompute_semantic_shards(connection, changed_shards)
             semantic_digest = self._semantic_digest_connection(connection)
@@ -2243,17 +2628,41 @@ class Projection:
             parse_timestamp(issued_at)
             + _datetime.timedelta(seconds=resolved_ttl)
         )
-        return self._search_page(
-            normalized_query,
-            resolved_depth,
-            checked_budget,
-            resolved_ranking,
-            0,
-            issued_at,
-            expiry,
-            resolved_ttl,
-            checked_binding,
-        )
+        database_path = self.db_path
+        # A complete first page has no persistent state.  Keep its snapshot
+        # genuinely read-only, and only rerun through the mutable route when
+        # truncation requires an externally resumable continuation receipt.
+        with self._connect_readonly(db_path=database_path) as connection:
+            initial_result = self._search_page(
+                normalized_query,
+                resolved_depth,
+                checked_budget,
+                resolved_ranking,
+                0,
+                issued_at,
+                expiry,
+                resolved_ttl,
+                checked_binding,
+                connection=connection,
+                persist_continuation=False,
+                database_path=database_path,
+            )
+        if not initial_result["truncated"]:
+            return initial_result
+        with self._connect_mutable(db_path=database_path) as connection:
+            return self._search_page(
+                normalized_query,
+                resolved_depth,
+                checked_budget,
+                resolved_ranking,
+                0,
+                issued_at,
+                expiry,
+                resolved_ttl,
+                checked_binding,
+                connection=connection,
+                database_path=database_path,
+            )
 
     def ready_frontier(
         self,
@@ -2527,6 +2936,8 @@ class Projection:
         resume_binding: dict[str, str] | None,
         token_binding: Mapping[str, Any] | None = None,
         connection: sqlite3.Connection | None = None,
+        persist_continuation: bool = True,
+        database_path: Path | None = None,
     ) -> dict[str, Any]:
         if cursor < 0:
             raise ContinuationError("continuation cursor is negative")
@@ -2545,6 +2956,7 @@ class Projection:
                 budget["top_k"],
                 ranking=ranking,
                 status=status,
+                database_path=database_path,
             )
             # Replaying this unique event stream recovers BFS visited/emitted state
             # exactly while keeping the signed continuation bounded to one cursor.
@@ -2615,6 +3027,7 @@ class Projection:
                     selected_seed_count=len(ranked),
                     refinement_required=refinement_required,
                     refinement_hints=refinement_hints,
+                    persist_continuation=persist_continuation,
                 )
                 if len(canonical_bytes(result)) <= budget["max_bytes"]:
                     if not page_events and has_more:
@@ -2622,7 +3035,8 @@ class Projection:
                     return result
                 if not page_events:
                     raise ProjectionError("max_bytes cannot hold continuation metadata")
-                self._discard_continuation(connection, result)
+                if persist_continuation:
+                    self._discard_continuation(connection, result)
                 removed_index, _ = page_events.pop()
                 next_cursor = removed_index
                 has_more = True
@@ -2649,6 +3063,7 @@ class Projection:
         selected_seed_count: int,
         refinement_required: bool,
         refinement_hints: list[str],
+        persist_continuation: bool = True,
     ) -> dict[str, Any]:
         continuation = None
         if truncated:
@@ -2671,7 +3086,11 @@ class Projection:
                 "expiry": expiry,
                 "ttl_seconds": ttl_seconds,
             }
-            token = self._encode_token(connection, token_payload)
+            token = self._encode_token(
+                connection,
+                token_payload,
+                persist=persist_continuation,
+            )
             continuation = {
                 "version": self.limits.token_version,
                 "traversal": self.limits.traversal_algorithm_id,
@@ -3342,12 +3761,13 @@ class Projection:
         *,
         ranking: str,
         status: Mapping[str, Any],
+        database_path: Path | None = None,
     ) -> tuple[list[dict[str, Any]], bool, list[str]]:
         cache = self.ranked_candidate_cache
         if cache is None:
             return self._ranked_candidates(connection, query, top_k)
         key = (
-            str(self.db_path.resolve()),
+            str((self.db_path if database_path is None else database_path).resolve()),
             self.implementation_closure_digest,
             status["activation_digest"],
             status["head_sequence"],
@@ -3504,6 +3924,8 @@ class Projection:
         self,
         connection: sqlite3.Connection,
         payload: Mapping[str, Any],
+        *,
+        persist: bool = True,
     ) -> str:
         payload_bytes = canonical_bytes(
             dict(payload),
@@ -3527,6 +3949,8 @@ class Projection:
         token = body.decode("ascii") + "." + signature_text
         if len(token.encode("ascii")) > self.limits.max_token_bytes:
             raise ProjectionError("continuation token exceeds its verified byte ceiling")
+        if not persist:
+            return token
         connection.execute(
             "DELETE FROM continuations WHERE expires_at<=?",
             (payload["issued_at"],),
@@ -3745,10 +4169,15 @@ class Projection:
                 raise ContinuationError(f"continuation {key} is stale")
 
     @contextlib.contextmanager
-    def _connect_readonly(self) -> Iterator[sqlite3.Connection]:
-        if not os.path.isfile(filesystem_path(self.db_path)):
+    def _connect_readonly(
+        self,
+        *,
+        db_path: Path | None = None,
+    ) -> Iterator[sqlite3.Connection]:
+        selected_path = self.db_path if db_path is None else db_path
+        if not os.path.isfile(filesystem_path(selected_path)):
             raise ProjectionError("projection database does not exist")
-        database_path = sqlite_path(self.db_path)
+        database_path = sqlite_path(selected_path)
         connection: sqlite3.Connection | None = None
         try:
             if database_path.startswith("\\\\?\\"):
@@ -3777,12 +4206,17 @@ class Projection:
             connection.close()
 
     @contextlib.contextmanager
-    def _connect_mutable(self) -> Iterator[sqlite3.Connection]:
-        if not os.path.isfile(filesystem_path(self.db_path)):
+    def _connect_mutable(
+        self,
+        *,
+        db_path: Path | None = None,
+    ) -> Iterator[sqlite3.Connection]:
+        selected_path = self.db_path if db_path is None else db_path
+        if not os.path.isfile(filesystem_path(selected_path)):
             raise ProjectionError("projection database does not exist")
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(sqlite_path(self.db_path), isolation_level=None)
+            connection = sqlite3.connect(sqlite_path(selected_path), isolation_level=None)
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")

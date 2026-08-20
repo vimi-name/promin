@@ -184,7 +184,7 @@ def _command(index: int, expected_head: str | None = None) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     "publication_edge",
-    ("_write_envelope_index_entries", "_publish_state_binding_delta"),
+    ("_write_envelope_index_entries", "_publish_compact_state_binding_delta"),
 )
 def test_post_head_derived_index_failure_returns_exact_commit_and_recovers_once(
     tmp_path: Path,
@@ -265,7 +265,6 @@ def test_pre_head_authority_failure_is_not_reported_as_committed(
     "finalization_edge",
     (
         "journal-checkpoint",
-        "windows-control",
         "pending-unlink",
         "pending-fsync",
     ),
@@ -288,11 +287,6 @@ def test_post_head_finalization_failure_returns_exact_commit_and_reopens_once(
         nonlocal failure_calls
         failure_calls += 1
         raise DerivedCheckpointError("injected journal-checkpoint failure")
-
-    def fail_windows_control(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal failure_calls
-        failure_calls += 1
-        raise events_module.JournalCorruption("injected windows-control failure")
 
     def fail_pending_unlink(path: Path, *, missing_ok: bool = False) -> None:
         nonlocal failure_calls
@@ -317,12 +311,6 @@ def test_post_head_finalization_failure_returns_exact_commit_and_reopens_once(
     with monkeypatch.context() as fault:
         if finalization_edge == "journal-checkpoint":
             fault.setattr(store, "_write_journal_checkpoint", fail_checkpoint)
-        elif finalization_edge == "windows-control":
-            fault.setattr(
-                store,
-                "_advance_windows_history_control_locked",
-                fail_windows_control,
-            )
         elif finalization_edge == "pending-unlink":
             fault.setattr(events_module, "_unlink", fail_pending_unlink)
         else:

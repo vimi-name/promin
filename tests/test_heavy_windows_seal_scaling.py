@@ -1,229 +1,80 @@
 from __future__ import annotations
 
-import mmap
-import os
 from pathlib import Path
+from unittest import mock
 
-import pytest
+import promin.windows_event_history as history_module
 
-from promin.windows_event_history import (
-    WindowsEventHistorySeal,
-    WindowsEventHistoryViolation,
+# This file deliberately retains its historical name so prior test selectors
+# keep working.  The EventStore no longer owns Windows history sealing: these
+# are platform-neutral operation and recovery checks instead.
+from test_heavy_event_batching import (  # type: ignore[import-not-found]
+    NOW,
+    _command,
+    _store,
 )
 
 
-pytestmark = pytest.mark.skipif(
-    os.name != "nt", reason="Windows physical history seal operation proof"
-)
-
-
-def _history_files(root: Path, batch_count: int) -> tuple[Path, Path, list[Path], list[Path]]:
-    journal = root / "journal"
-    authority = root / "journal-authority" / "generation-scale"
-    journal.mkdir(parents=True)
-    authority.mkdir(parents=True)
-    journal_files: list[Path] = []
-    authority_files: list[Path] = []
-    for sequence in range(1, batch_count + 1):
-        journal_path = journal / f"{sequence:020d}-batch.json"
-        authority_path = authority / f"{sequence:020d}-segment.json"
-        journal_path.write_bytes(f"journal:{sequence}".encode("ascii"))
-        authority_path.write_bytes(f"authority:{sequence}".encode("ascii"))
-        journal_files.append(journal_path)
-        authority_files.append(authority_path)
-    return journal, authority, journal_files, authority_files
-
-
-def _bind(seal: WindowsEventHistorySeal, *, sequence: int) -> None:
-    seal.bind_verified_control(
-        head={
-            "sequence": sequence,
-            "batch_id": f"batch:{sequence}",
-            "batch_digest": f"digest:{sequence}",
-        },
-        authority_generation="generation-scale",
-        head_payload=f"head:{sequence}".encode("ascii"),
-        authority_root_payload=b"authority-root",
-        checkpoint_payload=b"checkpoint",
-    )
-
-
-@pytest.mark.performance
-def test_1604_batch_sequence_lookup_is_linear_and_reports_exact_handle_floor(
+def test_normal_eventstore_commit_and_reopen_never_activate_platform_history_seal(
     tmp_path: Path,
 ) -> None:
-    """The r5 contour uses 1,604 journal/authority file pairs.
+    """A normal durable commit is portable and reopens without a host seal.
 
-    A legacy replay lookup inspected every held journal *and* authority member
-    once per sequence: B * (2B) member visits.  The sealed index visits each
-    journal path once at construction and one candidate per healthy lookup.
-    The immutable handle count intentionally remains 2B: one live handle per
-    file is the exact Windows share-mode floor for no-write/no-delete.
+    Regression break caught: reintroducing a call from EventStore to the
+    optional Windows history-seal module makes this real commit/reopen route
+    raise the sentinel assertion below.  The journal/HEAD check is independent
+    of that optional host machinery.
     """
 
-    batch_count = 1_604
     root = tmp_path / "events"
-    journal, authority, journal_files, authority_files = _history_files(
-        root, batch_count
-    )
-    seal = WindowsEventHistorySeal.try_hold_existing(
-        root=root,
-        journal_directory=journal,
-        authority_directory=authority,
-        journal_files=journal_files,
-        authority_files=authority_files,
-        max_file_bytes=1_024,
-    )
-    assert seal is not None
-    try:
-        _bind(seal, sequence=batch_count)
+    with mock.patch.object(
+        history_module.WindowsEventHistorySeal,
+        "try_hold_existing",
+        side_effect=AssertionError("EventStore must not activate platform history sealing"),
+    ):
+        store = _store(root)
+        try:
+            committed = store.commit(_command(1), created_at=NOW)
+            assert committed["outcome"] == "committed"
+            assert store.head()["sequence"] == 1
+        finally:
+            store.close()
 
-        for sequence, expected in enumerate(journal_files, start=1):
-            assert seal.journal_path_for_sequence(sequence) == expected.absolute()
-
-        counters = seal.performance_counters
-        immutable_count = 2 * batch_count
-        assert counters.immutable_handles_live == immutable_count
-        assert counters.long_lived_directory_handles_live == 3
-        assert counters.admission_guard_handles_live == 0
-        assert counters.native_handles_live == immutable_count + 3
-        assert counters.immutable_handle_opens == immutable_count
-        assert counters.immutable_witness_queries == 3 * immutable_count
-        assert counters.directory_closure_checks == 2
-
-        assert counters.journal_index_build_visits == batch_count
-        assert counters.journal_path_lookups == batch_count
-        assert counters.journal_path_candidates_examined == batch_count
-        legacy_member_visits = batch_count * immutable_count
-        indexed_member_visits = (
-            counters.journal_index_build_visits
-            + counters.journal_path_candidates_examined
-        )
-        assert legacy_member_visits == 5_145_632
-        assert indexed_member_visits == 3_208
-        assert legacy_member_visits // indexed_member_visits == batch_count
-
-        # Boundary members retain the actual physical protection.  Neither a
-        # same-size replacement nor deletion is permitted while the seal is
-        # live, independent of the new lookup index.
-        for protected in (
-            journal_files[0],
-            journal_files[-1],
-            authority_files[0],
-            authority_files[-1],
-        ):
-            original = protected.read_bytes()
-            before = protected.stat()
-            with pytest.raises(OSError):
-                protected.write_bytes(b"x" * len(original))
-            with pytest.raises(OSError):
-                protected.unlink()
-            after = protected.stat()
-            assert protected.read_bytes() == original
-            assert after.st_size == before.st_size
-            assert after.st_mtime_ns == before.st_mtime_ns
-    finally:
-        seal.close()
-
-    closed = seal.performance_counters
-    assert closed.immutable_handles_live == 0
-    assert closed.native_handles_live == 0
+        reopened = _store(root)
+        try:
+            assert reopened.head()["sequence"] == 1
+            envelope = reopened.envelope_at_head()
+            assert envelope is not None
+            assert envelope["batch"]["command_id"] == "command:batch:0001"
+        finally:
+            reopened.close()
 
 
-def test_sequence_index_preserves_ambiguous_prefix_rejection(tmp_path: Path) -> None:
-    root = tmp_path / "events"
-    journal = root / "journal"
-    authority = root / "journal-authority" / "generation-scale"
-    journal.mkdir(parents=True)
-    authority.mkdir(parents=True)
-    left = journal / "00000000000000000001-left.json"
-    right = journal / "00000000000000000001-right.json"
-    large_sequence = 10**20
-    large = journal / f"{large_sequence:020d}-large.json"
-    left.write_bytes(b"left")
-    right.write_bytes(b"right")
-    large.write_bytes(b"large")
-
-    seal = WindowsEventHistorySeal.try_hold_existing(
-        root=root,
-        journal_directory=journal,
-        authority_directory=authority,
-        journal_files=[left, right, large],
-        authority_files=[],
-        max_file_bytes=1_024,
-    )
-    assert seal is not None
-    try:
-        with pytest.raises(
-            WindowsEventHistoryViolation,
-            match="sealed journal sequence is missing or ambiguous",
-        ):
-            seal.journal_path_for_sequence(1)
-        assert seal.journal_path_for_sequence(large_sequence) == large.absolute()
-        counters = seal.performance_counters
-        assert counters.journal_index_build_visits == 3
-        assert counters.journal_path_candidates_examined == 3
-    finally:
-        seal.close()
-
-
-def test_preexisting_writable_mapping_prevents_physical_seal_admission(
+def test_platform_neutral_explicit_recovery_preserves_committed_journal_order(
     tmp_path: Path,
 ) -> None:
-    """A writable section survives its source handle and remains a writer."""
+    """Recovery recomputes deterministic authority from portable journal bytes."""
 
     root = tmp_path / "events"
-    journal = root / "journal"
-    authority = root / "journal-authority" / "generation-scale"
-    journal.mkdir(parents=True)
-    authority.mkdir(parents=True)
-    journal_path = journal / "00000000000000000001-mapped.json"
-    journal_path.write_bytes(b"AAAA")
-
-    source = journal_path.open("r+b", buffering=0)
-    writable = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_WRITE)
-    source.close()
+    store = _store(root)
     try:
-        before = writable[:]
-        seal = WindowsEventHistorySeal.try_hold_existing(
-            root=root,
-            journal_directory=journal,
-            authority_directory=authority,
-            journal_files=[journal_path],
-            authority_files=[],
-            max_file_bytes=1_024,
+        first = store.commit(_command(1), created_at=NOW)
+        second = store.commit(
+            _command(2, first["batch_digest"]),
+            created_at=NOW,
         )
-        assert seal is None
-        writable[:1] = b"Z"
-        writable.flush()
-        assert writable[:] != before
+        expected_head = store.head()
     finally:
-        writable.close()
+        store.close()
 
-
-def test_preexisting_writable_handle_prevents_physical_seal_admission(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "events"
-    journal = root / "journal"
-    authority = root / "journal-authority" / "generation-scale"
-    journal.mkdir(parents=True)
-    authority.mkdir(parents=True)
-    journal_path = journal / "00000000000000000001-open-writer.json"
-    journal_path.write_bytes(b"AAAA")
-
-    writer = journal_path.open("r+b", buffering=0)
+    reopened = _store(root)
     try:
-        seal = WindowsEventHistorySeal.try_hold_existing(
-            root=root,
-            journal_directory=journal,
-            authority_directory=authority,
-            journal_files=[journal_path],
-            authority_files=[],
-            max_file_bytes=1_024,
-        )
-        assert seal is None
-        writer.write(b"Z")
-        writer.flush()
+        recovered_head = reopened.recover()
+        assert recovered_head == expected_head
+        envelopes = list(reopened.iter_envelopes())
+        assert [envelope["batch"]["command_id"] for envelope in envelopes] == [
+            "command:batch:0001",
+            "command:batch:0002",
+        ]
     finally:
-        writer.close()
+        reopened.close()

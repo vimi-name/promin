@@ -10,10 +10,12 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 from unittest import mock
 
 import promin.projection as projection_module
+import promin.service as service_module
 from promin.canonical import canonical_bytes, digest_value
 from promin.mutation_suite import MutationFixture
 from promin.projection import (
@@ -22,6 +24,8 @@ from promin.projection import (
     ProjectionError,
     VerifiedInventoryInput,
 )
+from promin.service import _runtime_state_binding_leaves
+from promin.service import ProminService
 
 
 ACTIVATION = "a" * 64
@@ -352,6 +356,103 @@ class HeavyProjectionBulkRebuildTests(unittest.TestCase):
             "commit_calls": counter.commit_calls,
             "rollback_calls": counter.rollback_calls,
         }
+
+    def test_runtime_binding_streams_relations_without_full_snapshot_copy(self) -> None:
+        """A checkpoint binding must not first clone every historical Relation."""
+
+        relation_count = 4_096
+        relations = tuple(
+            {
+                "record_type": "Relation",
+                "relation_id": f"relation:binding-stream:{index:06d}",
+                "kind": "READS",
+                "source_type": "Task",
+                "source_id": "task:binding-stream",
+                "target_type": "Artifact",
+                "target_id": "artifact:binding-stream",
+                "activation_digest": ACTIVATION,
+                "created_at": NOW,
+            }
+            for index in range(relation_count)
+        )
+
+        class _StreamingRelations:
+            def __init__(self) -> None:
+                self.yielded = 0
+
+            def values(self) -> Iterable[dict[str, Any]]:
+                for relation in relations:
+                    self.yielded += 1
+                    yield dict(relation)
+
+            def materialize(self) -> tuple[dict[str, Any], ...]:
+                raise AssertionError("runtime binding made a full Relation snapshot")
+
+        stream = _StreamingRelations()
+        snapshot = SimpleNamespace(
+            domain=SimpleNamespace(persistent_records=lambda: ()),
+            authority=SimpleNamespace(grants={}, revocations={}),
+            relations=stream,
+            runs=SimpleNamespace(materialize=lambda: ()),
+            artifacts=SimpleNamespace(materialize=lambda: ()),
+        )
+
+        leaves = _runtime_state_binding_leaves(self.fixture.event_policy, snapshot)
+
+        self.assertEqual(stream.yielded, relation_count)
+        self.assertEqual(len(leaves), relation_count)
+        self.assertEqual(
+            [leaf["value"]["relation_id"] for leaf in leaves],
+            [relation["relation_id"] for relation in relations],
+        )
+
+    def test_runtime_rebuild_uses_one_reiterable_source_without_evidence(self) -> None:
+        """An evidence-free runtime rebuild must not buffer a full journal copy."""
+
+        authority = SimpleNamespace(decision_resolver=None)
+        domain = SimpleNamespace()
+        service = SimpleNamespace(
+            root=self.root,
+            _new_runtime=lambda _context, *, evidence: (authority, domain),
+        )
+        context = SimpleNamespace(authoritative_byte_digest="b" * 64)
+        source_calls = 0
+
+        def envelopes() -> Iterable[dict[str, Any]]:
+            nonlocal source_calls
+            source_calls += 1
+            return iter(())
+
+        with (
+            mock.patch.object(
+                service_module,
+                "_activation",
+                return_value={"activation_digest": ACTIVATION},
+            ),
+            mock.patch.object(
+                service_module,
+                "_implementation_closure_digest",
+                return_value=IMPLEMENTATION,
+            ),
+            mock.patch.object(service_module, "_event_store_policy", return_value=object()),
+            mock.patch.object(
+                service_module,
+                "_freeze_runtime_components",
+                return_value=(authority, domain, {}),
+            ),
+        ):
+            snapshot = ProminService._runtime_from_envelopes(
+                service,
+                context,
+                envelopes,
+                head_sequence=0,
+                head_digest=None,
+                state_binding_digest=None,
+            )
+
+        self.assertEqual(source_calls, 1)
+        self.assertEqual(snapshot.head_sequence, 0)
+        self.assertEqual(snapshot.relations.count(), 0)
 
     def test_bulk_rebuild_matches_reference_at_1k_and_10k_and_reduces_sql_boundaries(self) -> None:
         measurements: dict[str, Any] = {}

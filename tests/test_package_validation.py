@@ -319,7 +319,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 257)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 262)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -397,21 +397,26 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_heavy_eventstore_commit_io_profile.py",
             "tests/test_heavy_eventstore_lifecycle.py",
             "tests/test_heavy_eventstore_postcommit_index_failure.py",
+            "tests/test_heavy_eventstore_validator_cache.py",
             "tests/test_heavy_performance_model.py",
             "tests/test_heavy_projection_bulk_rebuild.py",
+            "tests/test_heavy_projection_incremental_shards.py",
             "tests/test_heavy_projection_profile.py",
             "tests/test_heavy_query_tail_scale.py",
             "tests/test_heavy_saturation_continuation_sqlite.py",
             "tests/test_heavy_saturation_storage_budget.py",
             "tests/test_heavy_state_binding_batch_union.py",
+            "tests/test_heavy_state_binding_batching.py",
             "tests/test_heavy_state_binding_storage.py",
             "tests/test_heavy_state_binding_storage_retention.py",
+            "tests/test_heavy_runtime_checkpoint_incremental.py",
             "tests/test_heavy_weak_model_workflow.py",
             "tests/test_heavy_windows_event_history.py",
             "tests/test_heavy_windows_seal_scaling.py",
             "tests/test_retrieval_continuation_service.py",
             "tests/test_saturation_archive_binding.py",
             "tests/test_saturation_raw_artifact_cardinality.py",
+            "tests/test_projection_profile_cleanup.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
 
     def test_every_canonical_payload_file_is_mandatory(self) -> None:

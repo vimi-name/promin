@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from promin import evidence
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = PACKAGE_ROOT / "tools" / "promin_saturation.py"
@@ -558,3 +560,339 @@ def test_runtime_headroom_breach_and_nested_sqlite_full_error_are_terminal_failu
             raise RuntimeError("derived checkpoint publication failed") from inner
     except RuntimeError as outer:
         assert saturation._storage_failure_code(outer) == "storage-write-exhausted"
+
+
+def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion_for_phase_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structural failed result must validate its real raw phase log before publication."""
+
+    output = tmp_path / "evidence"
+    raw_directory = output / "raw"
+    raw_directory.mkdir(parents=True)
+    inventory_payload = b"inventory-stream\n"
+    query_payload = b"query-results\n"
+    process_payload = b"process-samples\n"
+    continuation_payload = b""
+    phase_payload = b"phase-log\n"
+
+    observation = {
+        "sequence": 1,
+        "phase": "semantic-corpus",
+        "command_id": "semantic-ingestion-0001",
+        "batch_digest": "b" * 64,
+        "duration_ms": 1.0,
+        "changed_records": 1,
+        "physical_payload_bytes": 1,
+        "bytes_per_changed_record": 1.0,
+        "checkpoint_written": True,
+        "checkpoint_count": 1,
+        "checkpoint_bytes": 1,
+        "checkpoint_tail_batches": 0,
+        "checkpoint_tail_bytes": 0,
+    }
+    semantic_ingestion = {
+        "record_type": "SemanticIngestionMetrics",
+        "elapsed_seconds": 1.0,
+        "commit_count": 1,
+        "changed_records": 1,
+        "physical_payload_bytes": 1,
+        "bytes_per_changed_record": 1.0,
+        "p95_ms": 1.0,
+        "p99_ms": 1.0,
+        "checkpoint_count": 1,
+        "checkpoint_writes": 1,
+        "observations": [observation],
+        "result_digest": evidence.canonical_digest([observation]),
+    }
+    query_classes = (
+        "broad",
+        "content-high-cardinality",
+        "content-probe",
+        "miss",
+        "hostile-content",
+        "hostile-exact",
+        "exact-artifact",
+    )
+    query_rows = [{} for _ in range(600)]
+    page_digest = "d" * 64
+    query_mix = {
+        query_class: sum(
+            1
+            for index in range(len(query_rows))
+            if query_classes[index % len(query_classes)] == query_class
+        )
+        for query_class in query_classes
+    }
+    class_latency = {
+        query_class: {
+            "count": count,
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0,
+        }
+        for query_class, count in sorted(query_mix.items())
+    }
+    search = {
+        "runtime_query_budget": {"top_k": 1},
+        "actual_runtime_queries": len(query_rows),
+        "query_mix": dict(sorted(query_mix.items())),
+        "depth_counts": {"1": len(query_rows)},
+        "query_class_depths": {
+            query_class: [1] for query_class in sorted(query_mix)
+        },
+        "query_class_latency_ms": class_latency,
+        "p50_ms": 1.0,
+        "p95_ms": 1.0,
+        "p99_ms": 1.0,
+        "result_digest": evidence.canonical_digest([page_digest] * len(query_rows)),
+        "pages_observed": len(query_rows),
+        "continuations_checked": 0,
+        "explicit_truncations": 0,
+        "maximum_continuation_token_bytes": 0,
+        "selected_closure_chains": len(query_rows),
+        "forced_continuation_chains": 0,
+        "forced_union_matches": 0,
+        "forced_depths": [],
+        "broad_query_refinement_required": True,
+        "high_cardinality_terms_verified": True,
+        "content_search_verified": True,
+        "miss_behavior_verified": True,
+        "hostile_proxy_content_verified": True,
+        "exact_artifact_search_verified": True,
+    }
+    phase_samples = [
+        {"elapsed_ns": 0, "rss_bytes": 10},
+        {"elapsed_ns": 1, "rss_bytes": 20},
+    ]
+    phase_summary = {
+        "baseline_bytes": 10,
+        "peak_bytes": 20,
+        "incremental_peak_bytes": 10,
+    }
+    incremental_ratio = round(10 / len(inventory_payload), 9)
+    absolute_ratio = round(20 / len(inventory_payload), 9)
+    resources = {
+        "inventory_stage_rss": phase_summary,
+        "projection_stage_rss": phase_summary,
+        "inventory_pipeline_peak_rss_bytes": 20,
+        "inventory_pipeline_incremental_peak_bytes": 10,
+        "inventory_absolute_rss_amplification": absolute_ratio,
+        "inventory_incremental_memory_amplification": incremental_ratio,
+        "memory_amplification_metric": {
+            "metric_id": "inventory-incremental-peak-over-stream-bytes",
+            "numerator": "inventory_pipeline_incremental_peak_bytes",
+            "denominator": "inventory_stream_bytes",
+            "numerator_bytes": 10,
+            "denominator_bytes": len(inventory_payload),
+            "ratio": incremental_ratio,
+            "threshold_max": 32.0,
+            "within_threshold": True,
+        },
+        "peak_rss_bytes": 20,
+    }
+    operation = {
+        "record_type": "SaturationOperationMetrics",
+        "evidence_class": "harness_generated",
+        "product_acceptance_credit": False,
+        "status": "fail",
+        "process_exit_code": 1,
+        "invocation_exit_code": 1,
+        "physical": {},
+        "inventory": {},
+        "projection": {},
+        "search": search,
+        "resources": resources,
+        "performance": {},
+        "contract_predicates": {},
+        "semantic_ingestion": semantic_ingestion,
+    }
+    operation_payload = evidence.canonical_bytes(operation)
+    raw_payloads = {
+        "raw/inventory-stream.jsonl": inventory_payload,
+        "raw/query-results.jsonl": query_payload,
+        "raw/process-samples.json": process_payload,
+        "raw/continuation-state-manifest.jsonl": continuation_payload,
+        "raw/phase-log.jsonl": phase_payload,
+        "raw/operation-metrics.json": operation_payload,
+    }
+    for relative, payload in raw_payloads.items():
+        (output / relative).write_bytes(payload)
+
+    artifacts = [
+        {
+            "role": role,
+            "path": relative,
+            "media_type": media_type,
+            "sha256": hashlib.sha256(raw_payloads[relative]).hexdigest(),
+            "bytes": len(raw_payloads[relative]),
+            "records": records,
+        }
+        for role, relative, media_type, records in (
+            ("inventory-stream", "raw/inventory-stream.jsonl", "application/x-ndjson", 100_000),
+            ("query-results", "raw/query-results.jsonl", "application/x-ndjson", 600),
+            ("process-samples", "raw/process-samples.json", "application/json", 4),
+            ("continuation-state-manifest", "raw/continuation-state-manifest.jsonl", "application/x-ndjson", 0),
+            ("phase-log", "raw/phase-log.jsonl", "application/x-ndjson", 6),
+            ("operation-metrics", "raw/operation-metrics.json", "application/json", 1),
+        )
+    ]
+
+    class InventoryRows:
+        def __len__(self) -> int:
+            return 100_000
+
+        def __iter__(self):
+            for index in range(100_000):
+                yield {
+                    "path": f"artifacts/{index:06d}.txt",
+                    "digest": "a" * 64,
+                    "size": 0,
+                    "search_text": "",
+                }
+
+    inventory_identity = hashlib.sha256()
+    for row in InventoryRows():
+        inventory_identity.update(
+            evidence.canonical_bytes(
+                {key: row[key] for key in ("path", "digest", "size")}
+            )
+        )
+    manifest_identity = {
+        "record_type": "SaturationRawArtifactManifest",
+        "path_scope": "saturation-result-directory",
+        "evidence_class": "harness_generated",
+        "product_acceptance_credit": False,
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "inventory_stream_digest": hashlib.sha256(inventory_payload).hexdigest(),
+        "inventory_identity_digest": inventory_identity.hexdigest(),
+    }
+    verification = {
+        "status": "fail",
+        "physical": operation["physical"],
+        "inventory": operation["inventory"],
+        "projection": operation["projection"],
+        "search": search,
+        "resources": resources,
+        "performance": operation["performance"],
+        "contract_predicates": operation["contract_predicates"],
+        "raw_artifact_manifest": {
+            **manifest_identity,
+            "manifest_digest": evidence.canonical_digest(manifest_identity),
+        },
+        "invocation": {"exit_code": 1},
+        "pass_credit": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+        "public_release_approved": False,
+    }
+    process_samples = {
+        "record_type": "SaturationProcessSamples",
+        "sample_interval_ms": 50,
+        "lifetime_peak_rss_bytes": 20,
+        "phases": [
+            {"phase": "inventory", "summary": phase_summary, "samples": phase_samples},
+            {"phase": "projection", "summary": phase_summary, "samples": phase_samples},
+        ],
+    }
+    phase_rows = [
+        {"order": 1, "phase": "physical-generation", "elapsed_ms": 0},
+        {"order": 2, "phase": "inventory", "elapsed_ms": 0},
+        {
+            "order": 3,
+            "phase": "semantic-ingestion",
+            "elapsed_ms": round(semantic_ingestion["elapsed_seconds"] * 1000),
+        },
+        {"order": 4, "phase": "projection", "elapsed_ms": 0},
+        {"order": 5, "phase": "runtime-queries", "elapsed_ms": 0},
+        {
+            "order": 6,
+            "phase": "result",
+            "status": "fail",
+            "process_exit_code": 1,
+            "invocation_exit_code": 1,
+        },
+    ]
+    original_parse_raw_json = evidence._parse_raw_json
+
+    def parse_raw_json(payload: bytes, label: str) -> dict:
+        if label == "saturation operation metrics":
+            return original_parse_raw_json(payload, label)
+        assert label == "process samples"
+        return process_samples
+
+    def parse_raw_jsonl(payload: bytes, label: str, **_kwargs: object):
+        if label == "inventory stream":
+            return InventoryRows()
+        if label == "query results":
+            return query_rows
+        assert label == "phase log"
+        return phase_rows
+
+    def recompute_raw_query_result(
+        _row: object,
+        *,
+        expected_index: int,
+        top_k: int,
+    ) -> dict:
+        assert top_k == 1
+        return {
+            "query_class": query_classes[expected_index % len(query_classes)],
+            "depth": 1,
+            "elapsed_ms": 1.0,
+            "class_verified": True,
+            "reference": {
+                "page_digests": [page_digest],
+                "pages": 1,
+                "continuation_pages": 0,
+                "first_truncated": False,
+                "maximum_token_bytes": 0,
+            },
+            "forced": None,
+        }
+
+    monkeypatch.setattr(evidence, "_parse_raw_json", parse_raw_json)
+    monkeypatch.setattr(evidence, "_parse_raw_jsonl", parse_raw_jsonl)
+    monkeypatch.setattr(
+        evidence,
+        "_recompute_raw_query_result",
+        recompute_raw_query_result,
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_validate_saturation_continuation_state",
+        lambda *_args: [],
+    )
+
+    def structural_validation(document: dict, **kwargs: object) -> dict:
+        assert kwargs["require_pass"] is False
+        assert document["status"] == "fail"
+        assert evidence._validate_saturation_raw_artifacts(
+            document,
+            source_path=kwargs["source_path"],
+            evidence_root=kwargs["evidence_root"],
+        )["operation"]["semantic_ingestion"] == semantic_ingestion
+        return document
+
+    monkeypatch.setattr(
+        saturation,
+        "validate_saturation_evidence",
+        structural_validation,
+    )
+    published = saturation._publish_completed_saturation_result(
+        output,
+        verification,
+        candidate_binding={"candidate_binding_digest": "c" * 64},
+    )
+
+    assert published == verification
+    assert json.loads((output / "saturation-result.json").read_text(encoding="utf-8")) == verification
+    for claim in (
+        "pass_credit",
+        "acceptance_pass",
+        "product_acceptance_pass",
+        "public_release_approved",
+    ):
+        assert published[claim] is False
