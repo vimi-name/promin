@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import json
+import os
 from pathlib import Path
 
 import pytest
 
-from promin.__main__ import _next_initial_project_work, _parser, _run
+from promin.__main__ import _next_initial_project_work, _parser, _run, _write_create_only, main
 from promin.canonical import canonical_bytes, digest_bytes, digest_value
 from promin.init_profiles import export_expert_init_bundle, load_init_profile
 from promin.recovery import (
@@ -25,8 +27,12 @@ from promin.revalidation_workflow import (
     RevalidationWorkflowReceipt,
     execute_revalidation_workflow,
 )
+from promin.product_inspection import inspect_product
+from promin.language_tooling import LanguageToolReceipt
 from promin.service import BASE_COMMANDS, ServiceError
 from promin.writer_identity import classify_writer_liveness
+from tests.test_alpha4_clean_reinitialization_operation import _make_package, _old_project
+from tests.test_canonical_init import _plans, PRESET
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +66,262 @@ def _assert_false_claims(value: object) -> None:
     elif isinstance(value, list):
         for child in value:
             _assert_false_claims(child)
+
+
+def _clean_request(path: Path, package: Path, *, confirmation: object = None, init_input: object = None) -> Path:
+    return _write(path, {
+        "schema": "promin.clean-recovery-cli-input.v1",
+        "record_type": "CleanRecoveryCliInput",
+        "package_root": str(package),
+        "project_identity": digest_value({"public-recovery": "project"}),
+        "owner_confirmation": confirmation,
+        "init_input": init_input,
+        "authority_granted": False,
+        "pass_credit": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+    })
+
+
+def _complete_clean_init_input(tmp_path: Path) -> dict[str, object]:
+    paths = {}
+    for name in ("standard_bundle", "preset_path", "project_plan", "standards_plan", "technologies_plan", "licenses_plan", "authority_plan"):
+        candidate = tmp_path / f"{name}.json"
+        candidate.write_bytes(canonical_bytes({"name": name}))
+        paths[name] = str(candidate)
+    return paths
+
+
+def test_recover_clean_plan_is_non_mutating_on_initialized_root(tmp_path, capsys):
+    project, _old = _old_project(tmp_path)
+    package = _make_package(tmp_path, docs_payload=b"new docs\n")
+    before = (project / ".promin" / "state" / "progress.json").read_bytes()
+    request = _clean_request(tmp_path / "request.json", package)
+    assert main(["--root", str(project), "recover", "clean", "--request", str(request)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_type"] == "CleanRecoveryPlan"
+    assert result["claims"]["acceptance_pass"] is False
+    assert (project / ".promin" / "state" / "progress.json").read_bytes() == before
+    assert not (project / ".promin" / "state" / "observations").exists()
+
+
+def test_recover_clean_rejects_noncanonical_input(tmp_path, capsys):
+    package = _make_package(tmp_path, docs_payload=b"docs\n")
+    request = _clean_request(tmp_path / "request.json", package)
+    request.write_text(request.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert main(["--root", str(tmp_path / "project"), "recover", "clean", "--request", str(request)]) == 2
+    assert "canonical" in json.loads(capsys.readouterr().err)["reason"]
+
+
+def test_recover_clean_apply_rejects_wrong_confirmation_before_quarantine(tmp_path, capsys):
+    project, old = _old_project(tmp_path)
+    package = _make_package(tmp_path, docs_payload=b"docs\n")
+    wrong = OwnerConfirmation("owner:local", "wrong", digest_value({"wrong": True}), 1).to_record()
+    request = _clean_request(tmp_path / "request.json", package, confirmation=wrong, init_input=_complete_clean_init_input(tmp_path))
+    assert main(["--root", str(project), "recover", "clean", "--request", str(request), "--apply"]) == 2
+    capsys.readouterr()
+    assert (project / ".promin" / "state" / "progress.json").read_bytes() == old
+    assert not (project / ".promin-host" / "recovery").exists()
+
+
+def test_recover_clean_apply_publishes_docs_quarantines_old_state_and_rechecks_activation(tmp_path, capsys, monkeypatch):
+    from promin.public_recovery import prepare_clean_reinitialization
+    import promin.init as init_module
+
+    project, paths = _plans(tmp_path)
+    old = b"old operational progress must not be copied\n"
+    (project / ".promin" / "state").mkdir(parents=True)
+    (project / ".promin" / "state" / "progress.json").write_bytes(old)
+    package = _make_package(tmp_path, docs_payload=b"verified docs\n")
+    identity = digest_value({"public-recovery": "project"})
+    prep = prepare_clean_reinitialization(package, project_identity=identity)
+    confirmation = OwnerConfirmation("owner:local", "clean", prep.intent.intent_digest, 1).to_record()
+    init_input = {"standard_bundle": str(Path(__file__).resolve().parents[1]), "preset_path": str(PRESET), **{key: str(value) for key, value in paths.items()}}
+    monkeypatch.setattr(init_module, "verify_provider_preflight", lambda *args, **kwargs: ())
+    request = _clean_request(tmp_path / "request.json", package, confirmation=confirmation, init_input=init_input)
+    exit_code = main(["--root", str(project), "recover", "clean", "--request", str(request), "--apply"])
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_type"] == "CleanReinitializationResult"
+    assert (project / ".promin" / "docs" / "CLEAN.md").read_bytes() == b"verified docs\n"
+    assert not (project / ".promin" / "state" / "progress.json").exists()
+    assert result["quarantine_performed"] is True
+    _assert_false_claims(result)
+    quarantine = next((project / ".promin-host" / "recovery").iterdir())
+    assert (quarantine / "state" / "progress.json").read_bytes() == old
+
+
+def test_inspect_cli_is_bounded_static_and_claim_free(tmp_path, capsys):
+    (tmp_path / "notes.md").write_text("hello", encoding="utf-8")
+
+    assert main(["--root", str(tmp_path), "--no-telemetry", "inspect", "--audience", "client"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["claims"]["acceptance_pass"] is False
+    assert report["effects"]["filesystem_writes"] == 0
+
+
+def test_report_cli_rejects_promoted_inspection_and_existing_output(tmp_path):
+    promoted = {"claims": {"acceptance_pass": True}}
+    (tmp_path / "inspection.json").write_text(json.dumps(promoted), encoding="utf-8")
+
+    assert main(["--root", str(tmp_path), "report", "--inspection", "inspection.json"]) == 2
+
+
+def test_public_inspect_and_report_never_persist_telemetry_on_initialized_root(tmp_path, capsys):
+    activation = tmp_path / ".promin" / "init" / "activation.json"
+    activation.parent.mkdir(parents=True)
+    activation.write_text("{}", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("hello", encoding="utf-8")
+    inspection = tmp_path / "inspection.json"
+    inspection.write_bytes(canonical_bytes(inspect_product(tmp_path)))
+
+    assert main(["--root", str(tmp_path), "inspect", "--audience", "client"]) == 0
+    capsys.readouterr()
+    assert main(["--root", str(tmp_path), "report", "--inspection", str(inspection)]) == 0
+    capsys.readouterr()
+    assert main(["--root", str(tmp_path), "report", "--inspection", "missing.json"]) == 2
+    capsys.readouterr()
+    assert not (tmp_path / ".promin" / "state" / "observations").exists()
+
+
+def test_tooling_plan_is_catalog_bound_and_claim_free(tmp_path, capsys):
+    assert main([
+        "--root", str(tmp_path), "--no-telemetry", "tooling", "plan",
+        "--language", "c-family", "--tool", "clang-tidy",
+        "--action", "static-analysis",
+    ]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["capability_id"] == "clang-tidy"
+    assert plan["claims"]["pass_credit"] is False
+
+
+def test_tooling_rejects_unknown_tool_and_never_writes_telemetry(tmp_path, capsys):
+    activation = tmp_path / ".promin" / "init" / "activation.json"
+    activation.parent.mkdir(parents=True)
+    activation.write_text("{}", encoding="utf-8")
+    assert main([
+        "--root", str(tmp_path), "tooling", "plan", "--language", "c-family",
+        "--tool", "powershell", "--action", "static-analysis",
+    ]) == 2
+    capsys.readouterr()
+    assert not (tmp_path / ".promin" / "state" / "observations").exists()
+
+
+def _tool_receipt(status: str) -> LanguageToolReceipt:
+    return LanguageToolReceipt(
+        status=status, plan_digest="d" * 64, executable_sha256=None,
+        argv=("clang-tidy", "src", "--"), started_at=None, completed_at=None,
+        exit_code=0 if status == "AVAILABLE" else 7,
+        stdout_sha256="e" * 64, stdout_size_bytes=0, stderr_sha256="e" * 64,
+        stderr_size_bytes=0, invoked=status == "AVAILABLE",
+        stream_cleanup_completed=True, output_manifest=(),
+        failure_detail=None,
+        claims={"acceptance_pass": False, "pass_credit": False,
+                "product_acceptance_pass": False, "release_approved": False},
+    )
+
+
+def test_tooling_probe_public_boundary_reports_controlled_success_and_failure(tmp_path, capsys, monkeypatch):
+    observed = []
+
+    def fake_probe(plan, *, timeout_seconds):
+        observed.append((plan, timeout_seconds))
+        return _tool_receipt("AVAILABLE" if timeout_seconds == 3 else "FAILED")
+
+    monkeypatch.setattr("promin.__main__.probe_language_tool", fake_probe)
+    assert main(["--root", str(tmp_path), "tooling", "probe", "--language", "c",
+                 "--tool", "clang-tidy", "--action", "static-analysis",
+                 "--timeout-seconds", "3"]) == 0
+    success = json.loads(capsys.readouterr().out)
+    assert success["receipt"]["status"] == "AVAILABLE"
+    assert success["receipt"]["claims"]["pass_credit"] is False
+    assert observed[0][0].language_id == "c-family"
+    assert main(["--root", str(tmp_path), "tooling", "probe", "--language", "c",
+                 "--tool", "clang-tidy", "--action", "static-analysis",
+                 "--timeout-seconds", "2"]) == 0
+    assert json.loads(capsys.readouterr().out)["receipt"]["status"] == "FAILED"
+
+
+def test_tooling_run_public_boundary_reports_unsafe_host_without_invocation(tmp_path, capsys, monkeypatch):
+    import promin.language_tooling as tooling_module
+
+    monkeypatch.setattr(tooling_module, "_host_path_guard_available", lambda: False)
+    assert main(["--root", str(tmp_path), "tooling", "run", "--language", "cpp",
+                 "--tool", "clang-tidy", "--action", "static-analysis"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["receipt"]["status"] == "UNAVAILABLE_HOST_PATH_GUARD"
+    assert result["receipt"]["invoked"] is False
+    assert result["receipt"]["output_manifest"] == []
+
+
+def test_tooling_executable_override_requires_canonical_declared_path(tmp_path, capsys, monkeypatch):
+    executable = tmp_path / "clang-tidy"
+    executable.write_bytes(b"controlled")
+    monkeypatch.setattr("promin.__main__.probe_language_tool", lambda plan, *, timeout_seconds: _tool_receipt("AVAILABLE"))
+    assert main(["--root", str(tmp_path), "tooling", "probe", "--language", "c-family",
+                 "--tool", "clang-tidy", "--action", "static-analysis",
+                 "--executable", "clang-tidy"]) == 0
+    assert json.loads(capsys.readouterr().out)["receipt"]["status"] == "AVAILABLE"
+    assert main(["--root", str(tmp_path), "tooling", "probe", "--language", "c-family",
+                 "--tool", "clang-tidy", "--action", "static-analysis",
+                 "--executable", "nested/../clang-tidy"]) == 2
+    assert "canonical" in json.loads(capsys.readouterr().err)["reason"]
+
+
+def test_tooling_run_rejects_unsafe_output_root_and_preserves_initialized_telemetry(tmp_path, capsys, monkeypatch):
+    activation = tmp_path / ".promin" / "init" / "activation.json"
+    activation.parent.mkdir(parents=True)
+    activation.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("promin.__main__.run_language_tool", lambda plan, *, timeout_seconds: _tool_receipt("FAILED"))
+    assert main(["--root", str(tmp_path), "tooling", "run", "--language", "c-family",
+                 "--tool", "clang-tidy", "--action", "static-analysis",
+                 "--output-root", "../escape"]) == 2
+    capsys.readouterr()
+    assert not (tmp_path / ".promin" / "state" / "observations").exists()
+
+
+def test_tooling_has_no_raw_argv_option():
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["tooling", "plan", "--language", "c-family",
+                              "--tool", "clang-tidy", "--action", "static-analysis",
+                              "--argv", "clang-tidy"])
+
+
+def test_create_only_publication_replacement_survives(tmp_path, monkeypatch):
+    output = tmp_path / "report.json"
+    replacement = b"replacement"
+
+    def replace_then_fail(_source, destination):
+        Path(destination).write_bytes(replacement)
+        raise FileExistsError("simulated target replacement")
+
+    monkeypatch.setattr(os, "link", replace_then_fail)
+    with pytest.raises(FileExistsError, match="simulated target replacement"):
+        _write_create_only(output, b"original")
+    assert output.read_bytes() == replacement
+
+
+def test_create_only_mid_write_failure_leaves_no_target_or_temp(tmp_path, monkeypatch):
+    output = tmp_path / "report.json"
+
+    def fail_fsync(_fd):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="simulated fsync failure"):
+        _write_create_only(output, b"original")
+    assert not output.exists()
+    assert list(tmp_path.glob(f".{output.name}.*.tmp")) == []
+
+
+def test_create_only_success_remains_create_only(tmp_path):
+    output = tmp_path / "report.json"
+
+    _write_create_only(output, b"original")
+    with pytest.raises(FileExistsError):
+        _write_create_only(output, b"replacement")
+    assert output.read_bytes() == b"original"
 
 
 def _expert_selection() -> dict[str, object]:
@@ -231,7 +493,14 @@ def test_parser_keeps_base_commands_and_thin_nested_selectors(tmp_path: Path) ->
         for action in parser._actions
         if isinstance(getattr(action, "choices", None), dict)
     )
-    assert tuple(choices) == BASE_COMMANDS
+    assert tuple(choices) == (
+        BASE_COMMANDS[:2]
+        + ("revalidate",)
+        + BASE_COMMANDS[2 : BASE_COMMANDS.index("continue")]
+        + ("tooling",)
+        + ("recover",)
+        + BASE_COMMANDS[BASE_COMMANDS.index("continue") :]
+    )
     assert _args(tmp_path, "init", "--expert-bundle", "bundle").expert_bundle
     assert _args(tmp_path, "next", "--initial-work", "plan").initial_work == "plan"
     for action in (
@@ -360,6 +629,89 @@ def test_ordinary_init_and_next_do_not_start_optional_work(
     assert suggested == proposal
     _assert_false_claims(initialized)
     _assert_false_claims(suggested)
+
+
+def test_minimal_init_prepare_publishes_only_bounded_first_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from promin.__main__ import main
+
+    assert main([
+        "--root", str(tmp_path), "--no-telemetry", "init",
+        "--goal", "organize docs", "--init-experience", "minimal",
+        "--yes", "--initial-work", "prepare",
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["initial_work"]["status"] == "READY_PROPOSAL_ONLY"
+    assert result["initial_work"]["project_mutation_performed"] is False
+    assert result["acceptance_pass"] is False
+    assert not (tmp_path / "README.md").exists()
+
+
+def test_init_plan_initial_work_never_creates_control_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from promin.__main__ import main
+
+    assert main([
+        "--root", str(tmp_path), "init", "--yes", "--initial-work", "plan",
+    ]) == 0
+    capsys.readouterr()
+    assert not (tmp_path / ".promin").exists()
+
+
+def test_fresh_init_plan_uses_owner_preview_and_none_keeps_review_shape(
+    tmp_path: Path,
+) -> None:
+    review = _run(_args(tmp_path, "init"))
+    assert "initial_work" not in review
+
+    planned = _run(_args(tmp_path, "init", "--initial-work", "plan"))
+    preview = planned["initial_work"]
+    assert preview["record_type"] == "InitialProjectWorkPreview"
+    assert preview["activation_status"] == "PENDING_INITIALIZATION"
+    assert preview["activation_digest"] is None
+    _assert_false_claims(preview)
+    assert not (tmp_path / ".promin").exists()
+
+
+def test_expert_init_requires_explicit_initial_work_mode(
+    tmp_path: Path,
+) -> None:
+    selections = _write(tmp_path / "selections.json", _expert_selection())
+
+    none = _run(
+        _args(
+            tmp_path,
+            "init",
+            "--init-experience",
+            "expert",
+            "--capability-language",
+            "python",
+            "--capability-selections",
+            str(selections),
+            "--initial-work",
+            "none",
+        )
+    )
+    assert "initial_work" not in none
+
+    plan = _run(
+        _args(
+            tmp_path,
+            "init",
+            "--init-experience",
+            "expert",
+            "--capability-language",
+            "python",
+            "--capability-selections",
+            str(selections),
+            "--initial-work",
+            "plan",
+        )
+    )
+    assert plan["initial_work"]["record_type"] == "InitialProjectWorkPreview"
+    assert not (tmp_path / ".promin").exists()
 
 
 @pytest.mark.parametrize(
@@ -900,6 +1252,68 @@ def test_revalidation_rejects_recorded_pass_false_claims_and_cli_repair(
         _run(_args(tmp_path, "doctor", "--revalidate", str(repair_path)))
     with pytest.raises(ServiceError, match="requires --revalidate"):
         _run(_args(tmp_path, "doctor", "--execute-revalidation"))
+
+
+def test_public_revalidate_alias_matches_doctor_contract(tmp_path: Path, capsys) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    request = _write(
+        tmp_path / "revalidate-input.json",
+        _revalidation_request(
+            receipts,
+            mode="inspect",
+            name="revalidate.json",
+            route=_route(),
+        ),
+    )
+
+    assert main(
+        ["--root", str(tmp_path), "revalidate", "--input", str(request)]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_type"] == "RevalidationWorkflowPlan"
+    assert result["acceptance_pass"] is False
+
+
+def test_public_revalidate_rejects_recorded_pass(tmp_path: Path) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    request = _write(
+        tmp_path / "revalidate-pass-input.json",
+        _revalidation_request(
+            receipts,
+            mode="revalidate",
+            name="revalidate-pass.json",
+            route=_route(),
+            execution={
+                "kind": "recorded-read-only-observations",
+                "observations": [
+                    {
+                        "phase_id": "authority",
+                        "status": "PASS",
+                        "observed_input_digest": "0" * 64,
+                        "output_identity": {
+                            "observation": "imported pass",
+                            "acceptance_pass": False,
+                            "pass_credit": False,
+                        },
+                        "reason": None,
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert main(
+        [
+            "--root",
+            str(tmp_path),
+            "revalidate",
+            "--input",
+            str(request),
+            "--execute",
+        ]
+    ) == 2
 
 
 def test_nested_modes_reject_ignored_inputs(tmp_path: Path) -> None:

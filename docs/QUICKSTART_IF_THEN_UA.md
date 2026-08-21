@@ -16,6 +16,14 @@
 - Якщо потрібний стан → `promin status`.
 - Якщо потрібна наступна робота → `promin next`.
 - Якщо система поводиться неправильно → `promin audit --live`.
+- Якщо потрібен bounded огляд → `promin inspect`; якщо потрібен client-safe
+  JSON → `promin report`; для clean recovery використовуйте `promin recover
+  clean` з exact owner confirmation; для контрольованої перевірки —
+  `promin revalidate`.
+- Якщо треба перевірити language tool → `promin tooling plan|probe|run` з
+  explicit language alias і точним declaration tool ID. На цьому Windows host
+  `run` може повернути `UNAVAILABLE_HOST_PATH_GUARD`; це не tool success і не
+  platform acceptance.
 - Якщо promin ще не встановлено → створіть окремий Python 3.12/3.13/3.14 venv і виконайте `python -m pip install <шлях-до-розпакованого-promin>`.
 - Якщо потрібне offline-встановлення → використайте перевірений wheelhouse через `--no-index --find-links`.
 - Якщо потрібно перевірити весь шар → `promin doctor --checklist`.

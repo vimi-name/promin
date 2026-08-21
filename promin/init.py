@@ -2376,6 +2376,7 @@ class InitRequest:
     licenses_plan: Path
     authority_plan: Path
     activation_proofs: Sequence[Mapping[str, Any]] | None = None
+    portable_docs_shell: Path | None = None
     provider_verifiers: Mapping[str, ProviderVerifier] = field(default_factory=dict)
     signature_verifier: SignatureVerifier | None = None
 
@@ -4418,6 +4419,8 @@ def _initialize_project_locked(request: InitRequest, project_root: Path) -> Init
         write_current_host_binding(staging)
         if portable_shell_backup is not None:
             _merge_portable_control_shell(portable_shell_backup, staging)
+        if request.portable_docs_shell is not None:
+            _merge_portable_control_shell(request.portable_docs_shell, staging)
         fsync_directory(staging)
         _require_same_init_input_identity(
             expected_identity,

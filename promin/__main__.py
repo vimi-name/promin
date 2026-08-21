@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import replace
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +15,8 @@ from .audit import audit_project
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, digest_bytes
 from .canonical import load_json_strict, parse_json_strict
 from .context_index import query_context
+from .client_report import ClientReportError, report_from_inspection
+from .product_inspection import inspect_product, serialize_product_inspection
 from .experience import (
     apply_plan,
     bind_init_capability_selection,
@@ -31,8 +36,19 @@ from .init_profiles import (
     resolve_init_profile,
 )
 from .language_catalog import languages_for_detected_technologies
+from .language_catalog import load_bundled_language_catalog
+from .language_tooling import (
+    LanguageToolingError,
+    plan_language_tool,
+    probe_language_tool,
+    run_language_tool,
+)
 from .resources import bundle_root
 from .init import InitRequest, emit_canonical_init_plans, review_init_request
+from .initial_project_work import (
+    prepare_initial_project_work,
+    preview_initial_project_work,
+)
 from .limits import PREFLIGHT_FILE_ITEMS_MAX
 from .portability import doctor_with_portability, repair_project
 from .refresh import refresh_project
@@ -48,7 +64,7 @@ from .skills import (
 from .telemetry import OperationTimer, heartbeat, record_observation, telemetry_enabled_for_command
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, include_public: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="promin")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="project root")
     parser.add_argument("--version", action="version", version=f"promin {__version__}")
@@ -89,6 +105,12 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--apply", "--yes", dest="apply", action="store_true", help="apply the resolved plan")
     init.add_argument("--plan-only", action="store_true", help="never apply the resolved plan")
     init.add_argument("--plan-out", type=Path)
+    init.add_argument(
+        "--initial-work",
+        choices=("none", "plan", "prepare"),
+        default=None,
+        help="bind bounded first-work proposal generation to this init request",
+    )
     init.add_argument("--emit-expert-config", type=Path)
     init.add_argument("--expert-bundle", type=Path, help="exact expert bundle")
 
@@ -114,6 +136,13 @@ def _parser() -> argparse.ArgumentParser:
     doctor_mode.add_argument("--checklist", action="store_true", help="run the bounded whole-system alpha checklist")
     doctor_mode.add_argument("--revalidate", type=Path, metavar="INPUT")
     doctor.add_argument("--execute-revalidation", action="store_true")
+
+    revalidate = sub.add_parser(
+        "revalidate",
+        help="plan or execute a bounded evidence-first revalidation workflow",
+    )
+    revalidate.add_argument("--input", type=Path, required=True)
+    revalidate.add_argument("--execute", action="store_true")
 
     status = sub.add_parser("status", help="show operational and experience state")
     status.add_argument("--watch", action="store_true")
@@ -158,6 +187,34 @@ def _parser() -> argparse.ArgumentParser:
     )
     static_admission.add_argument("--profile", choices=("minimal", "diagnostic-host-local"), default="minimal")
     static_admission.add_argument("--handoff", type=Path)
+
+    tooling = sub.add_parser("tooling", help="plan, probe, or run one declared language tool")
+    tooling_commands = tooling.add_subparsers(dest="tooling_action", required=True)
+    for action in ("plan", "probe", "run"):
+        command = tooling_commands.add_parser(action)
+        command.add_argument("--language", required=True)
+        command.add_argument("--tool", required=True)
+        command.add_argument("--action", dest="action_id", required=True)
+        command.add_argument("--argument")
+        if action in {"probe", "run"}:
+            command.add_argument("--executable", type=Path)
+            command.add_argument("--timeout-seconds", type=int, default=30)
+        if action == "run":
+            command.add_argument("--output-root")
+
+    if include_public:
+        inspect = sub.add_parser("inspect", help="inspect product sources without operational effects")
+        inspect.add_argument("--audience", choices=("client", "machine"), default="client")
+
+        report = sub.add_parser("report", help="derive a canonical client report from an inspection")
+        report.add_argument("--inspection", type=Path, required=True)
+        report.add_argument("--output", type=Path)
+
+    recover = sub.add_parser("recover", help="run bounded recovery workflows")
+    recover_commands = recover.add_subparsers(dest="recover_action", required=True)
+    clean = recover_commands.add_parser("clean", help="prepare or apply clean recovery")
+    clean.add_argument("--request", type=Path, required=True)
+    clean.add_argument("--apply", action="store_true")
 
     continuation = sub.add_parser("continue", help="continue a bounded WorkCard context")
     continuation.add_argument("token")
@@ -272,6 +329,29 @@ def _bounded_preflight_files(value: object, label: str) -> int:
     return value
 
 
+def _write_create_only(path: Path, payload: bytes) -> None:
+    temporary_name: str | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary_name, path)
+    except Exception:
+        raise
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except OSError:
+                pass
+
+
 def _expert_init_requested(args: argparse.Namespace) -> bool:
     values = (
         args.standard_bundle,
@@ -322,9 +402,23 @@ def _next_initial_project_work(root: Path, *, execute: bool) -> dict[str, Any]:
         raise ServiceError(
             "initialized project has no resolved plan; run promin doctor --repair"
         )
-    from .initial_project_work import prepare_initial_project_work
+    # Resolve through the owner module so test and host integrations can bind
+    # the same public owner without replacing this CLI adapter.
+    from . import initial_project_work
 
-    return prepare_initial_project_work(root, plan, execute=execute)
+    return initial_project_work.prepare_initial_project_work(root, plan, execute=execute)
+
+
+def _initial_work_after_init(
+    root: Path, plan: Mapping[str, Any], mode: str
+) -> dict[str, Any] | None:
+    if mode == "none":
+        return None
+    from . import initial_project_work
+
+    return initial_project_work.prepare_initial_project_work(
+        root, plan, execute=(mode == "prepare")
+    )
 
 
 def _run_expert_bundle_init(
@@ -654,7 +748,19 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         emitted = emit_expert_config(args.emit_expert_config.resolve(), plan, root)
     else:
         emitted = None
-    should_apply = args.apply and not args.plan_only
+    initial_work_mode = args.initial_work
+    should_apply = (
+        args.apply
+        and not args.plan_only
+        and initial_work_mode != "plan"
+    )
+    if (
+        initial_work_mode is None
+        and should_apply
+        and args.init_experience == "minimal"
+        and capability_mode == "minimal"
+    ):
+        initial_work_mode = "prepare"
     if should_apply:
         selection_status = plan["init_capability_selection"]["status"]
         if selection_status == "PENDING_OWNER_SELECTION":
@@ -662,12 +768,30 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
                 "--yes requires explicit --documentation and --verification choices; unresolved ask is fail-closed"
             )
         result = apply_plan(root, plan)
+        for claim in (
+            "authority",
+            "authority_granted",
+            "pass_credit",
+            "acceptance_pass",
+            "product_acceptance_pass",
+        ):
+            result.setdefault(claim, False)
         if emitted is not None:
             result["expert_config"] = emitted
         if resolved_experience is not None:
             result["init_experience"] = resolved_experience
+        initial_work = _initial_work_after_init(root, plan, initial_work_mode or "none")
+        if initial_work is not None:
+            result["initial_work"] = initial_work
         return result
-    return {
+    if initial_work_mode == "plan":
+        if _is_initialized(root):
+            initial_work = _initial_work_after_init(root, plan, "plan")
+        else:
+            initial_work = preview_initial_project_work(root, plan)
+    else:
+        initial_work = None
+    result = {
         "record_type": "GuidedInitReview",
         "status": "review-required",
         "resolved_plan": plan,
@@ -679,6 +803,9 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         "pass_credit": False,
         "acceptance_pass": False,
     }
+    if initial_work is not None:
+        result["initial_work"] = initial_work
+    return result
 
 
 def _run_weak_work(args: argparse.Namespace) -> dict[str, Any]:
@@ -1067,8 +1194,10 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
     """Return whether this invocation may intentionally persist project-local state."""
 
     workflow = args.workflow
-    if workflow in {"status", "context", "validate", "audit", "static-admission"}:
+    if workflow in {"status", "context", "validate", "audit", "static-admission", "inspect", "tooling"}:
         return False
+    if workflow == "report":
+        return getattr(args, "output", None) is not None
     if workflow == "doctor":
         return bool(
             getattr(args, "apply_repair", False)
@@ -1077,8 +1206,12 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
                 and getattr(args, "execute_revalidation", False)
             )
         )
+    if workflow == "revalidate":
+        return bool(getattr(args, "execute", False))
     if workflow == "init":
         return isinstance(result, Mapping) and result.get("record_type") in {"InitializationResult", "InitResult"}
+    if workflow == "recover":
+        return bool(getattr(args, "apply", False))
     if workflow == "refresh":
         return not bool(getattr(args, "plan_only", False))
     if workflow == "skills":
@@ -1100,8 +1233,16 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
 def _public_plan_boundary_disables_telemetry(args: argparse.Namespace) -> bool:
     """Keep explicit plan/read-only public routes free of hidden project writes."""
 
+    if args.workflow in {"inspect", "report"}:
+        return True
+    if args.workflow == "tooling":
+        return True
+    if args.workflow == "recover" and getattr(args, "recover_action", None) == "clean":
+        return not bool(getattr(args, "apply", False))
     if args.workflow == "doctor" and getattr(args, "revalidate", None) is not None:
         return not bool(getattr(args, "execute_revalidation", False))
+    if args.workflow == "revalidate":
+        return not bool(getattr(args, "execute", False))
     if args.workflow == "next" and getattr(args, "weak_work", None) is not None:
         return getattr(args, "weak_work", None) in {"prepare", "review", "resume"}
     if args.workflow == "next" and getattr(args, "initial_work", None) is not None:
@@ -1121,6 +1262,80 @@ def _safe_public_reason(exc: Exception, root: Path | None = None) -> str:
     return text[:2048]
 
 
+def _run_public_revalidate(args: argparse.Namespace) -> dict[str, Any]:
+    """Adapt the public revalidate alias to the canonical workflow runner."""
+
+    args.revalidate = args.input
+    args.execute_revalidation = bool(args.execute)
+    return _run_revalidation(args)
+
+
+def _strict_tool_executable(value: Path, *, root: Path, declared: str) -> Path:
+    """Resolve one explicit local executable without accepting aliases or drift."""
+
+    candidate = value if value.is_absolute() else root / value
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ServiceError("--executable must identify an existing local file") from exc
+    if not resolved.is_file() or resolved.name.casefold() != Path(declared).name.casefold():
+        raise ServiceError("--executable does not match the declared tool mapping")
+    if candidate.absolute() != resolved:
+        raise ServiceError("--executable must be a canonical local path")
+    return resolved
+
+
+def _run_tooling(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    """Run one explicitly selected catalog-bound language tooling action."""
+
+    from .language_tooling import LanguageToolPlan
+
+    try:
+        catalog = load_bundled_language_catalog(bundle_root() / "language_profiles")
+        arguments = () if args.argument is None else (args.argument,)
+        plan = plan_language_tool(
+            catalog,
+            language_id=args.language,
+            tool_id=args.tool,
+            action_id=args.action_id,
+            root=root,
+            arguments=arguments,
+        )
+        if args.tooling_action == "plan":
+            return plan.to_record()
+        if args.executable is not None:
+            executable = _strict_tool_executable(args.executable, root=root, declared=plan.executable)
+            plan = replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:]))
+        if not isinstance(plan, LanguageToolPlan):  # pragma: no cover
+            raise ServiceError("language tooling plan is invalid")
+        if args.tooling_action == "probe":
+            receipt = probe_language_tool(plan, timeout_seconds=args.timeout_seconds)
+        else:
+            if args.output_root is not None:
+                output_root = Path(args.output_root)
+                if output_root.is_absolute() or any(part in {"", ".", ".."} for part in output_root.parts):
+                    raise ServiceError("--output-root must be a bounded relative path")
+                plan = replace(plan, output_roots=(str(output_root).replace("\\", "/"),))
+            receipt = run_language_tool(plan, timeout_seconds=args.timeout_seconds)
+        return {
+            "record_type": f"LanguageTool{args.tooling_action.title()}",
+            "plan": plan.to_record(),
+            "receipt": receipt.to_record(),
+            "claims": {
+                "acceptance_pass": False,
+                "pass_credit": False,
+                "product_acceptance_pass": False,
+                "release_approved": False,
+            },
+            "acceptance_pass": False,
+            "pass_credit": False,
+            "product_acceptance_pass": False,
+            "release_approved": False,
+        }
+    except LanguageToolingError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     timer = OperationTimer()
@@ -1135,6 +1350,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 result = _run_expert_init(args, root)
             else:
                 result = _guided_init(args, root)
+        elif args.workflow == "recover":
+            from .public_recovery import apply_clean_recovery, load_clean_recovery_request, plan_clean_recovery
+            request_path = args.request if args.request.is_absolute() else root / args.request
+            request = load_clean_recovery_request(request_path.resolve(), project_root=root)
+            result = apply_clean_recovery(request, project_root=root) if args.apply else plan_clean_recovery(request, project_root=root)
         elif args.workflow == "doctor":
             if args.execute_revalidation and args.revalidate is None:
                 raise ServiceError("--execute-revalidation requires --revalidate INPUT")
@@ -1152,6 +1372,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 result = repair_project(root, apply=False)
             else:
                 result = doctor_with_portability(root, replay=not args.no_replay)
+        elif args.workflow == "revalidate":
+            result = _run_public_revalidate(args)
         elif args.workflow == "status":
             if not _is_initialized(root):
                 result = {
@@ -1253,6 +1475,32 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             from .static_admission import run_static_admission
 
             result = run_static_admission(root, profile=args.profile, handoff=handoff)
+        elif args.workflow == "tooling":
+            result = _run_tooling(args, root)
+        elif args.workflow == "inspect":
+            inspected = inspect_product(root)
+            try:
+                selected = parse_json_strict(
+                    serialize_product_inspection(inspected, audience=args.audience).encode("utf-8"),
+                    limits=_PUBLIC_INPUT_LIMITS,
+                )
+            except Exception as exc:
+                raise ServiceError(str(exc)) from exc
+            if not isinstance(selected, dict):
+                raise ServiceError("inspection audience surface must be an object")
+            if args.audience == "client":
+                selected["effects"] = inspected["machine"]["effects"]
+            result = selected
+        elif args.workflow == "report":
+            inspection_path = args.inspection if args.inspection.is_absolute() else root / args.inspection
+            inspection = _load_canonical_object(inspection_path.absolute(), "inspection")
+            try:
+                result = report_from_inspection(inspection)
+            except ClientReportError as exc:
+                raise ServiceError(str(exc)) from exc
+            if args.output is not None:
+                output = (args.output if args.output.is_absolute() else root / args.output).absolute()
+                _write_create_only(output, canonical_bytes(result))
         elif args.workflow == "skills":
             if args.skills_action == "list":
                 result = skill_catalog(root)
@@ -1319,7 +1567,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
+    command_args = list(sys.argv[1:] if argv is None else argv)
+    parser = _parser(include_public=any(item in {"inspect", "report"} for item in command_args))
     parsed: argparse.Namespace | None = None
     try:
         parsed = parser.parse_args(argv)

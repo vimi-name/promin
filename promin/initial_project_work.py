@@ -104,6 +104,23 @@ def _validated_plan(root: Path, value: Mapping[str, Any]) -> dict[str, Any]:
     return plan
 
 
+def _validated_preview_plan(root: Path, value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a resolved plan without requiring initialized control state."""
+
+    if not root.is_dir():
+        raise InitialProjectWorkError("project root must be an existing directory")
+    if not isinstance(value, Mapping):
+        raise InitialProjectWorkError("resolved plan must be a mapping")
+    plan = dict(value)
+    if plan.get("record_type") != "ResolvedInitPlan" or plan.get("plan_version") != 1:
+        raise InitialProjectWorkError("resolved plan identity is invalid")
+    identity = {key: item for key, item in plan.items() if key != "plan_digest"}
+    if plan.get("plan_digest") != digest_value(identity):
+        raise InitialProjectWorkError("resolved plan digest mismatch")
+    plan["_activation_digest"] = None
+    return plan
+
+
 def _operation_ids(plan: Mapping[str, Any]) -> list[str]:
     declared = plan.get("planned_operations")
     if not isinstance(declared, list):
@@ -482,6 +499,34 @@ def prepare_initial_project_work(
     return result
 
 
+def preview_initial_project_work(
+    project_root: Path | str,
+    resolved_plan: Mapping[str, Any],
+    *,
+    max_files: int = DEFAULT_INITIAL_WORK_MAX_FILES,
+    max_bytes: int = DEFAULT_INITIAL_WORK_MAX_BYTES,
+) -> dict[str, Any]:
+    """Produce the deterministic first-work plan before initialization.
+
+    This uses the same operation ordering, resource policy, and claim surface
+    as the activated owner route while making the missing activation explicit.
+    It never reads or writes Promin control state or evidence.
+    """
+
+    _validate_limits(max_files, max_bytes)
+    root = Path(project_root).absolute()
+    plan = _validated_preview_plan(root, resolved_plan)
+    operations = _operation_ids(plan)
+    workflow = _workflow_plan(plan, operations, max_files, max_bytes)
+    workflow["record_type"] = "InitialProjectWorkPreview"
+    workflow["activation_status"] = "PENDING_INITIALIZATION"
+    workflow["activation_digest"] = None
+    workflow["work_plan_digest"] = digest_value(
+        {key: item for key, item in workflow.items() if key != "work_plan_digest"}
+    )
+    return workflow
+
+
 __all__ = [
     "DEFAULT_INITIAL_WORK_MAX_BYTES",
     "DEFAULT_INITIAL_WORK_MAX_FILES",
@@ -490,4 +535,5 @@ __all__ = [
     "MAX_INITIAL_WORK_BYTES",
     "MAX_INITIAL_WORK_FILES",
     "prepare_initial_project_work",
+    "preview_initial_project_work",
 ]

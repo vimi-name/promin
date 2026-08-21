@@ -82,6 +82,13 @@ execution state, result kind, result digest і власний receipt digest. Fa
 також записується як non-promoting record, тому interrupted або невдалий run
 можна перевірити й свідомо відновити.
 
+Публічні маршрути `inspect`, `report`, `recover clean` і `revalidate` доступні
+окремо. Apply для clean recovery потребує exact owner confirmation і зовнішніх
+init inputs; навіть після bounded apply він залишається
+`PENDING_RUNTIME_EVIDENCE`, доки реальний bounded provider fixture не завершить
+маршрут. Жодної state migration або import з попереднього root цей route не
+виконує.
+
 ## CLI
 
 Revalidation залишається вкладеною в наявну surface:

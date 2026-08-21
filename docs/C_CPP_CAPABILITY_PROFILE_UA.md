@@ -99,3 +99,23 @@ destination або transfer identity є `PROVEN` violation. Перевищенн
 дозволяє далі доводити безпеку: результат `UNAVAILABLE`. Навіть `SAFE`/
 `PASS` цих static receipts завжди мають `pass_credit=false`, product acceptance
 та release approval false.
+
+## CLI-маршрут C/C++ tooling
+
+Для C-family використовуються точні declaration ID профілю: `clang-tidy`,
+`clang-doc` і `doxygen-html-xml`.
+
+```text
+promin tooling plan --language c-family --tool clang-tidy --action static-analysis
+```
+
+План має фіксовану action grammar (`src`, `--`) і не приймає shell syntax,
+absolute/parent paths чи довільний executable. `probe` виконує лише explicit
+canonical local executable, що збігається з declared mapping; `run` додатково
+обмежує output root relative path та fail-closed при
+`UNAVAILABLE_HOST_PATH_GUARD`. Це host diagnostics, не доказ build,
+documentation quality або release readiness.
+
+Ці static/comparative observations не замінюють Linux або 100k evidence.
+Відсутність provider/tool evidence залишається pending, а acceptance та
+performance claims не підвищуються локальним diagnostic результатом.

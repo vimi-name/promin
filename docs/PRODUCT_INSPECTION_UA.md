@@ -93,6 +93,10 @@ absolute root або content. Це призначено для безпечно�
 without implicit filesystem paths і завершальний newline. За незмінного tree,
 profile та limits результат byte-stable.
 
+Client report JSON/PDF renderer належить tools-only surface. Його fixture
+layout/text checks є diagnostic evidence; candidate-bound evidence для
+конкретного report ще потрібен до будь-якого client PDF claim.
+
 ## Жодного promotion
 
 Кожен report фіксує:

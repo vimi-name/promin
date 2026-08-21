@@ -6,7 +6,11 @@ import pytest
 
 from promin.canonical import canonical_bytes, digest_value, load_json_strict
 from promin.experience import resolve_plan
-from promin.initial_project_work import InitialProjectWorkError, prepare_initial_project_work
+from promin.initial_project_work import (
+    InitialProjectWorkError,
+    prepare_initial_project_work,
+    preview_initial_project_work,
+)
 
 
 def _project(root: Path, *, source: bool = True) -> dict[str, object]:
@@ -60,6 +64,27 @@ def test_plan_is_deterministic_and_does_not_write(tmp_path: Path) -> None:
     assert not (tmp_path / ".promin-host").exists()
     assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")} == before
     _assert_false_claims(first)
+
+
+def test_preview_is_owner_generated_and_pending_initialization(tmp_path: Path) -> None:
+    plan = resolve_plan(tmp_path, language="en")
+    before = {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")}
+
+    preview = preview_initial_project_work(tmp_path, plan)
+
+    assert preview["record_type"] == "InitialProjectWorkPreview"
+    assert preview["status"] == "PLANNED_NO_EXECUTION"
+    assert preview["activation_status"] == "PENDING_INITIALIZATION"
+    assert preview["activation_digest"] is None
+    assert preview["operations"] == [
+        item["operation_id"]
+        for item in plan["planned_operations"]
+        if item["operation_id"] != "initialize-control-layer"
+    ]
+    assert preview["resource_limits"]["max_files"] == 4096
+    assert not (tmp_path / ".promin").exists()
+    assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")} == before
+    _assert_false_claims(preview)
 
 
 def test_execute_records_static_inventory_and_reopens_exactly(tmp_path: Path) -> None:

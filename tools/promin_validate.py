@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 262
+CANONICAL_PACKAGE_FILE_COUNT = 272
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -120,6 +120,10 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/SYSTEM_CHECKLIST_UA.md',
         'docs/WEAK_MODEL_EXECUTION_UA.md',
         'docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md',
+        'docs/audit/2026-08-21-client-report-implementation-plan.md',
+        'docs/audit/2026-08-21-language-tooling-implementation-plan.md',
+        'docs/audit/2026-08-21-public-workflow-and-tooling-design.md',
+        'docs/audit/2026-08-21-public-workflow-implementation-plan.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
         'human/promin_appendices_ua.pdf',
@@ -151,6 +155,9 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'profiles/windows-development.json',
         'promin/__init__.py',
         'promin/__main__.py',
+        'promin/client_report.py',
+        'promin/language_tooling.py',
+        'promin/public_recovery.py',
         'promin/artifact_policy.py',
         'promin/audit.py',
         'promin/authority.py',
@@ -311,6 +318,8 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_windows_seal_scaling.py',
         'tests/test_initial_project_work.py',
         'tests/test_installed_distribution.py',
+        'tests/test_client_report_tool.py',
+        'tests/test_language_tooling.py',
         'tests/test_package_validation.py',
         'tests/test_platform_paths_hotpath.py',
         'tests/test_projection_profile_cleanup.py',
@@ -335,6 +344,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tools/promin_linux_model.py',
         'tools/promin_no_degradation.py',
         'tools/promin_package.py',
+        'tools/promin_client_report.py',
         'tools/promin_performance_model.py',
         'tools/promin_projection_profile.py',
         'tools/promin_runtime.py',
@@ -986,6 +996,10 @@ def iter_regular_files(
             if exclude_root_git_metadata and rel == ".git":
                 dirnames.remove(name)
                 continue
+            if rel == ".superpowers" or rel.startswith(".superpowers/") or rel == "docs/superpowers":
+                # SDD scratch is local control material, never canonical package payload.
+                dirnames.remove(name)
+                continue
             if _is_transient_directory(name):
                 raise ValidationFailure(f"transient directory is forbidden: {rel}")
             if _is_link_or_reparse(child):
@@ -1078,6 +1092,9 @@ def verify_package_inventory(
         for name in list(dirnames):
             rel = (current / name).relative_to(root).as_posix()
             if rel == ".git":
+                dirnames.remove(name)
+                continue
+            if rel == ".superpowers" or rel.startswith(".superpowers/") or rel == "docs/superpowers":
                 dirnames.remove(name)
                 continue
             validate_relative_path(rel)

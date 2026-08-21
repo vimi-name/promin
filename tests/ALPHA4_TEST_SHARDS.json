@@ -95,6 +95,8 @@
     "tests/test_heavy_windows_seal_scaling.py",
     "tests/test_initial_project_work.py",
     "tests/test_installed_distribution.py",
+    "tests/test_client_report_tool.py",
+    "tests/test_language_tooling.py",
     "tests/test_package_validation.py",
     "tests/test_platform_paths_hotpath.py",
     "tests/test_projection_profile_cleanup.py",
@@ -108,7 +110,7 @@
     "tests/test_service_cli.py",
     "tests/test_service_mutation_cache.py"
   ],
-  "selector_count": 104,
+  "selector_count": 106,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
@@ -224,6 +226,7 @@
       "id": "heavy-hardening",
       "selectors": [
         "tests/test_heavy_artifact_minimality.py",
+        "tests/test_client_report_tool.py",
         "tests/test_heavy_checkpoint_profile.py",
         "tests/test_heavy_comparative_bench.py",
         "tests/test_heavy_derived_storage.py",
@@ -260,6 +263,7 @@
         "tests/test_heavy_state_binding_storage_retention.py",
         "tests/test_heavy_weak_model_execution.py",
         "tests/test_heavy_weak_model_workflow.py",
+        "tests/test_language_tooling.py",
         "tests/test_heavy_windows_event_history.py",
         "tests/test_heavy_windows_publication.py",
         "tests/test_heavy_windows_seal_scaling.py",

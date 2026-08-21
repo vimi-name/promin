@@ -25,6 +25,10 @@ Minimal init зберігає малу базову форму: один canonic
 bindings, resolved profile, detected facts, planned operations і digest. Він не
 запускає слабку модель, не встановлює залежності та не виконує майбутні tasks.
 
+Команда `promin init --yes --init-experience minimal --initial-work prepare`
+створює лише bounded control/evidence contour і proposal. Вона не мутує source,
+не встановлює tools, не викликає model і не виконує запропоновану роботу.
+
 ## Expert init
 
 Expert route приймає повні явні choices для кожної обраної мови:
@@ -78,6 +82,10 @@ promin next --initial-work execute
 `plan` не пише evidence. `execute` виконує bounded read-only inventory,
 semantic summary і greenfield/project baseline, після чого публікує
 proposal-only record у `.promin-host/initial-work/<workflow_digest>`.
+
+На свіжому root `init --initial-work plan` повертає
+`InitialProjectWorkPreview` з `activation_status=PENDING_INITIALIZATION`.
+Це preview майбутньої роботи, а не activated plan.
 
 Складність майбутньої роботи не обмежується цим baseline. Proposal зберігає
 high-level goal і може бути виконаний без декомпозиції або пізніше розкладений у

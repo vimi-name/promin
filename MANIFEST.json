@@ -28,8 +28,8 @@
     },
     {
       "path": "MACHINE_README.md",
-      "sha256": "74334a12adb610c0d65728a5a4761e844ba1a3c76c5df568bdcb7c012f0f48d6",
-      "size": 33879
+      "sha256": "8e720009170130aec0270d7342122e0962a585d01f3643dc223e64e500dc7b13",
+      "size": 33884
     },
     {
       "path": "NOTICE",
@@ -38,8 +38,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "413c33777315d825e6ceead24c3cecc854801dc3c510b9cbc36c0771725ac2cf",
-      "size": 33805
+      "sha256": "658d6478e67258258e63f3eb209ffcf68c878de5529663f0dc69d2c14cb998a3",
+      "size": 33804
     },
     {
       "path": "SECURITY.md",
@@ -123,8 +123,8 @@
     },
     {
       "path": "docs/C_CPP_CAPABILITY_PROFILE_UA.md",
-      "sha256": "c20214bd3d3fdb52705e3ab99e55bafc9dc810a27e72175b9d421ade05fab960",
-      "size": 6896
+      "sha256": "2fe94ebfe0265f3f9b00347c6b56a80bb757c756eac46a7f9bb304cd1dabb697",
+      "size": 7951
     },
     {
       "path": "docs/EXPERT_CONFIG_UA.md",
@@ -133,13 +133,13 @@
     },
     {
       "path": "docs/INIT_CAPABILITIES_UA.md",
-      "sha256": "1a6b4c9d7d3cec9ee0c41171e70eaf9f89fad0ef6058704a870c93783dfc0ea9",
-      "size": 7570
+      "sha256": "a57b623e187ef597c0788e0072b6a3a38bfdf80e7fe1d9665568694a0ac33e79",
+      "size": 8100
     },
     {
       "path": "docs/LANGUAGE_CAPABILITIES_UA.md",
-      "sha256": "d1fdfa8dbb8680109a0ff402e4657ac8ea76a7654e89d32339cff542be375748",
-      "size": 4002
+      "sha256": "4cb4d9e64711568d1a0137800aa423ec859f1d5f44eaae34f2ea05c397b30135",
+      "size": 5354
     },
     {
       "path": "docs/LINUX_MODEL_VALIDATION_UA.md",
@@ -173,8 +173,8 @@
     },
     {
       "path": "docs/PRODUCT_INSPECTION_UA.md",
-      "sha256": "e8413635b4d25fae39aff868f791388f6011423e3b693ea598af9a37ff4fcb0f",
-      "size": 6468
+      "sha256": "53db028d13b19b65a9d0a27d172b757bdbe5d04c95f8248a97efab7e044058f1",
+      "size": 6725
     },
     {
       "path": "docs/PROFILE_CATALOG_UA.md",
@@ -188,8 +188,8 @@
     },
     {
       "path": "docs/QUICKSTART_IF_THEN_UA.md",
-      "sha256": "c106d6c4ea4ac969431241e576680028d52a826fa40ba3db8fa5458a6a922f41",
-      "size": 2073
+      "sha256": "d2fcbf6138841af0b7ca6490be46575a66fb6c847f43ddc58fe79958c0052cae",
+      "size": 2704
     },
     {
       "path": "docs/RECEIPTS_AND_INVALIDATION_UA.md",
@@ -198,8 +198,8 @@
     },
     {
       "path": "docs/REVALIDATION_AND_REPORTING_UA.md",
-      "sha256": "361ad231a5669a2258c16e0fd2d7e76d74562f920bfd7ce0d0564e1f0c862645",
-      "size": 5969
+      "sha256": "4af7bbeaa2768cb108116e5f785209c4663a63136fcaa5c6f6ec707f96a6fcae",
+      "size": 6490
     },
     {
       "path": "docs/RUNTIME_AUDIT_UA.md",
@@ -225,6 +225,26 @@
       "path": "docs/WEAK_MODEL_EXECUTION_UA.md",
       "sha256": "6f812aa2d1cf005f5d007349abc4941ebd8221cc99171c32db00fa18fd58b5d2",
       "size": 10981
+    },
+    {
+      "path": "docs/audit/2026-08-21-client-report-implementation-plan.md",
+      "sha256": "b248b9e5bda1c2c07032d463efe69ae8c9e06f3f679839bf6cb096b087872cd5",
+      "size": 6191
+    },
+    {
+      "path": "docs/audit/2026-08-21-language-tooling-implementation-plan.md",
+      "sha256": "c5e1047c0ee79652fbc33efebbc1caefde1563bf6d4269a54339d7251ff2122f",
+      "size": 9956
+    },
+    {
+      "path": "docs/audit/2026-08-21-public-workflow-and-tooling-design.md",
+      "sha256": "bc59183e815261fc08138147bce4c9bdc06075df43ef1d58384338a7e1e90ec3",
+      "size": 9189
+    },
+    {
+      "path": "docs/audit/2026-08-21-public-workflow-implementation-plan.md",
+      "sha256": "95e661d4ef0ca977287238b2a872fdd5bcd315c9833a7a27eeea37fcba5a58a4",
+      "size": 12663
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
@@ -363,8 +383,8 @@
     },
     {
       "path": "promin/__main__.py",
-      "sha256": "be86c1960e89d96ea215dc888e182fb373d7bd32bec0e645af0f0eb0d88526d6",
-      "size": 58532
+      "sha256": "b584fb54b3ab4b3f010b306dafa9cd63c8494066d4d48195d607d4159debe0dd",
+      "size": 69323
     },
     {
       "path": "promin/artifact_policy.py",
@@ -395,6 +415,11 @@
       "path": "promin/clean_reinitialization.py",
       "sha256": "f0b4fa1d7acd066b26f2d59a0b5bd07ac6afb51f533f06e7cd9ea6828cecf181",
       "size": 28066
+    },
+    {
+      "path": "promin/client_report.py",
+      "sha256": "a7023a4f2360f1adcb5ced316ac428bd9f96ea5d800340b18d67d4d3bd44bc35",
+      "size": 1182
     },
     {
       "path": "promin/cmake_file_api.py",
@@ -478,8 +503,8 @@
     },
     {
       "path": "promin/init.py",
-      "sha256": "76d72cc523964e82a73fdddea5a8aa8cd7f9474a013c7fdac6254c5ba82d93c2",
-      "size": 182165
+      "sha256": "8c74f0af1c904bc6f8830f9dd31273672cc4448c6e5a320df1b2ef8784199e00",
+      "size": 182341
     },
     {
       "path": "promin/init_profiles.py",
@@ -488,8 +513,8 @@
     },
     {
       "path": "promin/initial_project_work.py",
-      "sha256": "ae746be02ffb8fedf63024b2d44020797902196454acc98564f05e56abe1b794",
-      "size": 19251
+      "sha256": "1c0b6726eb273e1a3b3acebf753a36c1ca21f46aebeccc0c4c7726b05cd75951",
+      "size": 21232
     },
     {
       "path": "promin/input_identity.py",
@@ -505,6 +530,11 @@
       "path": "promin/language_catalog.py",
       "sha256": "c8e663d19f925555748b6af3765c469bb177283b5ab3ba8361d8051d8eb38634",
       "size": 44274
+    },
+    {
+      "path": "promin/language_tooling.py",
+      "sha256": "a71d2cb2b9f7b10836dff0740ffcadd5ddaff53b5232ce967f08454c00cb3888",
+      "size": 29162
     },
     {
       "path": "promin/limits.py",
@@ -555,6 +585,11 @@
       "path": "promin/provider_store.py",
       "sha256": "65cbcbc74b43019742577755123a27a5a151c57e5276175256d0d6dd83a48469",
       "size": 6743
+    },
+    {
+      "path": "promin/public_recovery.py",
+      "sha256": "e3bd11859a5eeffa966364192e458ef1fedcff3990beeef8b4fc19b9d059704a",
+      "size": 8330
     },
     {
       "path": "promin/publication.py",
@@ -688,8 +723,8 @@
     },
     {
       "path": "tests/ALPHA4_TEST_SHARDS.json",
-      "sha256": "a8d118e3ff4ed0e3662830f18af86ef07f42bb82aca5ed5359258b73e1ccdb6e",
-      "size": 11551
+      "sha256": "8dca93628506ecf14c4d8944c0d2f044f8f3169c3c20bd17c8f5004aaf089686",
+      "size": 11715
     },
     {
       "path": "tests/test_alpha3_ingress_budget.py",
@@ -927,6 +962,11 @@
       "size": 89986
     },
     {
+      "path": "tests/test_client_report_tool.py",
+      "sha256": "a6a2d5c868889e221a2889cb61d3a2bef0447cb2544e3662eb5668c809de594b",
+      "size": 7152
+    },
+    {
       "path": "tests/test_concurrency_crash.py",
       "sha256": "911a3d5a25a24568a56c8549b34968c14809fb044d62d90aa33468a8e2b2cb8b",
       "size": 61551
@@ -1143,8 +1183,8 @@
     },
     {
       "path": "tests/test_initial_project_work.py",
-      "sha256": "17f20c82c36d7409f3587b123b88bc24a5924e71c0d822427b38b32c10ff9326",
-      "size": 6946
+      "sha256": "ac90ca1513c430eb64363425e63f5ccaf06aaa0fdff8f21c23c088579d4bdfec",
+      "size": 7929
     },
     {
       "path": "tests/test_installed_distribution.py",
@@ -1152,8 +1192,13 @@
       "size": 4145
     },
     {
+      "path": "tests/test_language_tooling.py",
+      "sha256": "e32c925d165b9a8f14ce68e95761bb7dcec4659e9b3dc373050ed9ff5fc8f626",
+      "size": 18350
+    },
+    {
       "path": "tests/test_package_validation.py",
-      "sha256": "10f9bff6ced99cd83cf2305b0af8175579047ee4e084ec9c209d1e7c62eecfec",
+      "sha256": "1204a7f9fa2ac3247b91415225a49ce0ae588d116ff83adad04b95ad7ad8b530",
       "size": 70290
     },
     {
@@ -1168,8 +1213,8 @@
     },
     {
       "path": "tests/test_public_workflows_cli.py",
-      "sha256": "192f7aa1a8d90e610369d78f293d2a9cd873e3a4534e57e94f9b1dbf0704fd66",
-      "size": 30954
+      "sha256": "6c74fb49049f7f4b8bc6409abaecd0dc45c173499a21b29a65c4bb256feb1954",
+      "size": 48579
     },
     {
       "path": "tests/test_retrieval_continuation_service.py",
@@ -1203,8 +1248,8 @@
     },
     {
       "path": "tests/test_service_cli.py",
-      "sha256": "390bbc48fe2ad0779b066e0a68f8eea6f327f51414560bbcf2c1d0a8c88d38f9",
-      "size": 86266
+      "sha256": "4ccb2d14102536e006c41633eb1c138bcb597e5291bbca866092c3febfa24700",
+      "size": 86840
     },
     {
       "path": "tests/test_service_mutation_cache.py",
@@ -1235,6 +1280,11 @@
       "path": "tools/promin_checkpoint_profile.py",
       "sha256": "3921a8e9430ee6b532fad923b9768c6b77327254d4cdc8a43faceb30b5da74d8",
       "size": 37832
+    },
+    {
+      "path": "tools/promin_client_report.py",
+      "sha256": "62241fb02301088a4a5e387f82838c35aba650f9771ef7c31cd8ede84deef70a",
+      "size": 10780
     },
     {
       "path": "tools/promin_command_bench.py",
@@ -1298,8 +1348,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "cb6fa852bab2068c3228a44e333efdc7c2c97fe1632ed25d8b30a6fe663e0389",
-      "size": 143101
+      "sha256": "cae7a2157ec09e4898b8c8f6ca9914d4d9b4c48fb0b40925b9fff5375ba2d99e",
+      "size": 144044
     }
   ],
   "generated_surfaces": [

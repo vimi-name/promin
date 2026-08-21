@@ -56,3 +56,23 @@ profile selections, relevant availability results та всі false claims. То
 зміна override або релевантного host observation змінює digest, але не може
 підвищити `acceptance_pass`, `pass_credit`,
 `product_acceptance_pass` чи `release_approved`.
+
+## Публічний CLI tooling
+
+```text
+promin tooling plan --language LANGUAGE --tool DECLARED_TOOL --action ACTION [--argument RELATIVE]
+promin tooling probe --language LANGUAGE --tool DECLARED_TOOL --action ACTION [--executable PATH] [--timeout-seconds N]
+promin tooling run --language LANGUAGE --tool DECLARED_TOOL --action ACTION [--argument RELATIVE] [--output-root RELATIVE] [--executable PATH] [--timeout-seconds N]
+```
+
+Мовні aliases (`c`, `cpp`, `c++`, `c#`, `jvm`, `kotlin`, `scala`, `groovy`)
+нормалізуються до canonical language IDs bundled profile. Натомість `--tool`
+і capability IDs приймаються лише як точні declaration IDs. Немає raw `argv`,
+installation/network switch або implicit tool selection. `--executable` —
+explicit canonical local path, що перевіряється проти declaration mapping. Усі
+маршрути діагностичні, без telemetry, acceptance, pass-credit або release claims.
+
+`plan` і `probe` є diagnostic routes. `run` також лишається diagnostic: на цьому
+Windows host він може повернути `UNAVAILABLE_HOST_PATH_GUARD`, що означає
+недоступність безпечного host path guard, а не успішний запуск tool і не
+platform acceptance.

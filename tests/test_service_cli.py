@@ -154,8 +154,8 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert "Version 1.0.0-alpha.4" in readme
     assert "Standard version: `1.0.0-alpha.4`" in machine
     for document in (readme, machine):
-        assert "257 regular files under 17 declared" in document
-        assert "255 payload files" in document
+        assert "272 regular files under 17 declared" in document
+        assert "270 payload files" in document
 
     for command in BASE_COMMANDS:
         assert f"promin {command}" in readme
@@ -167,22 +167,22 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         ".github/": 1,
         "capability_profiles/": 2,
         "core/": 6,
-        "docs/": 26,
+        "docs/": 30,
         "examples/": 1,
         "human/": 4,
         "language_profiles/": 7,
         "presets/": 1,
         "profiles/": 12,
-        "promin/": 59,
+        "promin/": 62,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 100,
-        "tools/": 18,
+        "tests/": 107,
+        "tools/": 19,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 255
+    assert len(manifest["files"]) == 270
     expected_directories = {
         ".github",
         ".github/workflows",
@@ -215,7 +215,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert declared_directories == expected_directories
     assert len(expected_directories) == 17
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 257
+    assert sum(expected_counts.values()) == 272
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:
@@ -1304,14 +1304,44 @@ def test_team_signed_cli_init_doctor_status_validate_and_internal_commit(
     assert failure["pass_credit"] is False
 
 
-def test_cli_surface_is_exactly_six_operational_commands() -> None:
-    parser = _parser()
+def test_cli_surface_is_the_extended_public_command_surface() -> None:
+    parser = _parser(include_public=True)
     subcommands = next(
         action.choices
         for action in parser._actions
         if isinstance(getattr(action, "choices", None), dict)
     )
-    assert tuple(subcommands) == BASE_COMMANDS
+    assert tuple(subcommands) == (
+        "init",
+        "doctor",
+        "revalidate",
+        "status",
+        "next",
+        "validate",
+        "static-admission",
+        "tooling",
+        "inspect",
+        "report",
+        "recover",
+        "continue",
+        "audit",
+        "refresh",
+        "context",
+        "skills",
+    )
+    assert tuple(BASE_COMMANDS) == (
+        "init",
+        "doctor",
+        "status",
+        "next",
+        "validate",
+        "static-admission",
+        "continue",
+        "audit",
+        "refresh",
+        "context",
+        "skills",
+    )
     assert "commit" not in subcommands
 
 
