@@ -47,6 +47,7 @@ def test_plan_is_explicitly_unexecuted_and_never_claims_acceptance() -> None:
         "performed": False,
         "status": "planned",
         "full_comparison_scope_selected": True,
+        "expected_bucket_count": 72,
         "reason": "Use --execute to collect host-local evidence; planned output has no measurements.",
     }
     assert plan["results"] == []
@@ -55,6 +56,150 @@ def test_plan_is_explicitly_unexecuted_and_never_claims_acceptance() -> None:
     assert plan["pass_credit"] is False
     assert plan["acceptance_pass"] is False
     assert plan["product_acceptance_pass"] is False
+
+
+def test_full_scope_classification_requires_exact_fixed_sizes() -> None:
+    full_report = bench.build_plan(
+        bench.BenchmarkConfig(
+            sizes=(16, 64, 256),
+            warmup_runs=1,
+            measured_runs=3,
+            sampling_interval_ms=5,
+            scenarios=("promin", "markdown", "empty"),
+            operations=("init", "update", "query", "docs"),
+        )
+    )
+    expanded_report = bench.build_plan(
+        bench.BenchmarkConfig(
+            sizes=(16, 64, 256, 512),
+            warmup_runs=1,
+            measured_runs=3,
+            sampling_interval_ms=5,
+            scenarios=("promin", "markdown", "empty"),
+            operations=("init", "update", "query", "docs"),
+        )
+    )
+
+    assert full_report["execution"]["full_comparison_scope_selected"] is True
+    assert full_report["execution"]["expected_bucket_count"] == 72
+    assert expanded_report["execution"]["full_comparison_scope_selected"] is False
+    assert expanded_report["execution"]["expected_bucket_count"] == 96
+
+
+def test_expected_bucket_keys_match_independent_fixed_scope_cartesian_product() -> None:
+    full_config = bench.BenchmarkConfig(
+        sizes=(16, 64, 256),
+        warmup_runs=1,
+        measured_runs=3,
+        sampling_interval_ms=5,
+        scenarios=("promin", "markdown", "empty"),
+        operations=("init", "update", "query", "docs"),
+    )
+    expected = frozenset(
+        (scenario, operation, temperature, size)
+        for scenario in ("promin", "markdown", "empty")
+        for operation in ("init", "update", "query", "docs")
+        for temperature in ("cold", "warm")
+        for size in (16, 64, 256)
+    )
+
+    actual = bench.expected_bucket_keys(full_config)
+    assert actual == expected
+    assert len(actual) == 72
+    assert all(
+        len(key) == 4
+        and isinstance(key[0], str)
+        and isinstance(key[1], str)
+        and isinstance(key[2], str)
+        and isinstance(key[3], int)
+        for key in actual
+    )
+
+
+def test_bucket_closure_accepts_exact_unique_result_keys() -> None:
+    config = _config(scenarios=("empty",), operations=("query",))
+    expected = bench.expected_bucket_keys(config)
+    results = [
+        {"scenario": scenario, "operation": operation, "temperature": temperature, "size": size}
+        for scenario, operation, temperature, size in expected
+    ]
+
+    closure = bench.result_key_closure(expected, results)
+
+    assert closure["complete"] is True
+    assert closure["claim"] is False
+    assert closure["pass_credit"] is False
+    assert closure["expected_bucket_count"] == 6
+    assert closure["observed_bucket_count"] == 6
+    assert closure["unique_bucket_count"] == 6
+    assert closure["missing"] == []
+    assert closure["unexpected"] == []
+    assert closure["duplicate"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_missing", "expected_unexpected", "expected_duplicate"),
+    (
+        (lambda results: results[:-1], 1, 0, 0),
+        (lambda results: results[:-1] + [results[0]], 1, 0, 1),
+        (lambda results: results + [{"scenario": "promin", "operation": "init", "temperature": "cold", "size": 999}], 0, 1, 0),
+    ),
+)
+def test_bucket_closure_rejects_incomplete_or_nonunique_result_keys(
+    mutation,
+    expected_missing: int,
+    expected_unexpected: int,
+    expected_duplicate: int,
+) -> None:
+    config = _config(scenarios=("empty",), operations=("query",))
+    expected = bench.expected_bucket_keys(config)
+    results = [
+        {"scenario": scenario, "operation": operation, "temperature": temperature, "size": size}
+        for scenario, operation, temperature, size in expected
+    ]
+
+    closure = bench.result_key_closure(expected, mutation(results))
+
+    assert closure["complete"] is False
+    assert closure["claim"] is False
+    assert closure["pass_credit"] is False
+    assert closure["missing_count"] == expected_missing
+    assert closure["unexpected_count"] == expected_unexpected
+    assert closure["duplicate_count"] == expected_duplicate
+
+
+def test_bucket_closure_ignores_malformed_keys_for_completion() -> None:
+    config = _config(scenarios=("empty",), operations=("query",))
+    expected = bench.expected_bucket_keys(config)
+    results = [
+        {"scenario": scenario, "operation": operation, "temperature": temperature, "size": size}
+        for scenario, operation, temperature, size in expected
+    ]
+    results[-1] = {"scenario": "empty", "operation": "query", "temperature": "cold", "size": True}
+
+    closure = bench.result_key_closure(expected, results)
+
+    assert closure["complete"] is False
+    assert closure["claim"] is False
+    assert closure["pass_credit"] is False
+    assert closure["observed_bucket_count"] == 6
+    assert closure["unexpected_count"] == 0
+
+
+def test_full_scope_factor_order_is_ignored_but_subsets_are_partial() -> None:
+    reordered_full = bench.BenchmarkConfig(
+        sizes=(16, 64, 256),
+        scenarios=("empty", "promin", "markdown"),
+        operations=("docs", "query", "init", "update"),
+    )
+    subset = bench.BenchmarkConfig(
+        sizes=(16, 64, 256),
+        scenarios=("promin", "markdown"),
+        operations=("init", "update", "query", "docs"),
+    )
+
+    assert bench.build_plan(reordered_full)["execution"]["full_comparison_scope_selected"] is True
+    assert bench.build_plan(subset)["execution"]["full_comparison_scope_selected"] is False
 
 
 def test_sizes_require_three_strictly_increasing_workloads() -> None:

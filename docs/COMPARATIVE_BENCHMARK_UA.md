@@ -54,6 +54,13 @@ py -3.14 tools/promin_comparative_bench.py `
   --scenarios empty --operations query
 ```
 
+Фіксований повний route має рівно 72 унікальні bucket keys:
+`scenario × operation × temperature × size` для 3 сценаріїв, 4 операцій,
+`cold`/`warm` і розмірів 16, 64, 256. Звіт перевіряє closure цих ключів
+(`missing`, `unexpected`, `duplicate`) без надання claim або pass credit.
+Власні sizes, scenarios чи operations є лише diagnostic-only partial runs і
+не є fixed full route.
+
 ## Точний протокол
 
 Для `promin` і `markdown` перед кожним зразком інструмент створює однаковий

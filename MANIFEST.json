@@ -118,8 +118,8 @@
     },
     {
       "path": "docs/COMPARATIVE_BENCHMARK_UA.md",
-      "sha256": "4169c392fa5c5371f24242693c739a288dee67be0dca7eee0b654d7902f63df5",
-      "size": 8600
+      "sha256": "4b0cbb7732c08e3df60a498eb5d64adbeab9b473b5687660cae2e12c6501c803",
+      "size": 9096
     },
     {
       "path": "docs/C_CPP_CAPABILITY_PROFILE_UA.md",
@@ -1008,8 +1008,8 @@
     },
     {
       "path": "tests/test_heavy_comparative_bench.py",
-      "sha256": "1ad23c86d13e62e0e3acd390b55f98b0cbc5eed19944191c4ea1c56cf2a23591",
-      "size": 8295
+      "sha256": "4a1783c84b30ef0d11508c98441562218650175961cba6903030aedd3254ea6b",
+      "size": 13710
     },
     {
       "path": "tests/test_heavy_derived_storage.py",
@@ -1303,8 +1303,8 @@
     },
     {
       "path": "tools/promin_comparative_bench.py",
-      "sha256": "c40544fefb8740b045e946e6c49f3f61d46d5380c3aca2e3ea2c6d582b23435f",
-      "size": 47169
+      "sha256": "2b3bcaf979194d19002dbaea050e6a1f68cf7138e1fd20ab98e3ec5a779b871f",
+      "size": 49506
     },
     {
       "path": "tools/promin_init.py",

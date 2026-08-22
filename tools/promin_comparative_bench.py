@@ -21,10 +21,12 @@ import argparse
 import contextlib
 import ctypes
 from ctypes import wintypes
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import json
+from itertools import product
 import math
 import os
 from pathlib import Path
@@ -859,8 +861,58 @@ def scaling_checks(results: Sequence[Mapping[str, Any]], *, sizes: Sequence[int]
     return checks
 
 
+def expected_bucket_keys(config: BenchmarkConfig) -> frozenset[tuple[str, str, str, int]]:
+    return frozenset(product(config.scenarios, config.operations, TEMPERATURES, config.sizes))
+
+
+def fixed_full_scope_selected(config: BenchmarkConfig) -> bool:
+    return (
+        set(config.scenarios) == set(SCENARIOS)
+        and set(config.operations) == set(OPERATIONS)
+        and tuple(config.sizes) == DEFAULT_SIZES
+    )
+
+
+def _strict_result_key(result: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
+    scenario = result.get("scenario")
+    operation = result.get("operation")
+    temperature = result.get("temperature")
+    size = result.get("size")
+    if not all(type(value) is str for value in (scenario, operation, temperature)) or type(size) is not int:
+        return None
+    return scenario, operation, temperature, size
+
+
+def result_key_closure(
+    expected: Iterable[tuple[str, str, str, int]],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    expected_set = frozenset(expected)
+    observed_keys = [key for result in results if (key := _strict_result_key(result)) is not None]
+    observed_set = frozenset(observed_keys)
+    counts = Counter(observed_keys)
+    missing = sorted(expected_set - observed_set)
+    unexpected = sorted(observed_set - expected_set)
+    duplicate = sorted(key for key, count in counts.items() if count > 1)
+    return {
+        "expected_bucket_count": len(expected_set),
+        "observed_bucket_count": len(results),
+        "unique_bucket_count": len(observed_set),
+        "complete": len(results) == len(expected_set) and observed_set == expected_set and not duplicate,
+        "missing": missing,
+        "missing_count": len(missing),
+        "unexpected": unexpected,
+        "unexpected_count": len(unexpected),
+        "duplicate": duplicate,
+        "duplicate_count": sum(count - 1 for count in counts.values() if count > 1),
+        "malformed_count": len(results) - len(observed_keys),
+        "claim": False,
+        "pass_credit": False,
+    }
+
+
 def _base_report(config: BenchmarkConfig, *, executed: bool) -> dict[str, Any]:
-    selected_full_scope = set(config.scenarios) == set(SCENARIOS) and set(config.operations) == set(OPERATIONS)
+    selected_full_scope = fixed_full_scope_selected(config)
     return {
         "schema": "promin.comparative-benchmark.v1",
         "record_type": "ProminComparativeBenchmark",
@@ -873,6 +925,7 @@ def _base_report(config: BenchmarkConfig, *, executed: bool) -> dict[str, Any]:
             "performed": executed,
             "status": "planned" if not executed else "running",
             "full_comparison_scope_selected": selected_full_scope,
+            "expected_bucket_count": len(expected_bucket_keys(config)),
             "reason": (
                 "Use --execute to collect host-local evidence; planned output has no measurements."
                 if not executed
@@ -918,6 +971,7 @@ def _base_report(config: BenchmarkConfig, *, executed: bool) -> dict[str, Any]:
         },
         "results": [],
         "scaling_checks": [],
+        "result_key_closure": result_key_closure(expected_bucket_keys(config), []),
     }
 
 
@@ -1014,11 +1068,13 @@ def run_benchmark(config: BenchmarkConfig, *, fixture_root: Path) -> dict[str, A
                         )
                     )
     report["results"] = results
+    closure = result_key_closure(expected_bucket_keys(config), results)
+    report["result_key_closure"] = closure
     report["scaling_checks"] = scaling_checks(results, sizes=config.sizes)
     all_successful = all(result["status"] == "measured" for result in results)
     report["execution"] = {
         **dict(report["execution"]),
-        "status": "completed" if all_successful else "completed-with-failures",
+        "status": "completed" if all_successful and closure["complete"] else "completed-with-failures",
         "completed_at_utc": _utc_now(),
         "all_samples_succeeded": all_successful,
         "fixture_root_retained": True,
