@@ -3791,7 +3791,13 @@ class ProminService:
             accumulator = _RuntimeRowsAccumulator()
             checkpoint = store.consume_derived_rows("runtime", accumulator.consume)
             if checkpoint is not None:
-                snapshot, checkpoint_count, tail_batches, tail_bytes = (
+                (
+                    snapshot,
+                    checkpoint_count,
+                    tail_batches,
+                    tail_bytes,
+                    pending_runtime_rows,
+                ) = (
                     self._runtime_from_rows_checkpoint(
                         verified,
                         store,
@@ -3817,8 +3823,12 @@ class ProminService:
                     tail_bytes=tail_bytes,
                     runtime_v2=checkpoint.get("version") == 2,
                     runtime_v2_pending_rows=(
-                        ()
-                        if checkpoint.get("version") == 2 and tail_batches == 0
+                        (
+                            ()
+                            if tail_batches == 0
+                            else pending_runtime_rows
+                        )
+                        if checkpoint.get("version") == 2
                         else None
                     ),
                 )
@@ -3880,7 +3890,13 @@ class ProminService:
         state: Mapping[str, Any],
         *,
         expected_head: Mapping[str, Any],
-    ) -> tuple[_RuntimeSnapshot, int, int, int]:
+    ) -> tuple[
+        _RuntimeSnapshot,
+        int,
+        int,
+        int,
+        tuple[Mapping[str, Any], ...] | None,
+    ]:
         checkpoint_head = checkpoint.get("head")
         binding = checkpoint.get("authority_state_binding_digest")
         if (
@@ -3930,6 +3946,7 @@ class ProminService:
         artifacts = _ArtifactBindings.restore(state.get("artifacts"))
         tail_batches = 0
         tail_bytes = 0
+        pending_runtime_rows: list[Mapping[str, Any]] | None = []
         observed_binding = binding
         for envelope in store.iter_envelopes_after(checkpoint_head, validate=True):
             authority.decision_resolver = decisions.resolve
@@ -3949,6 +3966,43 @@ class ProminService:
             if not isinstance(batch, Mapping):
                 raise ServiceError("runtime checkpoint tail lacks EventBatch")
             observed_binding = batch.get("state_binding_digest")
+            if pending_runtime_rows is not None:
+                command = _command_from_envelope(envelope)
+                delta = batch.get("state_binding_delta")
+                if (
+                    command.get("command_kind") != "task.record"
+                    or not isinstance(delta, list)
+                    or not delta
+                    or any(
+                        not isinstance(item, Mapping)
+                        or item.get("leaf_type") not in {"Task", "Relation"}
+                        for item in delta
+                    )
+                ):
+                    pending_runtime_rows = None
+                else:
+                    payload = command.get("payload")
+                    task_id = (
+                        payload.get("task_id")
+                        if isinstance(payload, Mapping)
+                        else None
+                    )
+                    task = (
+                        domain.tasks.get(task_id)
+                        if isinstance(task_id, str)
+                        else None
+                    )
+                    envelope_relations = _relations_from_envelope(envelope)
+                    if not isinstance(task, Mapping):
+                        pending_runtime_rows = None
+                    else:
+                        pending_runtime_rows.append(
+                            _runtime_rows_v2_domain_record_row(task)
+                        )
+                        pending_runtime_rows.extend(
+                            _runtime_rows_v2_relation_row(value)
+                            for value in envelope_relations
+                        )
         if checkpoint_head["sequence"] + tail_batches != expected_head["sequence"]:
             raise ServiceError("runtime checkpoint tail count differs from current HEAD")
         authority, domain, _metrics = _freeze_runtime_components(
@@ -3978,6 +4032,11 @@ class ProminService:
             checkpoint_count,
             tail_batches,
             tail_bytes,
+            (
+                tuple(pending_runtime_rows)
+                if pending_runtime_rows is not None
+                else None
+            ),
         )
 
     def _domain_state(self, context: ActivationContext, store: EventStore) -> DomainState:

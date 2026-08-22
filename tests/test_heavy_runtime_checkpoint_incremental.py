@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from promin.canonical import canonical_bytes
 import promin.events as events_module
+import promin.service as service_module
 from promin.events import DerivedCheckpointError, SimulatedCrash
 from promin.service import ProminService
 from test_heavy_event_batching import NOW, _command, _store
@@ -292,5 +294,206 @@ def test_runtime_v2_restores_stable_relation_rows_with_full_journal_parity(
         }
         assert task["task_id"] in restored.domain.tasks
         assert second_task["task_id"] in restored.domain.tasks
+    finally:
+        reopened.close()
+
+
+def test_runtime_v2_preserves_physical_task_relation_tail_across_checkpoint_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint reload must retain every bounded Task+Relation tail row."""
+
+    service, candidate, planner, head, activation = _service_with_relation_grants(
+        tmp_path
+    )
+    issued_at = _issued_at()
+
+    def commit_task(index: int, expected_head: str) -> str:
+        task = _task_with_gate_definition(
+            service,
+            {
+                "record_type": "Task",
+                "task_id": f"task:runtime-v2-tail-{index}",
+                "state": "PLANNED",
+                "required_capability": "task.execute",
+                "acceptance_predicate": "runtime v2 retains physical task relation tails",
+                "allowed_paths": ["product/**"],
+                "activation_digest": activation,
+                "candidate_digest": candidate["candidate_digest"],
+                "created_at": issued_at,
+            },
+            defined_at_head_digest=expected_head,
+            gate_id=f"gate:runtime-v2-tail-{index}",
+        )
+        relation_id = f"relation:runtime-v2-tail-{index}"
+        return service.commit(
+            _service_command(
+                activation_digest=activation,
+                command_id=f"command:runtime-v2-tail-{index}",
+                command_kind="task.record",
+                payload=task,
+                expected_head=expected_head,
+                issued_at=issued_at,
+                authorization=_grant_authorization(planner),
+            ),
+            auxiliary_relations=[
+                _relation(
+                    relation_id,
+                    kind="READS",
+                    source_id=task["task_id"],
+                    target_id=candidate["candidate_id"],
+                    target_type="Candidate",
+                    activation_digest=activation,
+                )
+            ],
+        )["batch_digest"]
+
+    try:
+        head = commit_task(1, head)
+        context = service._context()
+        store = service._event_store(context)
+        initial_checkpoint = service._write_runtime_checkpoint(
+            context,
+            store,
+            service._runtime_state(context, store),
+            force=True,
+        )
+        assert initial_checkpoint["written"] is True
+        initial_rows: list[dict[str, object]] = []
+        initial_manifest = store.consume_derived_rows("runtime", initial_rows.append)
+        assert initial_manifest is not None
+        initial_row_count = initial_manifest["row_count"]
+
+        head = commit_task(2, head)
+        # This second physical tail batch forces _runtime_state() to reload a
+        # checkpoint plus a non-empty tail before the next commit.
+        head = commit_task(3, head)
+        context = service._context()
+        store = service._event_store(context)
+        bootstrap_calls = 0
+        original_bootstrap = service_module._runtime_checkpoint_v2_bootstrap_rows
+
+        def fail_on_bootstrap(*args: object, **kwargs: object) -> object:
+            nonlocal bootstrap_calls
+            bootstrap_calls += 1
+            return original_bootstrap(*args, **kwargs)
+
+        monkeypatch.setattr(
+            service_module,
+            "_runtime_checkpoint_v2_bootstrap_rows",
+            fail_on_bootstrap,
+        )
+        compacted = service._write_runtime_checkpoint(
+            context,
+            store,
+            service._runtime_state(context, store),
+            force=True,
+        )
+        assert compacted["written"] is True
+        assert bootstrap_calls == 0
+        assert compacted["tail_batches"] == 0
+        rows: list[dict[str, object]] = []
+        manifest = store.consume_derived_rows("runtime", rows.append)
+        assert manifest is not None
+        assert manifest["row_count"] == initial_row_count + 4
+        assert {
+            row["key"]
+            for row in rows
+            if row["section"] == "20.domain.tasks"
+        } == {
+            "task:runtime-v2-tail-1",
+            "task:runtime-v2-tail-2",
+            "task:runtime-v2-tail-3",
+        }
+        assert {
+            row["key"]
+            for row in rows
+            if row["section"] == "40.relations.records"
+        } == {
+            "relation:runtime-v2-tail-1",
+            "relation:runtime-v2-tail-2",
+            "relation:runtime-v2-tail-3",
+        }
+        restored = service._runtime_state(context, store)
+        assert restored.state_binding_digest == store.envelope_at_head()["batch"][
+            "state_binding_digest"
+        ]
+        assert set(restored.domain.tasks) >= {
+            "task:runtime-v2-tail-1",
+            "task:runtime-v2-tail-2",
+            "task:runtime-v2-tail-3",
+        }
+        assert {value["relation_id"] for value in restored.relations.values()} >= {
+            "relation:runtime-v2-tail-1",
+            "relation:runtime-v2-tail-2",
+            "relation:runtime-v2-tail-3",
+        }
+        assert store.derived_rows_tail_status("runtime")["tail_batches"] == 0
+
+        # Compare the compacted/reloaded path with an independent full journal
+        # replay.  This deliberately bypasses the derived-row checkpoint so a
+        # matching state-binding digest cannot hide a lost Task or Relation
+        # payload in the physical tail.
+        replay_context = context
+        if replay_context.authoritative_byte_digest is None:
+            replay_context = service_module.replace(
+                context,
+                authoritative_byte_digest=service_module.activation_byte_digest(
+                    context
+                ),
+            )
+        full_replay = service._runtime_from_envelopes(
+            replay_context,
+            lambda: store.iter_envelopes(validate=True),
+            head_sequence=store.head()["sequence"],
+            head_digest=store.head()["batch_digest"],
+            state_binding_digest=None,
+        )
+
+        def task_relation_bytes(snapshot: object) -> bytes:
+            domain = snapshot.domain  # type: ignore[attr-defined]
+            relations = snapshot.relations  # type: ignore[attr-defined]
+            tasks = [
+                dict(domain.tasks[task_id])
+                for task_id in sorted(domain.tasks)
+            ]
+            relation_rows = sorted(
+                (dict(value) for value in relations.values()),
+                key=lambda value: value["relation_id"],
+            )
+            return canonical_bytes(
+                {"tasks": tasks, "relations": relation_rows}
+            )
+
+        restored = service._runtime_state(context, store)
+        assert task_relation_bytes(restored) == task_relation_bytes(full_replay)
+        assert service_module._runtime_state_binding_commitments(
+            store.policy, restored
+        ) == service_module._runtime_state_binding_commitments(
+            store.policy, full_replay
+        )
+        full_binding = store.validate_state_binding_commitments(
+            service_module._runtime_state_binding_commitments(
+                store.policy, full_replay
+            ),
+            expected_head=store.head(),
+        )
+        assert full_binding == restored.state_binding_digest
+        project_root = service.root
+    finally:
+        service.close()
+
+    # Exercise a real process boundary after compaction.  The reopened service
+    # must restore the same physical Task+Relation tail and remain byte-for-byte
+    # equal to the full replay performed before the close.
+    reopened = ProminService(project_root)
+    try:
+        reopened_context = reopened._context()
+        reopened_store = reopened._event_store(reopened_context)
+        reopened_state = reopened._runtime_state(reopened_context, reopened_store)
+        assert task_relation_bytes(reopened_state) == task_relation_bytes(full_replay)
+        assert reopened_state.state_binding_digest == full_binding
+        assert reopened_store.derived_rows_tail_status("runtime")["tail_batches"] == 0
     finally:
         reopened.close()

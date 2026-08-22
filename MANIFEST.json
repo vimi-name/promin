@@ -638,8 +638,8 @@
     },
     {
       "path": "promin/service.py",
-      "sha256": "6dddc8287059a7cea5eef9213e913020e75b63ba9744251f92d56ffead9a53c3",
-      "size": 280042
+      "sha256": "4c5a3d13c72d0355fd30e6881d31b67997ac991d84b19644876cf3e766a425db",
+      "size": 282262
     },
     {
       "path": "promin/skills.py",
@@ -1133,8 +1133,8 @@
     },
     {
       "path": "tests/test_heavy_runtime_checkpoint_incremental.py",
-      "sha256": "6e45017d810d81c7ef6ad5a62451e68357b5f288bd35a424fa69cfb9d789da4e",
-      "size": 10337
+      "sha256": "c25daa735af0cdade384d0452a259c4224735c7c90efefedbf3729661f842756",
+      "size": 18436
     },
     {
       "path": "tests/test_heavy_saturation_continuation_sqlite.py",
