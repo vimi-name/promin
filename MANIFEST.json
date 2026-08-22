@@ -573,8 +573,8 @@
     },
     {
       "path": "promin/projection.py",
-      "sha256": "6bceeff2c4450836adf9ddf284a01a2df775c720e3f6768f839b990c99bd3bc7",
-      "size": 183462
+      "sha256": "675c9e7a4454956cafe118f2cebe7e657263f0d2682156708758f53e9a290183",
+      "size": 185693
     },
     {
       "path": "promin/provider_envelope.py",
@@ -988,8 +988,8 @@
     },
     {
       "path": "tests/test_events_projection.py",
-      "sha256": "4886b155ebe48c377f688696222966fce24335f215bfff8b3eb74dd228df4148",
-      "size": 105845
+      "sha256": "f871076b7391c608816acbc1fe5a24ee65a087c23bd16bc8173276284fc8299e",
+      "size": 111510
     },
     {
       "path": "tests/test_expert_init_bundle_roundtrip.py",

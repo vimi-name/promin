@@ -4,11 +4,12 @@ import copy
 import hashlib
 import json
 import multiprocessing
+import re
 import sqlite3
 import tempfile
 import threading
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -214,6 +215,21 @@ RESUME_BINDING = {
     "revocation_epoch": "4" * 64,
     "subject_id": "subject:projection",
 }
+
+_FULL_ENTITY_RELATION_COUNT_SCAN = re.compile(
+    r"(?is)\bselect\s+count\s*\(\s*(?:\*|1)\s*\).*?"
+    r"\bfrom\s+(?:[\"`\[]?[a-z_]\w*[\"`\]]?\s*\.\s*)?"
+    r"(?:[\"`]?entities[\"`]?|\[entities\]|"
+    r"[\"`]?relations[\"`]?|\[relations\])(?:\s|$|[;,)])"
+)
+
+
+def _full_entity_relation_count_scans(statements: list[str]) -> list[str]:
+    return [
+        match.group(0).strip()
+        for statement in statements
+        if (match := _FULL_ENTITY_RELATION_COUNT_SCAN.search(statement)) is not None
+    ]
 
 
 def _thaw(value):
@@ -2134,6 +2150,17 @@ class EventsProjectionTests(unittest.TestCase):
                         crash_hook=lambda point: point == "before_projection_commit",
                     )
                 self.assertEqual(projection.status()["head_sequence"], 2)
+                rolled_back = projection.status()
+                self.assertEqual(rolled_back["entity_count"], 2)
+                self.assertEqual(rolled_back["relation_count"], 1)
+                with closing(sqlite3.connect(projection.db_path)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT entity_count,relation_count "
+                            "FROM projection_cardinality WHERE singleton=1"
+                        ).fetchone(),
+                        (2, 1),
+                    )
             if index == 3:
                 with self.assertRaisesRegex(ProjectionError, "after projection commit"):
                     projection.apply_committed_batch(
@@ -2160,6 +2187,72 @@ class EventsProjectionTests(unittest.TestCase):
         ).rebuild(self.store)
         self.assertEqual(projection.semantic_digest(), rebuilt["semantic_digest"])
         self.assertEqual(projection.require_current(self.store)["head_sequence"], 4)
+
+    def test_incremental_projection_uses_cardinality_ledger_without_table_scans(self) -> None:
+        self.commit_tasks(1)
+        projection = Projection(
+            self.root / "projection-incremental-counts.sqlite",
+            token_key=b"q" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        projection.rebuild(self.store)
+        task_id = "task:001"
+        self.store.commit(
+            command(
+                "command:001",
+                "task.record",
+                task(task_id, "compile renderer item 1"),
+                self.store.head()["batch_digest"],
+            ),
+            auxiliary_relations=[relation("rel:001", task_id, "task:000")],
+            created_at=NOW,
+        )
+        statements: list[str] = []
+        original_connect = sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            result = projection.apply_committed_batch(self.store)
+            status = projection.status()
+
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(status["entity_count"], 2)
+        self.assertEqual(status["relation_count"], 1)
+        self.assertEqual(_full_entity_relation_count_scans(statements), [])
+
+    def test_projection_cardinality_mismatch_and_missing_ledger_fail_closed(self) -> None:
+        self.commit_tasks(1)
+        projection = Projection(
+            self.root / "projection-cardinality-integrity.sqlite",
+            token_key=b"c" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        projection.rebuild(self.store)
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            connection.execute(
+                "UPDATE projection_cardinality SET entity_count=entity_count+1"
+            )
+            connection.commit()
+        with self.assertRaisesRegex(
+            ProjectionError, "projection metadata counts differ from its snapshot"
+        ):
+            projection.status()
+
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            connection.execute("DELETE FROM projection_cardinality")
+            connection.commit()
+        with self.assertRaisesRegex(
+            ProjectionError, "projection snapshot counts are unreadable"
+        ):
+            projection.status()
 
     def test_projection_streams_manifest_bound_jsonl_and_indexes_bounded_content(self) -> None:
         raw = {
@@ -2274,6 +2367,16 @@ class EventsProjectionTests(unittest.TestCase):
             "to_state": "READY",
             "reason": "prerequisites satisfied",
         }
+        projection = Projection(
+            self.root / "projection.sqlite",
+            token_key=b"y" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        projection.rebuild(transition_store)
+        self.assertEqual(projection.status()["entity_count"], 1)
+        self.assertEqual(projection.status()["relation_count"], 0)
         transition_store.commit(
             command(
                 "command:stateful-ready",
@@ -2283,14 +2386,20 @@ class EventsProjectionTests(unittest.TestCase):
             ),
             created_at=NOW,
         )
-        projection = Projection(
-            self.root / "projection.sqlite",
-            token_key=b"y" * 32,
-            implementation_closure_digest=IMPLEMENTATION,
-            limits=PROJECTION_LIMITS,
-            relation_domains=DOMAINS,
+        self.assertEqual(
+            projection.apply_committed_batch(transition_store)["status"],
+            "updated",
         )
-        projection.rebuild(transition_store)
+        self.assertEqual(projection.status()["entity_count"], 1)
+        self.assertEqual(projection.status()["relation_count"], 0)
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT entity_count,relation_count "
+                    "FROM projection_cardinality WHERE singleton=1"
+                ).fetchone(),
+                (1, 0),
+            )
         ready = projection.search(
             "READY", depth=1, resume_binding=RESUME_BINDING
         )
@@ -2482,6 +2591,35 @@ class EventsProjectionTests(unittest.TestCase):
         self.store.commit(next_command, created_at=NOW)
         with self.assertRaises(ProjectionError):
             projection.require_current(self.store)
+
+    def test_projection_status_uses_validated_metadata_counts_without_table_scans(self) -> None:
+        self.commit_tasks(2)
+        projection = Projection(
+            self.root / "projection-status-counts.sqlite",
+            token_key=b"m" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        projection.rebuild(self.store)
+        statements: list[str] = []
+        original_connect = projection._connect_readonly
+
+        @contextmanager
+        def traced_connection():
+            with original_connect() as connection:
+                connection.set_trace_callback(statements.append)
+                try:
+                    yield connection
+                finally:
+                    connection.set_trace_callback(None)
+
+        with mock.patch.object(projection, "_connect_readonly", traced_connection):
+            status = projection.status()
+
+        self.assertEqual(status["entity_count"], 2)
+        self.assertEqual(status["relation_count"], 1)
+        self.assertEqual(_full_entity_relation_count_scans(statements), [])
 
     def test_projection_rejects_unverified_inventory_and_reserved_provenance(self) -> None:
         projection = Projection(

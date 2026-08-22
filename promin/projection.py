@@ -50,7 +50,7 @@ _QUERY_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SEMANTIC_SHARD_COUNT = 256
 _SEMANTIC_DIGEST_ALGORITHM = "semantic-shards-v2"
-_PROJECTION_STORAGE_LAYOUT = "semantic-row-digest-commitment-v3"
+_PROJECTION_STORAGE_LAYOUT = "semantic-row-digest-commitment-v4"
 _SEMANTIC_BUCKET_COUNT = 256
 _SEMANTIC_GROUP_WIDTH = 16
 _SEMANTIC_GROUP_COUNT = _SEMANTIC_BUCKET_COUNT // _SEMANTIC_GROUP_WIDTH
@@ -571,8 +571,7 @@ class Projection:
                 )
                 head = event_store.head()
                 projection_digest = self._semantic_digest_connection(connection)
-                entity_count = int(connection.execute("SELECT count(*) FROM entities").fetchone()[0])
-                relation_count = int(connection.execute("SELECT count(*) FROM relations").fetchone()[0])
+                entity_count, relation_count = self._read_projection_cardinality(connection)
                 metadata = {
                     "activation_digest": event_store.active_activation_digest,
                     "head_digest": head["batch_digest"] or "",
@@ -668,6 +667,27 @@ class Projection:
               data_class TEXT NOT NULL,
               payload_json TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE projection_cardinality(
+              singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+              entity_count INTEGER NOT NULL CHECK(entity_count>=0),
+              relation_count INTEGER NOT NULL CHECK(relation_count>=0)
+            ) WITHOUT ROWID;
+            INSERT INTO projection_cardinality(singleton,entity_count,relation_count)
+            VALUES(1,0,0);
+            CREATE TRIGGER entities_cardinality_after_insert
+            AFTER INSERT ON entities
+            BEGIN
+              UPDATE projection_cardinality
+              SET entity_count=entity_count+1
+              WHERE singleton=1;
+            END;
+            CREATE TRIGGER entities_cardinality_after_delete
+            AFTER DELETE ON entities
+            BEGIN
+              UPDATE projection_cardinality
+              SET entity_count=entity_count-1
+              WHERE singleton=1;
+            END;
             CREATE TABLE operational_order(
               entity_id TEXT PRIMARY KEY,
               event_sequence INTEGER NOT NULL,
@@ -684,6 +704,20 @@ class Projection:
               created_at TEXT NOT NULL,
               payload_json TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TRIGGER relations_cardinality_after_insert
+            AFTER INSERT ON relations
+            BEGIN
+              UPDATE projection_cardinality
+              SET relation_count=relation_count+1
+              WHERE singleton=1;
+            END;
+            CREATE TRIGGER relations_cardinality_after_delete
+            AFTER DELETE ON relations
+            BEGIN
+              UPDATE projection_cardinality
+              SET relation_count=relation_count-1
+              WHERE singleton=1;
+            END;
             CREATE TABLE semantic_rows(
               shard INTEGER NOT NULL,
               bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256),
@@ -1048,10 +1082,20 @@ class Projection:
                 )
                 """
             )
-        entity_insert = "INSERT OR REPLACE" if replaces_existing else "INSERT"
+        if replaces_existing:
+            connection.execute(
+                """
+                DELETE FROM entities
+                WHERE id IN (
+                  SELECT changed.id
+                  FROM projection_entity_changes AS changed
+                  JOIN entities AS current ON current.id=changed.id
+                )
+                """
+            )
         connection.execute(
-            f"""
-            {entity_insert} INTO entities(id,entity_type,data_class,payload_json)
+            """
+            INSERT INTO entities(id,entity_type,data_class,payload_json)
             SELECT id,entity_type,data_class,payload_json
             FROM projection_entity_changes
             """
@@ -2366,12 +2410,7 @@ class Projection:
                 self._validate_dependency_graph_acyclic(connection)
             self._recompute_semantic_shards(connection, changed_shards)
             semantic_digest = self._semantic_digest_connection(connection)
-            entity_count = int(
-                connection.execute("SELECT count(*) FROM entities").fetchone()[0]
-            )
-            relation_count = int(
-                connection.execute("SELECT count(*) FROM relations").fetchone()[0]
-            )
+            entity_count, relation_count = self._read_projection_cardinality(connection)
             metadata_updates = {
                 "head_digest": final_head["batch_digest"] or "",
                 "head_sequence": str(final_head["sequence"]),
@@ -2485,11 +2524,8 @@ class Projection:
             raise ProjectionError("projection metadata binding is invalid")
         try:
             parse_timestamp(metadata["built_at"])
-            actual_entity_count = int(
-                connection.execute("SELECT count(*) FROM entities").fetchone()[0]
-            )
-            actual_relation_count = int(
-                connection.execute("SELECT count(*) FROM relations").fetchone()[0]
+            actual_entity_count, actual_relation_count = self._read_projection_cardinality(
+                connection
             )
         except (EventStoreError, sqlite3.Error, TypeError, ValueError) as exc:
             raise ProjectionError("projection snapshot counts are unreadable") from exc
@@ -2521,6 +2557,32 @@ class Projection:
             "projection_db_bytes": page_count * page_size,
             "projection_authoritative": False,
         }
+
+    @staticmethod
+    def _read_projection_cardinality(
+        connection: sqlite3.Connection,
+    ) -> tuple[int, int]:
+        try:
+            rows = connection.execute(
+                """
+                SELECT entity_count,relation_count
+                FROM projection_cardinality
+                WHERE singleton=1
+                """
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectionError("projection snapshot counts are unreadable") from exc
+        if len(rows) != 1:
+            raise ProjectionError("projection snapshot counts are unreadable")
+        entity_count, relation_count = rows[0]
+        if (
+            type(entity_count) is not int
+            or type(relation_count) is not int
+            or entity_count < 0
+            or relation_count < 0
+        ):
+            raise ProjectionError("projection snapshot counts are unreadable")
+        return entity_count, relation_count
 
     def require_current(self, event_store: EventStore) -> dict[str, Any]:
         status = self.status()
