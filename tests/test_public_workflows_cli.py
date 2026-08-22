@@ -174,12 +174,29 @@ def test_public_inspect_and_report_never_persist_telemetry_on_initialized_root(t
     activation.write_text("{}", encoding="utf-8")
     (tmp_path / "notes.md").write_text("hello", encoding="utf-8")
     inspection = tmp_path / "inspection.json"
-    inspection.write_bytes(canonical_bytes(inspect_product(tmp_path)))
+    report = tmp_path / "client-report.json"
 
-    assert main(["--root", str(tmp_path), "inspect", "--audience", "client"]) == 0
+    assert main([
+        "--root", str(tmp_path), "inspect", "--audience", "client",
+        "--output", str(inspection),
+    ]) == 0
     capsys.readouterr()
-    assert main(["--root", str(tmp_path), "report", "--inspection", str(inspection)]) == 0
+    raw_bytes = inspection.read_bytes()
+    raw = json.loads(raw_bytes)
+    assert raw["record_type"] == "ProductInspection"
+    assert raw["claims"]["acceptance_pass"] is False
+    assert main([
+        "--root", str(tmp_path), "report", "--inspection", str(inspection),
+        "--output", str(report),
+    ]) == 0
     capsys.readouterr()
+    assert json.loads(report.read_text(encoding="utf-8"))["record_type"] == "ProminClientReport"
+    assert main([
+        "--root", str(tmp_path), "inspect", "--audience", "client",
+        "--output", str(inspection),
+    ]) == 2
+    capsys.readouterr()
+    assert inspection.read_bytes() == raw_bytes
     assert main(["--root", str(tmp_path), "report", "--inspection", "missing.json"]) == 2
     capsys.readouterr()
     assert not (tmp_path / ".promin" / "state" / "observations").exists()
@@ -551,8 +568,7 @@ def test_public_help_lists_inspect_and_report_commands() -> None:
     assert "inspect product sources" in help_text
     assert "derive a canonical client report" in help_text
     assert parser.parse_args(["inspect", "--audience", "machine"]).workflow == "inspect"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["inspect", "--output", "inspection.json"])
+    assert parser.parse_args(["inspect", "--output", "inspection.json"]).workflow == "inspect"
     assert parser.parse_args(
         ["report", "--inspection", "inspection.json", "--output", "report.json"]
     ).workflow == "report"

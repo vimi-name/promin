@@ -89,6 +89,21 @@ runtime proof. Вони допомагають пріоритизувати на
 tool/recovery/doc status і evidence limitations. У ньому немає sample paths,
 absolute root або content. Це призначено для безпечного UI/handoff summary.
 
+## Публічний CLI handoff
+
+Команда `promin inspect --audience {client,machine}` друкує у stdout лише
+відповідну audience projection: короткий client summary або machine JSON.
+Додатковий `--output PATH` окремо створює canonical raw `ProductInspection`
+artifact, який можна передати до `promin report --inspection PATH` для
+створення client report. Запис є create-only: існуючий output не
+перезаписується, а повторна спроба завершується помилкою.
+
+І `inspect`, і цей handoff працюють у межах no-telemetry/no-acceptance:
+операційні observations не записуються, а claims про acceptance, pass credit,
+runtime, release або visual readiness залишаються `false`. Це лише статичний
+handoff для подальшого report; final PDF production або final binding ним не
+стверджуються.
+
 Обидві JSON serialization canonical: sorted keys, compact separators, UTF-8
 without implicit filesystem paths і завершальний newline. За незмінного tree,
 profile та limits результат byte-stable.

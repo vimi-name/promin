@@ -204,6 +204,7 @@ def _parser(*, include_public: bool = False) -> argparse.ArgumentParser:
 
     inspect = sub.add_parser("inspect", help="inspect product sources without operational effects")
     inspect.add_argument("--audience", choices=("client", "machine"), default="client")
+    inspect.add_argument("--output", type=Path)
 
     report = sub.add_parser("report", help="derive a canonical client report from an inspection")
     report.add_argument("--inspection", type=Path, required=True)
@@ -1196,8 +1197,10 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
     """Return whether this invocation may intentionally persist project-local state."""
 
     workflow = args.workflow
-    if workflow in {"status", "context", "validate", "audit", "static-admission", "inspect", "tooling"}:
+    if workflow in {"status", "context", "validate", "audit", "static-admission", "tooling"}:
         return False
+    if workflow == "inspect":
+        return getattr(args, "output", None) is not None
     if workflow == "report":
         return getattr(args, "output", None) is not None
     if workflow == "doctor":
@@ -1481,6 +1484,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             result = _run_tooling(args, root)
         elif args.workflow == "inspect":
             inspected = inspect_product(root)
+            if args.output is not None:
+                output = (args.output if args.output.is_absolute() else root / args.output).absolute()
+                _write_create_only(output, canonical_bytes(inspected))
             try:
                 selected = parse_json_strict(
                     serialize_product_inspection(inspected, audience=args.audience).encode("utf-8"),

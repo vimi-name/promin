@@ -173,8 +173,8 @@
     },
     {
       "path": "docs/PRODUCT_INSPECTION_UA.md",
-      "sha256": "53db028d13b19b65a9d0a27d172b757bdbe5d04c95f8248a97efab7e044058f1",
-      "size": 6725
+      "sha256": "15d78b2befbd56cb88bb48a2ab86a4ff3f6b23941987197d5d9aae3e6198fb2a",
+      "size": 7767
     },
     {
       "path": "docs/PROFILE_CATALOG_UA.md",
@@ -388,8 +388,8 @@
     },
     {
       "path": "promin/__main__.py",
-      "sha256": "220447f3541b48597da738f37762fa76f9c9233b75ef299438f83eae04e2c68e",
-      "size": 69394
+      "sha256": "2b8f0d82e5d94cedc00c903c5a08270b864189d5ec1f67499b0d2b80af0a5e4a",
+      "size": 69732
     },
     {
       "path": "promin/artifact_policy.py",
@@ -1223,8 +1223,8 @@
     },
     {
       "path": "tests/test_public_workflows_cli.py",
-      "sha256": "bb67c4dc3c0cd32d333748cab7505cccf397ce558cfece21c68bca72aa6f1c13",
-      "size": 51075
+      "sha256": "0a8302bd0f25437ab1336b3207825d0987a1e861dde0af5a9a58fb04552d8b92",
+      "size": 51620
     },
     {
       "path": "tests/test_retrieval_continuation_service.py",
