@@ -76,3 +76,28 @@ explicit canonical local path, що перевіряється проти declar
 Windows host він може повернути `UNAVAILABLE_HOST_PATH_GUARD`, що означає
 недоступність безпечного host path guard, а не успішний запуск tool і не
 platform acceptance.
+
+## Wave 1: план проти host evidence
+
+Wave 1 додає лише декларативні плани з фіксованою bounded grammar. `clangd` і
+`roslyn-analyzers` є zero-argument планами; `clang-check`,
+`include-what-you-use` та `cppcheck` приймають щонайбільше один bounded
+relative source argument і за його відсутності використовують `src`.
+Наявність executable на цьому host окремо не стверджується й потребує свіжого
+`probe`. Базові argv для нових IDs такі:
+
+| family | plan ID | fixed argv |
+|---|---|---|
+| C-family | `clangd` | `clangd --version` |
+| C-family | `clang-check` | `clang-check src --` |
+| C-family | `include-what-you-use` | `include-what-you-use src --` |
+| C-family | `cppcheck` | `cppcheck src` |
+| C# | `roslyn-analyzers` | `dotnet format analyzers --verify-no-changes --no-restore` |
+
+`canonical-compilation-database` є precondition C-family для відповідних
+analysis-маршрутів, а не executable ID і не запускається цим tooling plan.
+`roslyn-analyzers` використовує (якщо окремий host probe це підтвердить)
+обраний caller-ом root; project path або інший positional argument не
+додається. Ця хвиля не додає executable routes для JavaScript, TypeScript чи
+Python. Усі перелічені плани залишаються claim-free: `UNAVAILABLE` означає
+відсутню host evidence, а не успіх або acceptance.

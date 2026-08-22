@@ -72,9 +72,14 @@ def test_plan_record_is_deterministic_and_claim_free(tmp_path: Path) -> None:
     ("language_id", "tool_id", "action_id", "expected_argv"),
     (
         ("c-family", "clang-tidy", "static-analysis", ("clang-tidy", "src", "--")),
+        ("c-family", "clangd", "toolchain-info", ("clangd", "--version")),
+        ("c-family", "clang-check", "static-analysis", ("clang-check", "src", "--")),
+        ("c-family", "include-what-you-use", "static-analysis", ("include-what-you-use", "src", "--")),
+        ("c-family", "cppcheck", "static-analysis", ("cppcheck", "src")),
         ("c-family", "clang-doc", "documentation", ("clang-doc", "src")),
         ("c-family", "doxygen-html-xml", "documentation", ("doxygen", "Doxyfile")),
         ("csharp", "dotnet-compiler", "toolchain-info", ("dotnet", "--info")),
+        ("csharp", "roslyn-analyzers", "static-analysis", ("dotnet", "format", "analyzers", "--verify-no-changes", "--no-restore")),
         ("csharp", "docfx", "documentation", ("docfx", "docfx.json")),
         ("jvm", "javac", "toolchain-info", ("javac", "-version")),
         ("jvm", "javadoc", "documentation", ("javadoc", "src")),
@@ -143,6 +148,17 @@ def test_plan_rejects_alias_inputs_and_selected_profile_missing_tool(tmp_path: P
         )
 
 
+def test_plan_rejects_canonical_compilation_database_as_non_executable(tmp_path: Path) -> None:
+    with pytest.raises(LanguageToolingError, match="declared"):
+        plan_language_tool(
+            load_catalog(),
+            language_id="c-family",
+            tool_id="canonical-compilation-database",
+            action_id="toolchain-info",
+            root=tmp_path,
+        )
+
+
 def test_plan_preserves_declared_argument_positions(tmp_path: Path) -> None:
     catalog = load_catalog()
     assert plan_language_tool(
@@ -155,6 +171,36 @@ def test_plan_preserves_declared_argument_positions(tmp_path: Path) -> None:
         action_id="static-analysis", root=tmp_path,
         arguments=("config/checkstyle.xml", "src"),
     ).argv == ("checkstyle", "config/checkstyle.xml", "src")
+
+
+def test_roslyn_analyzers_rejects_project_argument(tmp_path: Path) -> None:
+    with pytest.raises(LanguageToolingError, match="argument count"):
+        plan_language_tool(
+            load_catalog(),
+            language_id="csharp",
+            tool_id="roslyn-analyzers",
+            action_id="static-analysis",
+            root=tmp_path,
+            arguments=("Project.csproj",),
+        )
+
+
+def test_roslyn_analyzers_missing_executable_is_unavailable_and_claim_free(tmp_path: Path) -> None:
+    plan = plan_language_tool(
+        load_catalog(),
+        language_id="csharp",
+        tool_id="roslyn-analyzers",
+        action_id="static-analysis",
+        root=tmp_path,
+    )
+    missing = tmp_path / "missing-dotnet"
+    receipt = probe_language_tool(
+        replace(plan, executable=str(missing), argv=(str(missing), *plan.argv[1:])),
+        timeout_seconds=1,
+    )
+    assert receipt.status == "UNAVAILABLE"
+    assert receipt.invoked is False
+    assert all(value is False for value in receipt.claims.values())
 
 
 def test_plan_rejects_unknown_action_and_noncanonical_argument(tmp_path: Path) -> None:

@@ -43,11 +43,16 @@ _MAX_BOUNDARY_BYTES: Final = 64 * 1024 * 1024
 _DECLARATION_EXECUTABLES: Final[dict[str, dict[str, str]]] = {
     "c-family": {
         "clang-tidy": "clang-tidy",
+        "clangd": "clangd",
+        "clang-check": "clang-check",
+        "include-what-you-use": "include-what-you-use",
+        "cppcheck": "cppcheck",
         "clang-doc": "clang-doc",
         "doxygen-html-xml": "doxygen",
     },
     "csharp": {
         "dotnet-compiler": "dotnet",
+        "roslyn-analyzers": "dotnet",
         "docfx": "docfx",
     },
     "java": {
@@ -60,9 +65,14 @@ _DECLARATION_EXECUTABLES: Final[dict[str, dict[str, str]]] = {
 
 _ACTION_GRAMMARS: Final[dict[str, tuple[str, int, tuple[str, ...]]]] = {
     "clang-tidy": ("static-analysis", 1, ("src", "--")),
+    "clangd": ("toolchain-info", 0, ("--version",)),
+    "clang-check": ("static-analysis", 1, ("src", "--")),
+    "include-what-you-use": ("static-analysis", 1, ("src", "--")),
+    "cppcheck": ("static-analysis", 1, ("src",)),
     "clang-doc": ("documentation", 1, ("src",)),
     "doxygen-html-xml": ("documentation", 1, ("Doxyfile",)),
     "dotnet-compiler": ("toolchain-info", 0, ("--info",)),
+    "roslyn-analyzers": ("static-analysis", 0, ("format", "analyzers", "--verify-no-changes", "--no-restore")),
     "docfx": ("documentation", 1, ("docfx.json",)),
     "javac": ("toolchain-info", 0, ("-version",)),
     "javadoc": ("documentation", 1, ("src",)),

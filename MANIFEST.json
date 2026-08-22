@@ -138,8 +138,8 @@
     },
     {
       "path": "docs/LANGUAGE_CAPABILITIES_UA.md",
-      "sha256": "4cb4d9e64711568d1a0137800aa423ec859f1d5f44eaae34f2ea05c397b30135",
-      "size": 5354
+      "sha256": "701f98d8a10c3a60fcc9a284887dc0d3da25298d5460a0dfe30e46ceb54b4d9d",
+      "size": 6999
     },
     {
       "path": "docs/LINUX_MODEL_VALIDATION_UA.md",
@@ -538,8 +538,8 @@
     },
     {
       "path": "promin/language_tooling.py",
-      "sha256": "a71d2cb2b9f7b10836dff0740ffcadd5ddaff53b5232ce967f08454c00cb3888",
-      "size": 29162
+      "sha256": "7f182a51b5ea83ba2b287034baf65f5968648a0550e22398e8a86474a14e7445",
+      "size": 29694
     },
     {
       "path": "promin/limits.py",
@@ -1203,8 +1203,8 @@
     },
     {
       "path": "tests/test_language_tooling.py",
-      "sha256": "e32c925d165b9a8f14ce68e95761bb7dcec4659e9b3dc373050ed9ff5fc8f626",
-      "size": 18350
+      "sha256": "93b006f7d6a2c18bab80995171ade91c8b0b0d9f8a864aabb5f43cb145be3719",
+      "size": 20237
     },
     {
       "path": "tests/test_package_validation.py",
