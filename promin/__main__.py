@@ -202,13 +202,12 @@ def _parser(*, include_public: bool = False) -> argparse.ArgumentParser:
         if action == "run":
             command.add_argument("--output-root")
 
-    if include_public:
-        inspect = sub.add_parser("inspect", help="inspect product sources without operational effects")
-        inspect.add_argument("--audience", choices=("client", "machine"), default="client")
+    inspect = sub.add_parser("inspect", help="inspect product sources without operational effects")
+    inspect.add_argument("--audience", choices=("client", "machine"), default="client")
 
-        report = sub.add_parser("report", help="derive a canonical client report from an inspection")
-        report.add_argument("--inspection", type=Path, required=True)
-        report.add_argument("--output", type=Path)
+    report = sub.add_parser("report", help="derive a canonical client report from an inspection")
+    report.add_argument("--inspection", type=Path, required=True)
+    report.add_argument("--output", type=Path)
 
     recover = sub.add_parser("recover", help="run bounded recovery workflows")
     recover_commands = recover.add_subparsers(dest="recover_action", required=True)
@@ -481,6 +480,7 @@ def _run_expert_bundle_init(
         "expert_init_bundle": bundle_record,
         "init_experience": resolved_experience,
         "authority": False,
+        "authority_granted": False,
         "pass_credit": False,
         "acceptance_pass": False,
         "product_acceptance_pass": False,
@@ -800,8 +800,10 @@ def _guided_init(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         "expert_config": emitted,
         "init_experience": resolved_experience,
         "authority": False,
+        "authority_granted": False,
         "pass_credit": False,
         "acceptance_pass": False,
+        "product_acceptance_pass": False,
     }
     if initial_work is not None:
         result["initial_work"] = initial_work

@@ -91,11 +91,22 @@ init inputs; навіть після bounded apply він залишається
 
 ## CLI
 
-Revalidation залишається вкладеною в наявну surface:
+Канонічний bounded entrypoint для цього workflow:
+
+```text
+promin revalidate --input INPUT [--execute]
+```
+
+Для сумісності з наявними викликами доступний alias, який делегує до того
+самого bounded workflow:
 
 ```text
 promin doctor --revalidate INPUT [--execute-revalidation]
 ```
+
+Обидва маршрути коректно обробляють режими `revalidate`, `reconsolidate` і
+`report` у межах строгого порядку фаз вище; alias не створює окремої семантики
+чи окремого шляху доказів.
 
 Без execute flag команда лише готує plan. Поточний frozen CLI count
 `58 passed` належить weak lifecycle + focused weak CLI slice і не переноситься

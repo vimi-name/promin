@@ -198,8 +198,8 @@
     },
     {
       "path": "docs/REVALIDATION_AND_REPORTING_UA.md",
-      "sha256": "4af7bbeaa2768cb108116e5f785209c4663a63136fcaa5c6f6ec707f96a6fcae",
-      "size": 6490
+      "sha256": "5359da1951c21d99b3fd616c81ee1fef39516f722a8f6a0140d6d8a1f22bcaf6",
+      "size": 6994
     },
     {
       "path": "docs/RUNTIME_AUDIT_UA.md",
@@ -388,8 +388,8 @@
     },
     {
       "path": "promin/__main__.py",
-      "sha256": "b584fb54b3ab4b3f010b306dafa9cd63c8494066d4d48195d607d4159debe0dd",
-      "size": 69323
+      "sha256": "220447f3541b48597da738f37762fa76f9c9233b75ef299438f83eae04e2c68e",
+      "size": 69394
     },
     {
       "path": "promin/artifact_policy.py",
@@ -1223,8 +1223,8 @@
     },
     {
       "path": "tests/test_public_workflows_cli.py",
-      "sha256": "6c74fb49049f7f4b8bc6409abaecd0dc45c173499a21b29a65c4bb256feb1954",
-      "size": 48579
+      "sha256": "bb67c4dc3c0cd32d333748cab7505cccf397ce558cfece21c68bca72aa6f1c13",
+      "size": 51075
     },
     {
       "path": "tests/test_retrieval_continuation_service.py",

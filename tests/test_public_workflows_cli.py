@@ -498,6 +498,7 @@ def test_parser_keeps_base_commands_and_thin_nested_selectors(tmp_path: Path) ->
         + ("revalidate",)
         + BASE_COMMANDS[2 : BASE_COMMANDS.index("continue")]
         + ("tooling",)
+        + ("inspect", "report")
         + ("recover",)
         + BASE_COMMANDS[BASE_COMMANDS.index("continue") :]
     )
@@ -530,6 +531,8 @@ def test_parser_keeps_base_commands_and_thin_nested_selectors(tmp_path: Path) ->
     )
     assert _args(tmp_path, "next", "--weak-confirm-stopped").weak_confirm_stopped
     assert _args(tmp_path, "doctor", "--revalidate", "input").revalidate
+    assert parser.parse_args(["revalidate", "--input", "input.json"]).workflow == "revalidate"
+    assert parser.parse_args(["doctor", "--revalidate", "input.json"]).workflow == "doctor"
     assert _args(
         tmp_path,
         "doctor",
@@ -539,6 +542,65 @@ def test_parser_keeps_base_commands_and_thin_nested_selectors(tmp_path: Path) ->
     ).execute_revalidation
     with pytest.raises(SystemExit):
         parser.parse_args(["doctor", "--repair", "--revalidate", "input"])
+
+
+def test_public_help_lists_inspect_and_report_commands() -> None:
+    parser = _parser()
+    help_text = parser.format_help()
+
+    assert "inspect product sources" in help_text
+    assert "derive a canonical client report" in help_text
+    assert parser.parse_args(["inspect", "--audience", "machine"]).workflow == "inspect"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["inspect", "--output", "inspection.json"])
+    assert parser.parse_args(
+        ["report", "--inspection", "inspection.json", "--output", "report.json"]
+    ).workflow == "report"
+
+
+def test_ordinary_guided_init_review_has_false_claim_closure(tmp_path: Path) -> None:
+    review = _run(_args(tmp_path, "init"))
+
+    for key in ("authority", "authority_granted", "pass_credit", "acceptance_pass", "product_acceptance_pass"):
+        assert review[key] is False
+
+
+def test_legacy_guided_init_review_has_false_claim_closure(tmp_path: Path) -> None:
+    review = _run(
+        _args(tmp_path, "init", "--documentation", "decline", "--verification", "decline")
+    )
+
+    for key in ("authority", "authority_granted", "pass_credit", "acceptance_pass", "product_acceptance_pass"):
+        assert review[key] is False
+
+
+def test_expert_bundle_guided_init_review_has_false_claim_closure(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    bundle = tmp_path / "bundle"
+    inputs = {
+        "goal": "Inspect the bounded project",
+        "autonomy": "standing-reversible",
+        "reporting_language": "en",
+        "profile_layers": ["general-development", "standing-reversible", "en"],
+        "brief": {"constraints": ["no network"], "deliverables": ["diagnostic evidence"]},
+        "max_preflight_files": 32,
+    }
+    export_expert_init_bundle(
+        bundle,
+        standard_default=load_init_profile(
+            PACKAGE_ROOT / "capability_profiles" / "standard-init.json"
+        ),
+        plan_inputs=inputs,
+        languages=("python",),
+        expert_selections=_expert_selection(),
+        expert_source="owner",
+    )
+
+    review = _run(_args(project, "init", "--expert-bundle", str(bundle)))
+
+    for key in ("authority", "authority_granted", "pass_credit", "acceptance_pass", "product_acceptance_pass"):
+        assert review[key] is False
 
 
 def test_expert_bundle_is_one_configuration_authority(tmp_path: Path) -> None:
