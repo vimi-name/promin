@@ -28,7 +28,7 @@
     },
     {
       "path": "MACHINE_README.md",
-      "sha256": "8e720009170130aec0270d7342122e0962a585d01f3643dc223e64e500dc7b13",
+      "sha256": "2bd7de46c8db9650c19c1768b689567119dc38f8be63c3bc609c746799eab3b6",
       "size": 33884
     },
     {
@@ -38,7 +38,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "658d6478e67258258e63f3eb209ffcf68c878de5529663f0dc69d2c14cb998a3",
+      "sha256": "222ab2c3c4a415e10cc4586cb256dbc8fc7401f803e902012808619a5fd4c907",
       "size": 33804
     },
     {
@@ -1208,7 +1208,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "1204a7f9fa2ac3247b91415225a49ce0ae588d116ff83adad04b95ad7ad8b530",
+      "sha256": "af0f7289580be2d6fd113af0f506b41c631fcf159b0dbed0c3fe4ae676e2e092",
       "size": 70290
     },
     {
@@ -1258,7 +1258,7 @@
     },
     {
       "path": "tests/test_service_cli.py",
-      "sha256": "4ccb2d14102536e006c41633eb1c138bcb597e5291bbca866092c3febfa24700",
+      "sha256": "2d80af8c975be9ec66a02c6cb650ad5b0e1a98f4ef7ccdaebdf610d8b5a23104",
       "size": 86840
     },
     {
