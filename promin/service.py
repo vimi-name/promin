@@ -3193,6 +3193,69 @@ class ProminService:
             evaluated_at=now_text,
         )
 
+    def renew_search(
+        self,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        if not token:
+            raise ServiceError("continuation token must be non-empty")
+        context = self._context()
+        store = self._event_store(context, recover_publications=False)
+        projection = self._projection(context)
+        projection.require_current(store)
+        now_text = _evaluation_time(now)
+        access = self._authorize_query_access(
+            context,
+            store,
+            subject_id=subject_id,
+            grant_id=grant_id,
+            evaluated_at=now_text,
+        )
+        selected_budget = dict(
+            budget or _profile_budget(_preset(context), _activation(context))
+        )
+        result = projection.renew_search(
+            token,
+            query=query,
+            depth=depth,
+            budget=selected_budget,
+            ranking=ranking,
+            resume_binding=_projection_resume_binding(context, access),
+            now=now_text,
+            ttl_seconds=ttl_seconds,
+        )
+        result["authorization_binding"] = {
+            "subject_id": access["subject_id"],
+            "grant_id": access["grant_id"],
+            "grant_claim_digest": access["grant_claim_digest"],
+            "capability_id": access["capability_id"],
+            "requested_scope_digest": digest_value(access["requested_scope"]),
+            "revocation_epoch": access["revocation_epoch"],
+        }
+        _validate_renewal_result(
+            result,
+            query=query,
+            depth=depth,
+            budget=selected_budget,
+            ranking=ranking,
+            ttl_seconds=ttl_seconds,
+            expected_binding=_projection_resume_binding(context, access),
+            head=store.head(),
+            activation=_activation(context),
+            authorization_binding=result["authorization_binding"],
+            max_token_bytes=projection.limits.max_token_bytes,
+        )
+        return result
+
     def _authorize_query_access(
         self,
         context: ActivationContext,
@@ -6228,6 +6291,86 @@ def _validate_search_result(
         instant = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         if instant <= (now or datetime.now(timezone.utc)):
             raise ServiceError("continuation is already expired")
+
+
+def _validate_renewal_result(
+    result: Mapping[str, Any],
+    *,
+    query: str,
+    depth: int,
+    budget: Mapping[str, int],
+    ranking: str,
+    ttl_seconds: int,
+    expected_binding: Mapping[str, str],
+    head: Mapping[str, Any],
+    activation: Mapping[str, Any],
+    authorization_binding: Mapping[str, Any],
+    max_token_bytes: int,
+) -> None:
+    required = {
+        "record_type", "version", "traversal", "token", "query", "depth",
+        "budget", "ranking", "cursor", "issued_at", "expiry", "ttl_seconds",
+        "activation_digest", "head_digest", "projection_digest",
+        "implementation_closure_digest", "resume_binding", "budget_digest",
+        "resume_binding_digest", "authorization_binding",
+    }
+    if set(result) != required or result.get("record_type") != "ContinuationRenewal":
+        raise ServiceError("continuation renewal response contract is invalid")
+    if result["version"] != 2 or result["traversal"] != "typed-bfs-v2":
+        raise ServiceError("continuation renewal algorithm binding is invalid")
+    try:
+        token_bytes = result["token"].encode("ascii")
+    except (AttributeError, UnicodeError):
+        raise ServiceError("continuation renewal token is invalid") from None
+    if not token_bytes or len(token_bytes) > max_token_bytes:
+        raise ServiceError("continuation renewal token exceeds its Core limit")
+    if (
+        result["query"] != query
+        or result["depth"] != depth
+        or result["budget"] != dict(budget)
+        or result["ranking"] != ranking
+        or result["ttl_seconds"] != ttl_seconds
+        or result["resume_binding"] != dict(expected_binding)
+        or result["budget_digest"] != digest_value(budget)
+        or result["resume_binding_digest"] != digest_value(expected_binding)
+    ):
+        raise ServiceError("continuation renewal search binding differs")
+    snapshot_digests = (
+        "activation_digest",
+        "head_digest",
+        "projection_digest",
+        "implementation_closure_digest",
+    )
+    for key in snapshot_digests:
+        if not isinstance(result[key], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", result[key]
+        ):
+            raise ServiceError("continuation renewal snapshot digest is invalid")
+    if result["activation_digest"] != activation["activation_digest"]:
+        raise ServiceError("continuation renewal Activation is stale")
+    if result["head_digest"] != head["batch_digest"]:
+        raise ServiceError("continuation renewal HEAD is stale")
+    if not isinstance(result["cursor"], int) or isinstance(result["cursor"], bool) or result["cursor"] < 0:
+        raise ServiceError("continuation renewal cursor is invalid")
+    try:
+        issued = datetime.fromisoformat(result["issued_at"].replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(result["expiry"].replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        raise ServiceError("continuation renewal timestamps are invalid") from None
+    if (
+        issued.tzinfo is None
+        or issued.utcoffset() != timedelta(0)
+        or issued.microsecond != 0
+        or expiry.tzinfo is None
+        or expiry.utcoffset() != timedelta(0)
+        or format_utc_second(issued) != result["issued_at"]
+        or format_utc_second(expiry) != result["expiry"]
+        or expiry != issued + timedelta(seconds=ttl_seconds)
+    ):
+        raise ServiceError("continuation renewal expiry does not match TTL")
+    expected_authorization = dict(authorization_binding)
+    if result["authorization_binding"] != expected_authorization:
+        raise ServiceError("continuation renewal authorization binding differs")
 
 
 def _time_text(value: datetime | None) -> str | None:

@@ -2381,6 +2381,92 @@ class EventsProjectionTests(unittest.TestCase):
                 now="2026-07-17T12:01:00Z",
             )
 
+    def test_authenticated_continuation_renewal_preserves_cursor_and_union(self) -> None:
+        self.commit_tasks(20)
+        projection = Projection(
+            self.root / "renewal.sqlite",
+            token_key=b"r" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        projection.rebuild(self.store)
+        budget = {
+            "max_bytes": 16_384,
+            "max_entities": 2,
+            "max_relations": 1,
+            "max_fanout_per_entity": 1,
+            "top_k": 2,
+        }
+        page = projection.search(
+            "compile renderer",
+            depth=2,
+            budget=budget,
+            ranking="bm25-v1",
+            resume_binding=RESUME_BINDING,
+            now=NOW,
+            ttl_seconds=60,
+        )
+        token = page["continuation"]["token"]
+        renewed = projection.renew_search(
+            token,
+            query="compile renderer",
+            depth=2,
+            budget=budget,
+            ranking="bm25-v1",
+            resume_binding=RESUME_BINDING,
+            now="2026-07-17T12:00:30Z",
+            ttl_seconds=60,
+        )
+        self.assertNotEqual(renewed["token"], token)
+        self.assertEqual(renewed["cursor"], page["next_stream_cursor"])
+        self.assertEqual(renewed["issued_at"], "2026-07-17T12:00:30Z")
+        self.assertEqual(renewed["expiry"], "2026-07-17T12:01:30Z")
+        continued_once = projection.continue_search(
+            renewed["token"],
+            resume_binding=RESUME_BINDING,
+            now="2026-07-17T12:00:31Z",
+        )
+        renewed_twice = projection.renew_search(
+            renewed["token"],
+            query="compile renderer",
+            depth=2,
+            budget=budget,
+            ranking="bm25-v1",
+            resume_binding=RESUME_BINDING,
+            now="2026-07-17T12:01:00Z",
+            ttl_seconds=60,
+        )
+        self.assertEqual(renewed_twice["cursor"], renewed["cursor"])
+        continued = projection.continue_search(
+            renewed_twice["token"],
+            resume_binding=RESUME_BINDING,
+            now="2026-07-17T12:01:00Z",
+        )
+        comparable = {
+            key: value
+            for key, value in continued.items()
+            if key not in {"continuation", "continuation_version", "stream_cursor", "next_stream_cursor"}
+        }
+        once_comparable = {
+            key: value
+            for key, value in continued_once.items()
+            if key not in {"continuation", "continuation_version", "stream_cursor", "next_stream_cursor"}
+        }
+        self.assertEqual(comparable, once_comparable)
+        self.assertEqual(canonical_owner_digest(comparable), canonical_owner_digest(once_comparable))
+        with self.assertRaises(ContinuationError):
+            projection.renew_search(
+                token,
+                query="compile renderer",
+                depth=2,
+                budget=budget,
+                ranking="bm25-v1",
+                resume_binding=RESUME_BINDING,
+                now="2026-07-17T12:01:00Z",
+                ttl_seconds=60,
+            )
+
     def test_projection_currentness_and_relation_domain(self) -> None:
         self.commit_tasks(1)
         projection = Projection(

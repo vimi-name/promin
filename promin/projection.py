@@ -2878,6 +2878,76 @@ class Projection:
                 connection=connection,
             )
 
+    def renew_search(
+        self,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        budget: Mapping[str, int],
+        ranking: str,
+        resume_binding: Mapping[str, str],
+        now: str | _datetime.datetime | None = None,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        """Issue a fresh token for an authenticated, still-valid search cursor."""
+
+        current_time = _canonical_now(now)
+        checked_budget = self._validate_budget(budget)
+        expected = {
+            "query": self._normalize_query(query),
+            "depth": depth,
+            "budget": checked_budget,
+            "ranking": ranking,
+            "ttl_seconds": ttl_seconds,
+            "resume_binding": self._validate_resume_binding(resume_binding),
+        }
+        if (
+            not isinstance(ttl_seconds, int)
+            or isinstance(ttl_seconds, bool)
+            or not self.limits.ttl_min_seconds <= ttl_seconds <= self.limits.ttl_max_seconds
+        ):
+            raise ContinuationError("continuation TTL is invalid")
+        with self._connect_mutable() as connection:
+            payload = self._decode_token(connection, token, current_time)
+            if payload["route"] != _SEARCH_ROUTE:
+                raise ContinuationError("continuation route binding mismatch")
+            for key, value in expected.items():
+                if payload[key] != value:
+                    raise ContinuationError(f"continuation {key} binding mismatch")
+            status = self._status_connection(connection)
+            self._validate_token_snapshot_binding(payload, status)
+            issued_at = current_time
+            expiry = format_utc_second(
+                parse_timestamp(issued_at)
+                + _datetime.timedelta(seconds=ttl_seconds)
+            )
+            renewed_payload = dict(payload)
+            renewed_payload["issued_at"] = issued_at
+            renewed_payload["expiry"] = expiry
+            renewed_token = self._encode_token(connection, renewed_payload)
+            return {
+                "record_type": "ContinuationRenewal",
+                "version": self.limits.token_version,
+                "traversal": self.limits.traversal_algorithm_id,
+                "token": renewed_token,
+                "query": payload["query"],
+                "budget": payload["budget"],
+                "cursor": payload["cursor"],
+                "issued_at": issued_at,
+                "expiry": expiry,
+                "ttl_seconds": ttl_seconds,
+                "activation_digest": payload["activation_digest"],
+                "head_digest": payload["head_digest"],
+                "projection_digest": payload["projection_digest"],
+                "implementation_closure_digest": payload["implementation_closure_digest"],
+                "ranking": payload["ranking"],
+                "depth": payload["depth"],
+                "resume_binding": payload["resume_binding"],
+                "budget_digest": digest_value(payload["budget"]),
+                "resume_binding_digest": digest_value(payload["resume_binding"]),
+            }
+
     def _continue_bound(
         self,
         token: str,

@@ -52,6 +52,7 @@
     "tests/test_canonical_init.py",
     "tests/test_concurrency_crash.py",
     "tests/test_contract_mutations.py",
+    "tests/test_continuation_renewal.py",
     "tests/test_events_projection.py",
     "tests/test_expert_init_bundle_roundtrip.py",
     "tests/test_heavy_artifact_minimality.py",
@@ -110,7 +111,7 @@
     "tests/test_service_cli.py",
     "tests/test_service_mutation_cache.py"
   ],
-  "selector_count": 106,
+  "selector_count": 107,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
@@ -268,6 +269,7 @@
         "tests/test_heavy_windows_publication.py",
         "tests/test_heavy_windows_seal_scaling.py",
         "tests/test_retrieval_continuation_service.py",
+        "tests/test_continuation_renewal.py",
         "tests/test_revalidation_workflow.py",
         "tests/test_saturation_archive_binding.py",
         "tests/test_saturation_raw_artifact_cardinality.py"

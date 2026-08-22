@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextvars
 import errno
 import functools
@@ -10,6 +11,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import stat
@@ -71,6 +73,7 @@ _CONTINUATION_STATE_TOTAL_BYTES_MAX = (
 )
 _CONTINUATION_STATE_OBSERVATIONS_MAX = 100_000
 _SATURATION_CONTINUATION_TTL_SECONDS = 900
+_CONTINUATION_RENEWAL_SAFETY_SECONDS = 30
 _SEARCH_FIXTURE_TASK_COUNT = 32
 _SEARCH_FIXTURE_RELATION_COUNT = 28
 _PHYSICAL_RELATION_COUNT = (
@@ -256,6 +259,62 @@ def _hex_digest(value: Any, label: str) -> str:
     if len(selected) != 64 or any(character not in "0123456789abcdef" for character in selected):
         raise SaturationError(f"{label} is not a lowercase SHA-256 digest")
     return selected
+
+
+def _canonical_digest(value: Any, label: str) -> str:
+    selected = _hex_digest(value, label)
+    if selected != value:
+        raise SaturationError(f"{label} is not a canonical lowercase SHA-256 digest")
+    return selected
+
+
+def _validate_continuation_token_shape(
+    value: Any,
+    label: str,
+    *,
+    max_token_bytes: int,
+) -> str:
+    if not isinstance(value, str):
+        raise SaturationError(f"{label} is not a continuation token")
+    try:
+        if len(value.encode("ascii")) > max_token_bytes:
+            raise SaturationError(f"{label} exceeds its Core limit")
+    except UnicodeEncodeError:
+        raise SaturationError(f"{label} is not ASCII") from None
+    parts = value.split(".")
+    if len(parts) != 4 or parts[0] != "promin-v2":
+        raise SaturationError(f"{label} has a noncanonical Promin token shape")
+    handle, row_digest, signature = parts[1:]
+    if re.fullmatch(r"[A-Za-z0-9_-]{22}", handle) is None:
+        raise SaturationError(f"{label} has a noncanonical handle")
+    try:
+        decoded_handle = base64.urlsafe_b64decode(
+            handle + "=" * (-len(handle) % 4)
+        )
+    except (ValueError, UnicodeError):
+        raise SaturationError(f"{label} handle encoding is invalid") from None
+    if (
+        len(decoded_handle) != 16
+        or base64.urlsafe_b64encode(decoded_handle).rstrip(b"=").decode("ascii")
+        != handle
+    ):
+        raise SaturationError(f"{label} handle encoding is noncanonical")
+    _canonical_digest(row_digest, f"{label} row digest")
+    if re.fullmatch(r"[A-Za-z0-9_-]{43}", signature) is None:
+        raise SaturationError(f"{label} signature encoding is invalid")
+    try:
+        decoded_signature = base64.urlsafe_b64decode(
+            signature + "=" * (-len(signature) % 4)
+        )
+    except (ValueError, UnicodeError):
+        raise SaturationError(f"{label} signature encoding is invalid") from None
+    if (
+        len(decoded_signature) != 32
+        or base64.urlsafe_b64encode(decoded_signature).rstrip(b"=").decode("ascii")
+        != signature
+    ):
+        raise SaturationError(f"{label} signature encoding is noncanonical")
+    return value
 
 
 def _relative_path(value: Any, label: str) -> str:
@@ -3114,6 +3173,10 @@ def _assert_workcard(card: Any, maximums: Mapping[str, int]) -> tuple[bool, str 
     token = continuation.get("token") if isinstance(continuation, Mapping) else continuation
     if truncated and not isinstance(token, str):
         raise SaturationError("truncated WorkCard omitted an explicit continuation token")
+    if isinstance(token, str):
+        token_limit = int(maximums.get("max_token_bytes", 256))
+        if len(token.encode("utf-8")) > token_limit:
+            raise SaturationError("continuation token exceeds its Core limit")
     if not truncated and token is not None:
         raise SaturationError("non-truncated WorkCard exposed an unnecessary continuation")
     return truncated, token
@@ -3157,6 +3220,47 @@ def _page_atoms(card: Any) -> list[str]:
     if len(atoms) != len(set(atoms)):
         raise SaturationError("WorkCard page contains duplicate semantic identities")
     return atoms
+
+
+def _page_atom_identity_digests(card: Any) -> list[str]:
+    """Return canonical payload identities for every semantic page atom.
+
+    The stable id is useful for diagnostics, but it is not sufficient to prove
+    that two page chains returned the same entity/relation/evidence payload.
+    Continuation transport fields are deliberately excluded: they are checked
+    separately by the continuation validator and may legitimately change after
+    renewal.
+    """
+
+    value = _plain(card)
+    if not isinstance(value, Mapping):
+        raise SaturationError("search did not return a WorkCard mapping")
+    identities: list[str] = []
+    for namespace, collection, keys in (
+        ("entity", value.get("entities", []), ("id", "entity_id")),
+        ("relation", value.get("relations", []), ("relation_id", "id")),
+        ("evidence", value.get("evidence", value.get("evidence_digests", [])), ("digest", "id")),
+    ):
+        if not isinstance(collection, list):
+            raise SaturationError(f"WorkCard {namespace} collection is not an array")
+        for item in collection:
+            payload = _plain(item)
+            identity: str | None = item if isinstance(item, str) else None
+            if isinstance(payload, Mapping):
+                for key in keys:
+                    selected = payload.get(key)
+                    if isinstance(selected, str) and selected:
+                        identity = selected
+                        break
+            if not identity:
+                raise SaturationError(f"WorkCard {namespace} omitted a stable identity")
+            identities.append(
+                f"{namespace}:{identity}:"
+                f"{_digest({'namespace': namespace, 'identity': identity, 'payload': payload})}"
+            )
+    if len(identities) != len(set(identities)):
+        raise SaturationError("WorkCard page contains duplicate canonical atom identities")
+    return identities
 
 
 def _contains_inventory_artifact(card: Any) -> bool:
@@ -3251,7 +3355,15 @@ def _mixed_query_depth(index: int, query_class: str) -> int:
 
 
 def _mixed_query_budget(ceiling: Mapping[str, int]) -> dict[str, int]:
-    selected = dict(ceiling)
+    selected = {
+        key: int(ceiling[key])
+        for key in (
+            "max_bytes",
+            "max_entities",
+            "max_relations",
+            "max_fanout_per_entity",
+        )
+    }
     selected["top_k"] = 1
     return selected
 
@@ -3490,6 +3602,162 @@ class _ContinuationStateObserver:
         }
 
 
+def _parse_continuation_timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise SaturationError(f"{label} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SaturationError(f"{label} is invalid") from exc
+    if (
+        parsed.tzinfo is None
+        or parsed.utcoffset() != timedelta(0)
+        or parsed.microsecond != 0
+        or parsed.isoformat(timespec="seconds").replace("+00:00", "Z") != value
+    ):
+        raise SaturationError(f"{label} is not canonical UTC")
+    return parsed.astimezone(timezone.utc)
+
+
+def _clock_utc_second(clock: Any | None) -> datetime:
+    value = datetime.now(timezone.utc).replace(microsecond=0) if clock is None else clock()
+    if not isinstance(value, datetime):
+        raise SaturationError("continuation clock did not return a datetime")
+    if value.tzinfo is None or value.utcoffset() != timedelta(0) or value.microsecond != 0:
+        raise SaturationError("continuation clock must return a UTC whole-second datetime")
+    return value.astimezone(timezone.utc)
+
+
+def _validate_renewal_response(
+    renewed: Any,
+    *,
+    source: Mapping[str, Any],
+    query: str,
+    depth: int,
+    budget: Mapping[str, Any],
+    ranking: str,
+    ttl_seconds: int,
+    query_grant: Mapping[str, Any],
+    old_expiry: datetime,
+    max_token_bytes: int,
+) -> tuple[Mapping[str, Any], datetime]:
+    if not isinstance(renewed, Mapping):
+        raise SaturationError("continuation renewal result is not an object")
+    required = {
+        "record_type", "version", "traversal", "token", "query", "depth", "budget",
+        "ranking", "cursor", "issued_at", "expiry", "ttl_seconds", "activation_digest",
+        "head_digest", "projection_digest", "implementation_closure_digest",
+        "resume_binding", "budget_digest", "resume_binding_digest", "authorization_binding",
+    }
+    if set(renewed) != required or renewed.get("record_type") != "ContinuationRenewal":
+        raise SaturationError("continuation renewal response contract is invalid")
+    if renewed.get("version") != 2 or renewed.get("traversal") != "typed-bfs-v2":
+        raise SaturationError("continuation renewal algorithm binding is invalid")
+    _validate_continuation_token_shape(
+        renewed.get("token"),
+        "renewed continuation token",
+        max_token_bytes=max_token_bytes,
+    )
+    if renewed.get("token") == source.get("token"):
+        raise SaturationError("renewed continuation token was not reissued")
+    if (
+        renewed.get("query") != query
+        or renewed.get("depth") != depth
+        or renewed.get("budget") != dict(budget)
+        or renewed.get("ranking") != ranking
+        or renewed.get("cursor") != source.get("cursor")
+        or renewed.get("ttl_seconds") != ttl_seconds
+        or renewed.get("budget_digest") != _digest(dict(budget))
+        or renewed.get("resume_binding_digest") != source.get("resume_binding_digest")
+    ):
+        raise SaturationError("continuation renewal binding differs from source")
+    for field in (
+        "activation_digest",
+        "head_digest",
+        "projection_digest",
+        "implementation_closure_digest",
+    ):
+        renewed_digest = _canonical_digest(
+            renewed.get(field), f"renewal {field}"
+        )
+        source_digest = _canonical_digest(
+            source.get(field), f"source {field}"
+        )
+        if renewed_digest != source_digest:
+            raise SaturationError(
+                f"continuation renewal {field} differs from source continuation"
+            )
+    source_resume_digest = _canonical_digest(
+        source.get("resume_binding_digest"),
+        "source continuation resume binding digest",
+    )
+    resume_binding = renewed.get("resume_binding")
+    if not isinstance(resume_binding, Mapping):
+        raise SaturationError("continuation renewal resume binding is invalid")
+    renewed_resume_digest = _canonical_digest(
+        renewed.get("resume_binding_digest"),
+        "renewed resume binding digest",
+    )
+    if renewed_resume_digest != source_resume_digest or _digest(resume_binding) != renewed_resume_digest:
+        raise SaturationError("continuation renewal resume binding differs from source")
+    auth = renewed.get("authorization_binding")
+    if (
+        not isinstance(auth, Mapping)
+        or set(auth) != {
+            "subject_id", "grant_id", "grant_claim_digest", "capability_id",
+            "requested_scope_digest", "revocation_epoch",
+        }
+        or auth.get("subject_id") != query_grant.get("subject_id")
+        or auth.get("grant_id") != query_grant.get("grant_id")
+    ):
+        raise SaturationError("continuation renewal authorization binding is invalid")
+    for field in (
+        "grant_claim_digest",
+        "capability_id",
+        "requested_scope_digest",
+        "revocation_epoch",
+    ):
+        if not isinstance(auth.get(field), str) or not auth[field]:
+            raise SaturationError(f"continuation renewal authorization {field} is invalid")
+    for field in ("grant_claim_digest", "requested_scope_digest", "revocation_epoch"):
+        _canonical_digest(auth[field], f"continuation renewal authorization {field}")
+    expected_claim = query_grant.get("grant_claim_digest", query_grant.get("claim_digest"))
+    if expected_claim is not None and auth["grant_claim_digest"] != expected_claim:
+        raise SaturationError("continuation renewal grant claim differs from query Grant")
+    expected_capability = query_grant.get("capability_id")
+    if expected_capability is not None and auth["capability_id"] != expected_capability:
+        raise SaturationError("continuation renewal capability differs from query Grant")
+    expected_scope = query_grant.get("requested_scope", query_grant.get("scope"))
+    if expected_scope is not None and auth["requested_scope_digest"] != _digest(expected_scope):
+        raise SaturationError("continuation renewal scope differs from query Grant")
+    expected_revocation = query_grant.get("revocation_epoch", query_grant.get("revocation_state_digest"))
+    if expected_revocation is not None and auth["revocation_epoch"] != expected_revocation:
+        raise SaturationError("continuation renewal revocation state differs from query Grant")
+    source_activation = source.get("activation_digest")
+    source_implementation = source.get("implementation_closure_digest")
+    if not isinstance(source_activation, str) or not isinstance(source_implementation, str):
+        raise SaturationError("source continuation snapshot binding is incomplete")
+    expected_resume_binding = {
+        "activation_digest": source_activation,
+        "capability_id": auth["capability_id"],
+        "grant_claim_digest": auth["grant_claim_digest"],
+        "grant_id": auth["grant_id"],
+        "implementation_closure_digest": source_implementation,
+        "requested_scope_digest": auth["requested_scope_digest"],
+        "revocation_epoch": auth["revocation_epoch"],
+        "subject_id": auth["subject_id"],
+    }
+    if dict(resume_binding) != expected_resume_binding:
+        raise SaturationError(
+            "continuation renewal resume binding is incomplete or differs from authorization"
+        )
+    issued = _parse_continuation_timestamp(renewed.get("issued_at"), "renewed issued_at")
+    expiry = _parse_continuation_timestamp(renewed.get("expiry"), "renewed expiry")
+    if expiry != issued + timedelta(seconds=ttl_seconds) or expiry <= old_expiry:
+        raise SaturationError("continuation renewal expiry does not extend by its TTL")
+    return renewed, expiry
+
+
 def _drain_pages(
     runtime: Any,
     first: Any,
@@ -3498,17 +3766,24 @@ def _drain_pages(
     query_grant: Mapping[str, Any],
     ttl_seconds: int,
     continuation_observer: _ContinuationStateObserver | None = None,
+    clock: Any | None = None,
 ) -> dict[str, Any]:
     current = first
     seen_atoms: set[str] = set()
+    seen_atom_identity_digests: set[str] = set()
     seen_tokens: set[str] = set()
     page_digests: list[str] = []
+    page_identity_digests: list[str] = []
     previous_cursor: int | None = None
-    fixed_expiry: str | None = None
+    initial_expiry: str | None = None
+    previous_expiry: str | None = None
+    previous_expiry_instant: datetime | None = None
     fixed_resume_binding_digest: str | None = None
     first_truncated = False
     continuation_pages = 0
     maximum_token_bytes = 0
+    renewals: list[dict[str, Any]] = []
+    expiry_comparisons = 0
     refinement_required: bool | None = None
     refinement_hints: list[str] | None = None
     selected_seed_count: int | None = None
@@ -3551,6 +3826,17 @@ def _drain_pages(
                 f"continuation repeated semantic identities: {sorted(duplicates)[:5]}"
             )
         seen_atoms.update(atoms)
+        atom_identity_digests = _page_atom_identity_digests(current)
+        identity_duplicates = seen_atom_identity_digests.intersection(
+            atom_identity_digests
+        )
+        if identity_duplicates:
+            raise SaturationError(
+                "continuation repeated canonical atom identities: "
+                f"{sorted(identity_duplicates)[:5]}"
+            )
+        seen_atom_identity_digests.update(atom_identity_digests)
+        page_identity_digests.append(_digest(atom_identity_digests))
         page_digests.append(_digest(current))
         continuation = _continuation(current)
         if not truncated:
@@ -3559,6 +3845,11 @@ def _drain_pages(
             break
         if continuation is None or token is None:
             raise SaturationError("truncated WorkCard omitted continuation v2")
+        _validate_continuation_token_shape(
+            token,
+            "continuation token",
+            max_token_bytes=int(maximums.get("max_token_bytes", 256)),
+        )
         maximum_token_bytes = max(maximum_token_bytes, len(token.encode("utf-8")))
         if (
             current_value.get("continuation_version") != 2
@@ -3593,9 +3884,16 @@ def _drain_pages(
             )
         if continuation.get("version") != 2:
             raise SaturationError("continuation does not identify the authorized v2 envelope")
+        for field in (
+            "activation_digest",
+            "head_digest",
+            "projection_digest",
+            "implementation_closure_digest",
+        ):
+            _canonical_digest(continuation.get(field), f"continuation {field}")
         resume_binding_digest = continuation.get("resume_binding_digest")
         if (
-            _hex_digest(resume_binding_digest, "continuation resume binding digest")
+            _canonical_digest(resume_binding_digest, "continuation resume binding digest")
             != resume_binding_digest
         ):
             raise SaturationError(
@@ -3614,12 +3912,16 @@ def _drain_pages(
             raise SaturationError("continuation cursor did not strictly advance")
         previous_cursor = cursor
         expiry = continuation.get("expiry")
-        if not isinstance(expiry, str) or not expiry:
-            raise SaturationError("continuation expiry is invalid")
-        if fixed_expiry is None:
-            fixed_expiry = expiry
-        elif expiry != fixed_expiry:
-            raise SaturationError("continuation expiry changed within one page chain")
+        expiry_instant = _parse_continuation_timestamp(expiry, "continuation expiry")
+        had_previous_expiry = previous_expiry_instant is not None
+        if initial_expiry is None:
+            initial_expiry = expiry
+        if previous_expiry_instant is not None and expiry_instant < previous_expiry_instant:
+            raise SaturationError("continuation expiry moved backwards within one page chain")
+        previous_expiry = expiry
+        previous_expiry_instant = expiry_instant
+        if had_previous_expiry:
+            expiry_comparisons += 1
         if token in seen_tokens:
             raise SaturationError("continuation token repeated within one page chain")
         seen_tokens.add(token)
@@ -3644,24 +3946,86 @@ def _drain_pages(
             )
         if continuation_observer is not None:
             continuation_observer.observe(continuation)
+        current_time = _clock_utc_second(clock)
+        remaining = (expiry_instant - current_time).total_seconds()
+        if remaining <= 0:
+            raise SaturationError("continuation expired before renewal")
+        next_token = token
+        if 0 < remaining <= _CONTINUATION_RENEWAL_SAFETY_SECONDS:
+            renew_search = getattr(runtime, "renew_search", None)
+            if not callable(renew_search):
+                raise SaturationError(
+                    "continuation renewal is required inside its safety window"
+                )
+            renewed = renew_search(
+                token,
+                query=continuation_query,
+                depth=continuation_depth,
+                budget=dict(continuation_budget),
+                ranking=continuation_ranking,
+                subject_id=query_grant["subject_id"],
+                grant_id=query_grant["grant_id"],
+                ttl_seconds=ttl_seconds,
+                now=current_time,
+            )
+            renewed, renewed_expiry_instant = _validate_renewal_response(
+                renewed,
+                source=continuation,
+                query=continuation_query,
+                depth=continuation_depth,
+                budget=continuation_budget,
+                ranking=continuation_ranking,
+                ttl_seconds=ttl_seconds,
+                query_grant=query_grant,
+                old_expiry=expiry_instant,
+                max_token_bytes=int(maximums.get("max_token_bytes", 256)),
+            )
+            renewed_token = renewed["token"]
+            renewed_expiry = renewed["expiry"]
+            renewals.append(
+                {
+                    "old_token": token,
+                    "new_token": renewed_token,
+                    "cursor": cursor,
+                    "old_expiry": expiry,
+                    "new_expiry": renewed_expiry,
+                    "renewed_at": current_time.isoformat().replace("+00:00", "Z"),
+                    "old_expiry_instant": expiry_instant,
+                    "new_expiry_instant": renewed_expiry_instant,
+                }
+            )
+            next_token = renewed_token
+            maximum_token_bytes = max(
+                maximum_token_bytes,
+                len(renewed_token.encode("utf-8")),
+            )
         current = runtime.search(
             continuation_query,
             continuation_depth,
             budget=dict(continuation_budget),
             ranking=continuation_ranking,
-            continuation_token=token,
+            continuation_token=next_token,
             subject_id=query_grant["subject_id"],
             grant_id=query_grant["grant_id"],
             ttl_seconds=ttl_seconds,
+            now=current_time,
         )
     return {
         "atoms": seen_atoms,
         "page_digests": page_digests,
+        "page_identity_digests": page_identity_digests,
         "pages": len(page_digests),
         "continuation_pages": continuation_pages,
         "first_truncated": first_truncated,
-        "fixed_expiry": fixed_expiry,
+        "initial_expiry": initial_expiry,
+        "expiry_monotonic": expiry_comparisons == 0 or all(
+            event["new_expiry_instant"] >= event["old_expiry_instant"]
+            for event in renewals
+        ),
+        "expiry_comparisons": expiry_comparisons,
+        "renewals": renewals,
         "maximum_token_bytes": maximum_token_bytes,
+        "identity_digests": seen_atom_identity_digests,
         "refinement_required": refinement_required is True,
         "refinement_hints": refinement_hints or [],
         "selected_seed_count": selected_seed_count or 0,
@@ -3675,12 +4039,26 @@ def _raw_page_trace(value: Mapping[str, Any]) -> dict[str, Any]:
         "pages": value["pages"],
         "continuation_pages": value["continuation_pages"],
         "first_truncated": value["first_truncated"],
+        "initial_expiry": value["initial_expiry"],
+        "expiry_monotonic": value["expiry_monotonic"],
+        "renewal_count": len(value["renewals"]),
+        "renewal_events": [
+            {
+                "cursor": renewal["cursor"],
+                "old_expiry": renewal["old_expiry"],
+                "new_expiry": renewal["new_expiry"],
+                "renewed_at": renewal["renewed_at"],
+            }
+            for renewal in value["renewals"]
+        ],
         "maximum_token_bytes": value["maximum_token_bytes"],
         "selected_closure_complete": value["selected_closure_complete"],
         "atoms": atoms,
         "atoms_count": len(atoms),
         "atoms_digest": _digest(atoms),
         "page_digests": list(value["page_digests"]),
+        "page_identity_digests": list(value["page_identity_digests"]),
+        "identity_digests": sorted(value["identity_digests"]),
     }
 
 
@@ -3802,6 +4180,9 @@ def _load_ceiling() -> dict[str, int]:
         "max_relations": int(ceiling["max_relations"]),
         "max_fanout_per_entity": int(ceiling["max_fanout_per_entity"]),
         "top_k": int(ceiling["top_k"]),
+        "max_token_bytes": int(
+            conformance["scale_contracts"]["workcard"]["continuation_token_bytes_max"]
+        ),
     }
 
 
@@ -4612,6 +4993,17 @@ def run(
                 raise SaturationError(
                     f"continuation page union differs from reference closure: "
                     f"missing={missing[:5]} extra={extra[:5]}"
+                )
+            if forced["identity_digests"] != reference["identity_digests"]:
+                missing = sorted(
+                    reference["identity_digests"] - forced["identity_digests"]
+                )
+                extra = sorted(
+                    forced["identity_digests"] - reference["identity_digests"]
+                )
+                raise SaturationError(
+                    "continuation canonical payload union differs from reference "
+                    f"closure: missing={missing[:5]} extra={extra[:5]}"
                 )
             forced_union_matches += 1
             result_digests.extend(forced["page_digests"])
