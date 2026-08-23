@@ -115,11 +115,12 @@ def test_plan_uses_fixed_allowlisted_action_grammar(
         "working_directory": str(tmp_path.resolve()),
         "output_roots": ["builds/analysis", ".promin/logs"]
         if language_id == "c-family" else ["host-local-diagnostics", "host-local-forensics"],
-        "profile_digest": catalog.profile(
-            {"c-family": "c-family-semantic", "csharp": "csharp-semantic", "jvm": "jvm-semantic"}
-            .get(language_id, "")
-        ).profile_digest,
-        "claims": {
+            "profile_digest": catalog.profile(
+                {"c-family": "c-family-semantic", "csharp": "csharp-semantic", "jvm": "jvm-semantic"}
+                .get(language_id, "")
+            ).profile_digest,
+            "required_configuration_paths": [],
+            "claims": {
             "acceptance_pass": False,
             "pass_credit": False,
             "product_acceptance_pass": False,
@@ -253,6 +254,144 @@ def test_plan_rejects_invalid_root_non_tuple_and_excess_arguments(tmp_path: Path
         plan_language_tool(catalog, language_id="c-family", tool_id="clang-tidy",
                            action_id="static-analysis", root=tmp_path,
                            arguments=("a", "b"))
+
+
+@pytest.mark.parametrize(
+    ("language_id", "tool_id", "action_id", "expected_argv", "configuration", "expected_roots"),
+    (
+        ("javascript", "eslint", "static-analysis", ("eslint", "--config", "eslint.config.js", "src"), "eslint.config.js", ("host-local-diagnostics", "host-local-forensics")),
+        ("typescript", "typescript-compiler", "static-analysis", ("tsc", "--noEmit", "--project", "tsconfig.json"), "tsconfig.json", ("host-local-diagnostics", "host-local-forensics")),
+        ("js", "typedoc", "documentation", ("typedoc", "--options", "typedoc.json", "--out", "host-local-diagnostics/typedoc"), "typedoc.json", ("host-local-diagnostics/typedoc", "host-local-forensics")),
+        ("python", "python-compileall", "static-analysis", ("python", "-B", "-m", "compileall", "-q", "src"), None, ("host-local-diagnostics", "host-local-forensics")),
+        ("py", "ruff", "static-analysis", ("ruff", "check", "--config", "pyproject.toml", "src"), "pyproject.toml", ("host-local-diagnostics", "host-local-forensics")),
+        ("python", "mypy", "static-analysis", ("mypy", "--config-file", "pyproject.toml", "src"), "pyproject.toml", ("host-local-diagnostics", "host-local-forensics")),
+        ("python", "sphinx", "documentation", ("sphinx-build", "-W", "-b", "html", "docs", "host-local-diagnostics/sphinx-html"), "docs/conf.py", ("host-local-diagnostics/sphinx-html", "host-local-forensics")),
+    ),
+)
+def test_plan_js_typescript_python_contracts_are_configuration_bound(
+    tmp_path: Path, language_id: str, tool_id: str, action_id: str,
+    expected_argv: tuple[str, ...], configuration: str | None,
+    expected_roots: tuple[str, ...],
+) -> None:
+    if configuration is not None:
+        config = tmp_path / configuration
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("# fixture\n", encoding="utf-8")
+    plan = plan_language_tool(
+        load_catalog(), language_id=language_id, tool_id=tool_id,
+        action_id=action_id, root=tmp_path,
+    )
+    assert plan.language_id == ("javascript" if language_id in {"javascript", "typescript", "js"} else "python")
+    assert plan.tool_id == tool_id
+    assert plan.action_id == action_id
+    assert plan.argv == expected_argv
+    assert plan.required_configuration_paths == (() if configuration is None else (configuration,))
+    assert plan.output_roots == expected_roots
+    assert plan.profile_digest == load_catalog().profile(
+        "javascript-typescript-semantic" if language_id in {"javascript", "typescript", "js"} else "python-semantic"
+    ).profile_digest
+    record = plan.to_record()
+    assert record["required_configuration_paths"] == ([] if configuration is None else [configuration])
+    assert all(record[key] is False for key in ("acceptance_pass", "pass_credit", "product_acceptance_pass", "release_approved"))
+    assert all(value is False for value in record["claims"].values())
+
+
+@pytest.mark.parametrize(
+    ("language_id", "tool_id", "action_id", "configuration"),
+    (
+        ("javascript", "eslint", "static-analysis", "eslint.config.js"),
+        ("typescript", "typescript-compiler", "static-analysis", "tsconfig.json"),
+        ("javascript", "typedoc", "documentation", "typedoc.json"),
+        ("python", "ruff", "static-analysis", "pyproject.toml"),
+        ("python", "mypy", "static-analysis", "pyproject.toml"),
+        ("python", "sphinx", "documentation", "docs/conf.py"),
+    ),
+)
+def test_configuration_bound_tools_reject_missing_directory_and_link(
+    tmp_path: Path, language_id: str, tool_id: str, action_id: str, configuration: str,
+) -> None:
+    catalog = load_catalog()
+    with pytest.raises(LanguageToolingError, match="configuration"):
+        plan_language_tool(catalog, language_id=language_id, tool_id=tool_id, action_id=action_id, root=tmp_path)
+    config = tmp_path / configuration
+    config.mkdir(parents=True)
+    with pytest.raises(LanguageToolingError, match="configuration"):
+        plan_language_tool(catalog, language_id=language_id, tool_id=tool_id, action_id=action_id, root=tmp_path)
+    config.rmdir()
+    target = tmp_path / "target.conf"
+    target.write_text("# target\n", encoding="utf-8")
+    try:
+        config.symlink_to(target)
+    except OSError:
+        pytest.skip("symbolic links unavailable")
+    with pytest.raises(LanguageToolingError, match="configuration"):
+        plan_language_tool(catalog, language_id=language_id, tool_id=tool_id, action_id=action_id, root=tmp_path)
+
+
+def test_python_compileall_has_no_configuration_and_rejects_second_source_argument(tmp_path: Path) -> None:
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-compileall",
+        action_id="static-analysis", root=tmp_path,
+    )
+    assert plan.argv == ("python", "-B", "-m", "compileall", "-q", "src")
+    assert plan.required_configuration_paths == ()
+    with pytest.raises(LanguageToolingError, match="argument count"):
+        plan_language_tool(
+            load_catalog(), language_id="python", tool_id="python-compileall",
+            action_id="static-analysis", root=tmp_path,
+            arguments=("src", "other"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("language_id", "tool_id", "action_id", "configuration"),
+    (
+        ("javascript", "eslint", "static-analysis", "eslint.config.js"),
+        ("typescript", "typescript-compiler", "static-analysis", "tsconfig.json"),
+        ("javascript", "typedoc", "documentation", "typedoc.json"),
+        ("python", "python-compileall", "static-analysis", None),
+        ("python", "ruff", "static-analysis", "pyproject.toml"),
+        ("python", "mypy", "static-analysis", "pyproject.toml"),
+        ("python", "sphinx", "documentation", "docs/conf.py"),
+    ),
+)
+def test_new_contracts_reject_any_caller_argument(
+    tmp_path: Path, language_id: str, tool_id: str, action_id: str,
+    configuration: str | None,
+) -> None:
+    if configuration is not None:
+        config = tmp_path / configuration
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("# fixture\n", encoding="utf-8")
+    with pytest.raises(LanguageToolingError, match="argument count"):
+        plan_language_tool(
+            load_catalog(), language_id=language_id, tool_id=tool_id,
+            action_id=action_id, root=tmp_path, arguments=("caller-input",),
+        )
+
+
+def test_public_guide_closes_js_typescript_python_tooling_boundary() -> None:
+    guide = (PACKAGE_ROOT / "docs" / "LANGUAGE_CAPABILITIES_UA.md").read_text(
+        encoding="utf-8"
+    )
+    expected_rows = {
+        "| JavaScript | `eslint` | `eslint` | `eslint --config eslint.config.js src` | `eslint.config.js` |",
+        "| TypeScript | `typescript-compiler` | `tsc` | `tsc --noEmit --project tsconfig.json` | `tsconfig.json` |",
+        "| JavaScript | `typedoc` | `typedoc` | `typedoc --options typedoc.json --out host-local-diagnostics/typedoc` | `typedoc.json` |",
+        "| Python | `python-compileall` | `python` | `python -B -m compileall -q src` | none |",
+        "| Python | `ruff` | `ruff` | `ruff check --config pyproject.toml src` | `pyproject.toml` |",
+        "| Python | `mypy` | `mypy` | `mypy --config-file pyproject.toml src` | `pyproject.toml` |",
+        "| Python | `sphinx` | `sphinx-build` | `sphinx-build -W -b html docs host-local-diagnostics/sphinx-html` | `docs/conf.py` |",
+    }
+    assert "| family | plan ID | executable | fixed argv | exact prerequisite |" in guide
+    assert all(row in guide for row in expected_rows)
+    false_claim_fields = {
+        "acceptance_pass",
+        "pass_credit",
+        "product_acceptance_pass",
+        "release_approved",
+    }
+    assert {field for field in false_claim_fields if f"`{field}=false`" in guide} == false_claim_fields
 
 
 def _fake_tool_plan(tmp_path: Path, *, mutate_after_start: bool = False):

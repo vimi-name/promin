@@ -98,6 +98,33 @@ relative source argument і за його відсутності викорис�
 analysis-маршрутів, а не executable ID і не запускається цим tooling plan.
 `roslyn-analyzers` використовує (якщо окремий host probe це підтвердить)
 обраний caller-ом root; project path або інший positional argument не
-додається. Ця хвиля не додає executable routes для JavaScript, TypeScript чи
-Python. Усі перелічені плани залишаються claim-free: `UNAVAILABLE` означає
-відсутню host evidence, а не успіх або acceptance.
+додається.
+
+Для JavaScript/TypeScript і Python ця хвиля додає лише такі configuration-bound
+плани з точною декларацією executable, action, argv та prerequisite-файла:
+
+| family | plan ID | executable | fixed argv | exact prerequisite |
+|---|---|---|---|---|
+| JavaScript | `eslint` | `eslint` | `eslint --config eslint.config.js src` | `eslint.config.js` |
+| TypeScript | `typescript-compiler` | `tsc` | `tsc --noEmit --project tsconfig.json` | `tsconfig.json` |
+| JavaScript | `typedoc` | `typedoc` | `typedoc --options typedoc.json --out host-local-diagnostics/typedoc` | `typedoc.json` |
+| Python | `python-compileall` | `python` | `python -B -m compileall -q src` | none |
+| Python | `ruff` | `ruff` | `ruff check --config pyproject.toml src` | `pyproject.toml` |
+| Python | `mypy` | `mypy` | `mypy --config-file pyproject.toml src` | `pyproject.toml` |
+| Python | `sphinx` | `sphinx-build` | `sphinx-build -W -b html docs host-local-diagnostics/sphinx-html` | `docs/conf.py` |
+
+Configuration prerequisite перевіряється лише як точний project-relative шлях до
+наявного regular non-link файла. Planner не читає і не перевіряє семантику
+конфігурації, не probe-ить і не встановлює executable та не виконує argv. Для
+`python-compileall` prerequisite відсутній; `-B` є обов’язковим, щоб маршрут не
+створював bytecode як заявлений safe route. `typedoc` і `sphinx` мають лише
+заздалегідь визначені diagnostic output roots; `tooling run --output-root` для
+них відхиляється, щоб caller не міг розійтися з source-owned argv та
+`LanguageToolPlan.output_roots`. Для інших інструментів bounded relative
+`--output-root` дозволений лише на public `run` boundary.
+
+Усі перелічені плани, як і `probe`/`run`, залишаються diagnostic та claim-free:
+`UNAVAILABLE` означає відсутню host evidence, а не успіх або acceptance.
+Публічна межа явно зберігає `acceptance_pass=false`, `pass_credit=false`,
+`product_acceptance_pass=false` і `release_approved=false`; жоден plan/probe/run
+не надає product, performance, visual, release, authority або aggregate credit.

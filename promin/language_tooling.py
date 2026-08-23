@@ -61,6 +61,17 @@ _DECLARATION_EXECUTABLES: Final[dict[str, dict[str, str]]] = {
         "checkstyle": "checkstyle",
         "spotbugs": "spotbugs",
     },
+    "javascript": {
+        "eslint": "eslint",
+        "typescript-compiler": "tsc",
+        "typedoc": "typedoc",
+    },
+    "python": {
+        "python-compileall": "python",
+        "ruff": "ruff",
+        "mypy": "mypy",
+        "sphinx": "sphinx-build",
+    },
 }
 
 _ACTION_GRAMMARS: Final[dict[str, tuple[str, int, tuple[str, ...]]]] = {
@@ -78,6 +89,22 @@ _ACTION_GRAMMARS: Final[dict[str, tuple[str, int, tuple[str, ...]]]] = {
     "javadoc": ("documentation", 1, ("src",)),
     "checkstyle": ("static-analysis", 2, ("checkstyle.xml", "src")),
     "spotbugs": ("static-analysis", 1, ("build",)),
+    "eslint": ("static-analysis", 0, ("--config", "eslint.config.js", "src")),
+    "typescript-compiler": ("static-analysis", 0, ("--noEmit", "--project", "tsconfig.json")),
+    "typedoc": ("documentation", 0, ("--options", "typedoc.json", "--out", "host-local-diagnostics/typedoc")),
+    "python-compileall": ("static-analysis", 0, ("-B", "-m", "compileall", "-q", "src")),
+    "ruff": ("static-analysis", 0, ("check", "--config", "pyproject.toml", "src")),
+    "mypy": ("static-analysis", 0, ("--config-file", "pyproject.toml", "src")),
+    "sphinx": ("documentation", 0, ("-W", "-b", "html", "docs", "host-local-diagnostics/sphinx-html")),
+}
+
+_REQUIRED_CONFIGURATION_PATHS: Final[dict[str, tuple[str, ...]]] = {
+    "eslint": ("eslint.config.js",),
+    "typescript-compiler": ("tsconfig.json",),
+    "typedoc": ("typedoc.json",),
+    "ruff": ("pyproject.toml",),
+    "mypy": ("pyproject.toml",),
+    "sphinx": ("docs/conf.py",),
 }
 
 
@@ -101,6 +128,12 @@ def _profile_for_language(
         "kotlin": "java",
         "scala": "java",
         "groovy": "java",
+        "javascript": "javascript",
+        "js": "javascript",
+        "typescript": "javascript",
+        "ts": "javascript",
+        "python": "python",
+        "py": "python",
     }.get(normalized)
     if family is None:
         raise LanguageToolingError(f"unknown language profile: {language_id}")
@@ -136,6 +169,34 @@ def _declared_tool(profile: LanguageCapabilityProfile, family: str, tool_id: str
     return tool_id in declared
 
 
+def _validated_configuration_paths(root: Path, tool_id: str) -> tuple[str, ...]:
+    required = _REQUIRED_CONFIGURATION_PATHS.get(tool_id, ())
+    for relative in required:
+        parts = relative.replace("\\", "/").split("/")
+        if not relative or any(part in {"", ".", ".."} for part in parts):
+            raise LanguageToolingError("configuration path is not canonical")
+        candidate = root.joinpath(*parts)
+        try:
+            canonical = candidate.resolve(strict=True)
+            root_canonical = root.resolve(strict=True)
+            canonical.relative_to(root_canonical)
+            state = candidate.stat(follow_symlinks=False)
+        except (OSError, ValueError) as exc:
+            raise LanguageToolingError("required configuration is unavailable") from exc
+        cursor = root
+        for part in parts:
+            cursor = cursor / part
+            try:
+                cursor_state = cursor.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise LanguageToolingError("required configuration is unavailable") from exc
+            if _is_link_or_reparse(cursor, cursor_state):
+                raise LanguageToolingError("required configuration must not be a link or reparse point")
+        if _is_link_or_reparse(candidate, state) or not stat.S_ISREG(state.st_mode):
+            raise LanguageToolingError("required configuration must be a regular file")
+    return required
+
+
 @dataclass(frozen=True, slots=True)
 class LanguageToolPlan:
     language_id: str
@@ -147,6 +208,7 @@ class LanguageToolPlan:
     working_directory: str
     output_roots: tuple[str, ...]
     profile_digest: str
+    required_configuration_paths: tuple[str, ...] = ()
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -159,6 +221,7 @@ class LanguageToolPlan:
             "working_directory": self.working_directory,
             "output_roots": list(self.output_roots),
             "profile_digest": self.profile_digest,
+            "required_configuration_paths": list(self.required_configuration_paths),
             "claims": dict(_FALSE_CLAIMS),
             "acceptance_pass": False,
             "pass_credit": False,
@@ -300,6 +363,7 @@ def probe_language_tool(
             executable=plan.argv[0] if plan.argv else "", argv=plan.argv,
             working_directory=plan.working_directory,
             output_roots=plan.output_roots, profile_digest=plan.profile_digest,
+            required_configuration_paths=plan.required_configuration_paths,
         )
     ) if plan.argv else None
     if argv_executable is None or argv_executable != executable:
@@ -678,12 +742,17 @@ def plan_language_tool(
         raise LanguageToolingError("tool action does not accept arguments")
     action_arguments = checked + defaults[len(checked) :]
     executable = _DECLARATION_EXECUTABLES[family][tool_id]
+    required_configuration_paths = _validated_configuration_paths(root_path, tool_id)
     artifact = profile.artifact_policy
     output_roots = tuple(
         str(artifact[key])
         for key in ("diagnosticRoot", "forensicRoot")
         if isinstance(artifact.get(key), str) and artifact[key]
     )
+    if tool_id == "typedoc":
+        output_roots = ("host-local-diagnostics/typedoc", "host-local-forensics")
+    elif tool_id == "sphinx":
+        output_roots = ("host-local-diagnostics/sphinx-html", "host-local-forensics")
     return LanguageToolPlan(
         language_id=family,
         capability_id=tool_id,
@@ -694,6 +763,7 @@ def plan_language_tool(
         working_directory=str(root_path),
         output_roots=output_roots,
         profile_digest=profile.profile_digest,
+        required_configuration_paths=required_configuration_paths,
     )
 
 

@@ -138,8 +138,8 @@
     },
     {
       "path": "docs/LANGUAGE_CAPABILITIES_UA.md",
-      "sha256": "701f98d8a10c3a60fcc9a284887dc0d3da25298d5460a0dfe30e46ceb54b4d9d",
-      "size": 6999
+      "sha256": "64279fe1ca88853e79021fa0ed7742b41c2b21901aaa3ab6dba5fd58e03b44fc",
+      "size": 9192
     },
     {
       "path": "docs/LINUX_MODEL_VALIDATION_UA.md",
@@ -388,8 +388,8 @@
     },
     {
       "path": "promin/__main__.py",
-      "sha256": "2b8f0d82e5d94cedc00c903c5a08270b864189d5ec1f67499b0d2b80af0a5e4a",
-      "size": 69732
+      "sha256": "7b788e6d684ae6cf917c7a882ff404969c322b1cf5c714cda6f8b108848269a5",
+      "size": 69951
     },
     {
       "path": "promin/artifact_policy.py",
@@ -538,8 +538,8 @@
     },
     {
       "path": "promin/language_tooling.py",
-      "sha256": "7f182a51b5ea83ba2b287034baf65f5968648a0550e22398e8a86474a14e7445",
-      "size": 29694
+      "sha256": "b2fb3b3ed746bf3c73d92feb633488c14da7402a28d81103699f81398ee70a2c",
+      "size": 33110
     },
     {
       "path": "promin/limits.py",
@@ -1203,8 +1203,8 @@
     },
     {
       "path": "tests/test_language_tooling.py",
-      "sha256": "93b006f7d6a2c18bab80995171ade91c8b0b0d9f8a864aabb5f43cb145be3719",
-      "size": 20237
+      "sha256": "8e7c26a8e938b04fc24b1fca4cbc68990548c28662c3cde146d921dcb73c914c",
+      "size": 28073
     },
     {
       "path": "tests/test_package_validation.py",
@@ -1223,8 +1223,8 @@
     },
     {
       "path": "tests/test_public_workflows_cli.py",
-      "sha256": "0a8302bd0f25437ab1336b3207825d0987a1e861dde0af5a9a58fb04552d8b92",
-      "size": 51620
+      "sha256": "504f17699ca95dde8bd76b91d88c0004290c25d29fd0bd1d197f926b7b6eabd7",
+      "size": 52830
     },
     {
       "path": "tests/test_retrieval_continuation_service.py",

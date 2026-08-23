@@ -1317,6 +1317,10 @@ def _run_tooling(args: argparse.Namespace, root: Path) -> dict[str, Any]:
             receipt = probe_language_tool(plan, timeout_seconds=args.timeout_seconds)
         else:
             if args.output_root is not None:
+                if args.tool in {"typedoc", "sphinx"}:
+                    raise ServiceError(
+                        f"--output-root cannot override the source-owned output root for {args.tool}"
+                    )
                 output_root = Path(args.output_root)
                 if output_root.is_absolute() or any(part in {"", ".", ".."} for part in output_root.parts):
                     raise ServiceError("--output-root must be a bounded relative path")

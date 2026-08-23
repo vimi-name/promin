@@ -298,6 +298,45 @@ def test_tooling_run_rejects_unsafe_output_root_and_preserves_initialized_teleme
     assert not (tmp_path / ".promin" / "state" / "observations").exists()
 
 
+@pytest.mark.parametrize(
+    ("language", "tool", "action", "configuration"),
+    (
+        ("javascript", "typedoc", "documentation", "typedoc.json"),
+        ("python", "sphinx", "documentation", "docs/conf.py"),
+    ),
+)
+def test_tooling_run_rejects_output_root_override_for_source_owned_documentation(
+    tmp_path, capsys, monkeypatch, language, tool, action, configuration
+):
+    configuration_path = tmp_path / configuration
+    configuration_path.parent.mkdir(parents=True, exist_ok=True)
+    configuration_path.write_text("{}", encoding="utf-8")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("run_language_tool must not be reached")
+
+    monkeypatch.setattr("promin.__main__.run_language_tool", must_not_run)
+    assert main(
+        [
+            "--root",
+            str(tmp_path),
+            "tooling",
+            "run",
+            "--language",
+            language,
+            "--tool",
+            tool,
+            "--action",
+            action,
+            "--output-root",
+            "caller-owned-output",
+        ]
+    ) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert "--output-root" in error["reason"]
+    assert tool in error["reason"]
+
+
 def test_tooling_has_no_raw_argv_option():
     with pytest.raises(SystemExit):
         _parser().parse_args(["tooling", "plan", "--language", "c-family",
