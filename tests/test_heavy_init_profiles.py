@@ -84,7 +84,7 @@ def test_minimal_one_click_is_deterministic_for_every_generic_language() -> None
         ["dotnet-compiler", "roslyn-analyzers"],
         ["eslint", "typescript-compiler"],
         ["javac", "checkstyle"],
-        ["python-compileall", "ruff"],
+        ["python-syntax-check", "ruff"],
     ]
     assert all(item["tools"]["mode"] == "profile-default" for item in selected)
     assert all(item["pass_credit"] is False for item in selected)
@@ -158,7 +158,7 @@ def test_expert_full_registered_overrides_have_source_precedence_and_stable_dige
     }
     assert python["tools"] == {
         "mode": "accept",
-        "items": ["python-compileall", "ruff"],
+        "items": ["python-syntax-check", "ruff"],
     }
     assert all(item["selection_source"] == "owner" for item in (java, python))
     assert all(item["authority_granted"] is False for item in (java, python))
@@ -354,7 +354,7 @@ def test_cli_expert_capabilities_bind_explicit_registered_selections_before_appl
     }
     assert selected_python["tools"] == {
         "mode": "accept",
-        "items": ["python-compileall", "ruff"],
+        "items": ["python-syntax-check", "ruff"],
     }
     assert selected_python["authority_granted"] is False
     assert selected_python["pass_credit"] is False

@@ -51,7 +51,7 @@ product/release claims `false`.
 - C#: `dotnet-compiler`, `roslyn-analyzers`, `docfx`;
 - JVM: `javac`, `checkstyle`, `spotbugs`, `javadoc`;
 - JavaScript/TypeScript: `eslint`, `typescript-compiler`, optional `typedoc`;
-- Python: `python-compileall`, `ruff`, `mypy`, `sphinx`.
+- Python: `python-syntax-check`, `ruff`, `mypy`, `sphinx`.
 
 Це capability declarations, а не інсталяційний скрипт. Profile не доводить
 наявність executable і не створює PASS. Реальний host observation належить

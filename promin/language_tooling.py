@@ -39,6 +39,18 @@ _MAX_OUTPUT_BYTES: Final = 64 * 1024 * 1024
 _MAX_BOUNDARY_FILES: Final = 4096
 _MAX_BOUNDARY_BYTES: Final = 64 * 1024 * 1024
 
+_PYTHON_SYNTAX_CHECK_PROGRAM: Final = (
+    "from pathlib import Path\n"
+    "import sys\n"
+    "root = Path(sys.argv[1])\n"
+    "if root.is_symlink() or not root.is_dir():\n"
+    "    raise SystemExit(2)\n"
+    "for path in sorted(root.rglob('*.py'), key=lambda item: item.as_posix()):\n"
+    "    if path.is_symlink() or not path.is_file():\n"
+    "        continue\n"
+    "    compile(path.read_bytes(), str(path), 'exec', dont_inherit=True)\n"
+)
+
 # Exact IDs from the bundled catalog mapped to source-owned executable basenames.
 _DECLARATION_EXECUTABLES: Final[dict[str, dict[str, str]]] = {
     "c-family": {
@@ -67,7 +79,7 @@ _DECLARATION_EXECUTABLES: Final[dict[str, dict[str, str]]] = {
         "typedoc": "typedoc",
     },
     "python": {
-        "python-compileall": "python",
+        "python-syntax-check": "python",
         "ruff": "ruff",
         "mypy": "mypy",
         "sphinx": "sphinx-build",
@@ -92,7 +104,7 @@ _ACTION_GRAMMARS: Final[dict[str, tuple[str, int, tuple[str, ...]]]] = {
     "eslint": ("static-analysis", 0, ("--config", "eslint.config.js", "src")),
     "typescript-compiler": ("static-analysis", 0, ("--noEmit", "--project", "tsconfig.json")),
     "typedoc": ("documentation", 0, ("--options", "typedoc.json", "--out", "host-local-diagnostics/typedoc")),
-    "python-compileall": ("static-analysis", 0, ("-B", "-m", "compileall", "-q", "src")),
+    "python-syntax-check": ("static-analysis", 0, ("-B", "-c", _PYTHON_SYNTAX_CHECK_PROGRAM, "src")),
     "ruff": ("static-analysis", 0, ("check", "--config", "pyproject.toml", "src")),
     "mypy": ("static-analysis", 0, ("--config-file", "pyproject.toml", "src")),
     "sphinx": ("documentation", 0, ("-W", "-b", "html", "docs", "host-local-diagnostics/sphinx-html")),

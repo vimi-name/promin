@@ -182,7 +182,7 @@ EXPECTED_OSS_TOOLS = {
         ("spotbugs", "javadoc"),
     ),
     "python-semantic": (
-        ("python-compileall", "ruff"),
+        ("python-syntax-check", "ruff"),
         ("mypy", "sphinx"),
     ),
 }

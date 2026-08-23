@@ -108,7 +108,7 @@ analysis-маршрутів, а не executable ID і не запускаєть�
 | JavaScript | `eslint` | `eslint` | `eslint --config eslint.config.js src` | `eslint.config.js` |
 | TypeScript | `typescript-compiler` | `tsc` | `tsc --noEmit --project tsconfig.json` | `tsconfig.json` |
 | JavaScript | `typedoc` | `typedoc` | `typedoc --options typedoc.json --out host-local-diagnostics/typedoc` | `typedoc.json` |
-| Python | `python-compileall` | `python` | `python -B -m compileall -q src` | none |
+| Python | `python-syntax-check` | `python` | `python -B -c <source-owned-parser> src` | none |
 | Python | `ruff` | `ruff` | `ruff check --config pyproject.toml src` | `pyproject.toml` |
 | Python | `mypy` | `mypy` | `mypy --config-file pyproject.toml src` | `pyproject.toml` |
 | Python | `sphinx` | `sphinx-build` | `sphinx-build -W -b html docs host-local-diagnostics/sphinx-html` | `docs/conf.py` |
@@ -116,8 +116,9 @@ analysis-маршрутів, а не executable ID і не запускаєть�
 Configuration prerequisite перевіряється лише як точний project-relative шлях до
 наявного regular non-link файла. Planner не читає і не перевіряє семантику
 конфігурації, не probe-ить і не встановлює executable та не виконує argv. Для
-`python-compileall` prerequisite відсутній; `-B` є обов’язковим, щоб маршрут не
-створював bytecode як заявлений safe route. `typedoc` і `sphinx` мають лише
+`python-syntax-check` є source-owned parser/compiler перевіркою без виконання
+коду; `-B` є обов’язковим, а маршрут не створює bytecode у дереві проєкту.
+`typedoc` і `sphinx` мають лише
 заздалегідь визначені diagnostic output roots; `tooling run --output-root` для
 них відхиляється, щоб caller не міг розійтися з source-owned argv та
 `LanguageToolPlan.output_roots`. Для інших інструментів bounded relative

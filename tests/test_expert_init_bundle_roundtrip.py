@@ -99,7 +99,7 @@ def _profile_selections() -> dict[str, object]:
             },
             "tools": {
                 "mode": "custom",
-                "items": ["python-compileall", "ruff", "mypy"],
+                "items": ["python-syntax-check", "ruff", "mypy"],
             },
         },
         "weak-host-fallback": {
@@ -249,7 +249,7 @@ def test_expert_init_uses_catalog_tools_for_typescript_and_all_jvm_languages(
         "javac",
         "checkstyle",
         "spotbugs",
-        "python-compileall",
+        "python-syntax-check",
         "ruff",
         "mypy",
     } <= set(composition["selected_tools"])

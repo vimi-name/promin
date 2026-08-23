@@ -11,7 +11,7 @@
   },
   "verification": {
     "cheapRequired": ["syntax-and-import-structure"],
-    "recommended": ["python-compileall", "ruff"],
+    "recommended": ["python-syntax-check", "ruff"],
     "optional": ["mypy", "sphinx"]
   },
   "artifactPolicy": {

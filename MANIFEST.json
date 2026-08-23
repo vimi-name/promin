@@ -138,8 +138,8 @@
     },
     {
       "path": "docs/LANGUAGE_CAPABILITIES_UA.md",
-      "sha256": "64279fe1ca88853e79021fa0ed7742b41c2b21901aaa3ab6dba5fd58e03b44fc",
-      "size": 9192
+      "sha256": "61c9f29f8384673a899ff51e6b251f189a7816fab180490a29ac145126b1b169",
+      "size": 9248
     },
     {
       "path": "docs/LINUX_MODEL_VALIDATION_UA.md",
@@ -178,8 +178,8 @@
     },
     {
       "path": "docs/PROFILE_CATALOG_UA.md",
-      "sha256": "be8b46ba8eed13aa60e2d02a10d2b7e798b109599a0a9caf0ded85b3c4707b47",
-      "size": 4329
+      "sha256": "ee93f7c3425e27e9c4cdda841dc6d8dad49a37d49ce1aa7f03d4d1add4842f3f",
+      "size": 4331
     },
     {
       "path": "docs/PROVIDER_IDENTITIES_UA.md",
@@ -308,8 +308,8 @@
     },
     {
       "path": "language_profiles/python-semantic.json",
-      "sha256": "1d4c2dd9757cdce545980414a3fa4aaa9a6e299cde19e42b41d2883b4002be7c",
-      "size": 4762
+      "sha256": "5786932898921d1659b7408b1b1100257e0e21c28531550ea39f556f957e6ce4",
+      "size": 4764
     },
     {
       "path": "language_profiles/weak-host-fallback.json",
@@ -538,8 +538,8 @@
     },
     {
       "path": "promin/language_tooling.py",
-      "sha256": "b2fb3b3ed746bf3c73d92feb633488c14da7402a28d81103699f81398ee70a2c",
-      "size": 33110
+      "sha256": "c51fae9d03646228abc190605b0435a416aefa2096565c464534c4789ffc8433",
+      "size": 33575
     },
     {
       "path": "promin/limits.py",
@@ -793,8 +793,8 @@
     },
     {
       "path": "tests/test_alpha4_bundled_language_catalog.py",
-      "sha256": "e457f36872766f55e8b06e033e438236689015b38f6d06598bfaa6298fb444ac",
-      "size": 14903
+      "sha256": "675ff17ae26b1868da22b2a6193504d7bb8d632bfe9ab63194946f50efc0bfc5",
+      "size": 14905
     },
     {
       "path": "tests/test_alpha4_clean_reinitialization_operation.py",
@@ -993,8 +993,8 @@
     },
     {
       "path": "tests/test_expert_init_bundle_roundtrip.py",
-      "sha256": "be5930df6d62f071d10f6c42e1f10e5f8c5b3bcb29e4aad1eeeec6245e188a3d",
-      "size": 13729
+      "sha256": "e48d347fa493132ff1fe75a391f3a728f26d957c3be63918d63229b4d8968727",
+      "size": 13733
     },
     {
       "path": "tests/test_heavy_artifact_minimality.py",
@@ -1053,8 +1053,8 @@
     },
     {
       "path": "tests/test_heavy_init_profiles.py",
-      "sha256": "bf11e0621b088502c324825be53f3b85b63b1553da4a59ce888a27cf2691a368",
-      "size": 18809
+      "sha256": "8a13178868e359dd97bb64ce9ad9a959dfe92fc98a4a26d6bf9d49b9dbb56d39",
+      "size": 18815
     },
     {
       "path": "tests/test_heavy_language_analysis.py",
@@ -1203,8 +1203,8 @@
     },
     {
       "path": "tests/test_language_tooling.py",
-      "sha256": "8e7c26a8e938b04fc24b1fca4cbc68990548c28662c3cde146d921dcb73c914c",
-      "size": 28073
+      "sha256": "6ec22388113a592b81c25fc918ba41dcc9a86a8b88692f6b12b4479ac96e2388",
+      "size": 32543
     },
     {
       "path": "tests/test_package_validation.py",

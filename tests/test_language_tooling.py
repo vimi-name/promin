@@ -17,6 +17,7 @@ from promin.language_tooling import (
     probe_language_tool,
     run_language_tool,
     _host_path_guard_available,
+    _PYTHON_SYNTAX_CHECK_PROGRAM,
 )
 
 
@@ -262,7 +263,7 @@ def test_plan_rejects_invalid_root_non_tuple_and_excess_arguments(tmp_path: Path
         ("javascript", "eslint", "static-analysis", ("eslint", "--config", "eslint.config.js", "src"), "eslint.config.js", ("host-local-diagnostics", "host-local-forensics")),
         ("typescript", "typescript-compiler", "static-analysis", ("tsc", "--noEmit", "--project", "tsconfig.json"), "tsconfig.json", ("host-local-diagnostics", "host-local-forensics")),
         ("js", "typedoc", "documentation", ("typedoc", "--options", "typedoc.json", "--out", "host-local-diagnostics/typedoc"), "typedoc.json", ("host-local-diagnostics/typedoc", "host-local-forensics")),
-        ("python", "python-compileall", "static-analysis", ("python", "-B", "-m", "compileall", "-q", "src"), None, ("host-local-diagnostics", "host-local-forensics")),
+        ("python", "python-syntax-check", "static-analysis", ("python", "-B", "-c", _PYTHON_SYNTAX_CHECK_PROGRAM, "src"), None, ("host-local-diagnostics", "host-local-forensics")),
         ("py", "ruff", "static-analysis", ("ruff", "check", "--config", "pyproject.toml", "src"), "pyproject.toml", ("host-local-diagnostics", "host-local-forensics")),
         ("python", "mypy", "static-analysis", ("mypy", "--config-file", "pyproject.toml", "src"), "pyproject.toml", ("host-local-diagnostics", "host-local-forensics")),
         ("python", "sphinx", "documentation", ("sphinx-build", "-W", "-b", "html", "docs", "host-local-diagnostics/sphinx-html"), "docs/conf.py", ("host-local-diagnostics/sphinx-html", "host-local-forensics")),
@@ -328,19 +329,130 @@ def test_configuration_bound_tools_reject_missing_directory_and_link(
         plan_language_tool(catalog, language_id=language_id, tool_id=tool_id, action_id=action_id, root=tmp_path)
 
 
-def test_python_compileall_has_no_configuration_and_rejects_second_source_argument(tmp_path: Path) -> None:
+def test_python_syntax_check_has_no_configuration_and_rejects_second_source_argument(tmp_path: Path) -> None:
     plan = plan_language_tool(
-        load_catalog(), language_id="python", tool_id="python-compileall",
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
         action_id="static-analysis", root=tmp_path,
     )
-    assert plan.argv == ("python", "-B", "-m", "compileall", "-q", "src")
+    assert plan.argv == ("python", "-B", "-c", _PYTHON_SYNTAX_CHECK_PROGRAM, "src")
     assert plan.required_configuration_paths == ()
     with pytest.raises(LanguageToolingError, match="argument count"):
         plan_language_tool(
-            load_catalog(), language_id="python", tool_id="python-compileall",
+            load_catalog(), language_id="python", tool_id="python-syntax-check",
             action_id="static-analysis", root=tmp_path,
             arguments=("src", "other"),
         )
+
+
+def test_python_syntax_check_probe_parses_without_project_bytecode(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "probe_target.py").write_text("value = 42\n", encoding="utf-8")
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
+        action_id="static-analysis", root=tmp_path,
+    )
+    executable = Path(sys.executable)
+    receipt = probe_language_tool(
+        replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:])),
+        timeout_seconds=5,
+    )
+    assert receipt.status == "AVAILABLE"
+    assert receipt.invoked is True
+    assert receipt.argv == (str(executable), "-B", "-c", _PYTHON_SYNTAX_CHECK_PROGRAM, "src")
+    assert receipt.output_manifest == ()
+    assert not tuple(tmp_path.rglob("__pycache__"))
+    assert not tuple(tmp_path.rglob("*.pyc"))
+    assert all(receipt.claims[key] is False for key in (
+        "acceptance_pass", "pass_credit", "product_acceptance_pass", "release_approved",
+    ))
+
+
+def test_python_syntax_check_probe_rejects_invalid_syntax_without_claims(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "invalid.py").write_text("def broken(:\n", encoding="utf-8")
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
+        action_id="static-analysis", root=tmp_path,
+    )
+    executable = Path(sys.executable)
+    receipt = probe_language_tool(
+        replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:])),
+        timeout_seconds=5,
+    )
+    assert receipt.status == "FAILED"
+    assert receipt.invoked is True
+    assert all(receipt.claims[key] is False for key in (
+        "acceptance_pass", "pass_credit", "product_acceptance_pass", "release_approved",
+    ))
+    assert not tuple(tmp_path.rglob("__pycache__"))
+    assert not tuple(tmp_path.rglob("*.pyc"))
+
+
+def test_python_syntax_check_probe_rejects_missing_src_without_claims(tmp_path: Path) -> None:
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
+        action_id="static-analysis", root=tmp_path,
+    )
+    executable = Path(sys.executable)
+    receipt = probe_language_tool(
+        replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:])),
+        timeout_seconds=5,
+    )
+    assert receipt.status == "FAILED"
+    assert receipt.invoked is True
+    assert all(receipt.claims[key] is False for key in (
+        "acceptance_pass", "pass_credit", "product_acceptance_pass", "release_approved",
+    ))
+
+
+def test_python_syntax_check_probe_skips_symlinked_python_input(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    target = tmp_path / "outside.py"
+    target.write_text("def broken(:\n", encoding="utf-8")
+    linked = src / "linked.py"
+    try:
+        linked.symlink_to(target)
+    except OSError:
+        pytest.skip("symbolic links unavailable")
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
+        action_id="static-analysis", root=tmp_path,
+    )
+    executable = Path(sys.executable)
+    receipt = probe_language_tool(
+        replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:])),
+        timeout_seconds=5,
+    )
+    assert receipt.status == "AVAILABLE"
+    assert not tuple(tmp_path.rglob("__pycache__"))
+    assert not tuple(tmp_path.rglob("*.pyc"))
+
+
+def test_python_syntax_check_probe_compiles_without_executing_source_body(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    sentinel = tmp_path / "executed.sentinel"
+    (src / "side_effect.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    plan = plan_language_tool(
+        load_catalog(), language_id="python", tool_id="python-syntax-check",
+        action_id="static-analysis", root=tmp_path,
+    )
+    executable = Path(sys.executable)
+    receipt = probe_language_tool(
+        replace(plan, executable=str(executable), argv=(str(executable), *plan.argv[1:])),
+        timeout_seconds=5,
+    )
+    assert receipt.status == "AVAILABLE"
+    assert not sentinel.exists()
+    assert not tuple(tmp_path.rglob("__pycache__"))
+    assert not tuple(tmp_path.rglob("*.pyc"))
 
 
 @pytest.mark.parametrize(
@@ -349,7 +461,7 @@ def test_python_compileall_has_no_configuration_and_rejects_second_source_argume
         ("javascript", "eslint", "static-analysis", "eslint.config.js"),
         ("typescript", "typescript-compiler", "static-analysis", "tsconfig.json"),
         ("javascript", "typedoc", "documentation", "typedoc.json"),
-        ("python", "python-compileall", "static-analysis", None),
+        ("python", "python-syntax-check", "static-analysis", None),
         ("python", "ruff", "static-analysis", "pyproject.toml"),
         ("python", "mypy", "static-analysis", "pyproject.toml"),
         ("python", "sphinx", "documentation", "docs/conf.py"),
@@ -378,7 +490,7 @@ def test_public_guide_closes_js_typescript_python_tooling_boundary() -> None:
         "| JavaScript | `eslint` | `eslint` | `eslint --config eslint.config.js src` | `eslint.config.js` |",
         "| TypeScript | `typescript-compiler` | `tsc` | `tsc --noEmit --project tsconfig.json` | `tsconfig.json` |",
         "| JavaScript | `typedoc` | `typedoc` | `typedoc --options typedoc.json --out host-local-diagnostics/typedoc` | `typedoc.json` |",
-        "| Python | `python-compileall` | `python` | `python -B -m compileall -q src` | none |",
+        "| Python | `python-syntax-check` | `python` | `python -B -c <source-owned-parser> src` | none |",
         "| Python | `ruff` | `ruff` | `ruff check --config pyproject.toml src` | `pyproject.toml` |",
         "| Python | `mypy` | `mypy` | `mypy --config-file pyproject.toml src` | `pyproject.toml` |",
         "| Python | `sphinx` | `sphinx-build` | `sphinx-build -W -b html docs host-local-diagnostics/sphinx-html` | `docs/conf.py` |",
