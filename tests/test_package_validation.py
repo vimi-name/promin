@@ -319,7 +319,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 275)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 281)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -387,8 +387,13 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_alpha_skills_checklist.py",
             "tests/test_expert_init_bundle_roundtrip.py",
             "tests/test_initial_project_work.py",
+            "tests/test_init_layer_configured_routes.py",
             "tests/test_public_workflows_cli.py",
             "tests/test_revalidation_workflow.py",
+            "tests/test_verified_commit_phase.py",
+            "tests/test_verified_commit_phase_refresh_budget.py",
+            "tests/test_verified_commit_phase_service.py",
+            "tests/test_verified_commit_phase_tamper.py",
             "tests/test_verified_query_phase.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({

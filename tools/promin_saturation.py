@@ -3084,63 +3084,88 @@ def _ensure_physical_relation_corpus(
         relation_count,
         relations_per_atomic_batch_max=relations_per_atomic_batch_max,
     )
-    head = store.head()["batch_digest"]
-    for task_index in range(manifest["task_count"]):
-        task = _bind_saturation_gate_definition(
-            runtime,
-            _physical_relation_task(
-                task_index,
-                activation_digest=activation_digest,
-                candidate_digest=candidate_digest,
-                created_at=issued_at,
-            ),
-            head_digest=head,
-            index=_SEARCH_FIXTURE_TASK_COUNT + task_index,
+    # The physical relation corpus is the only repeated saturation mutation
+    # lane.  Bind one verified commit phase to its exact number of atomic
+    # batches so every command still traverses the normal service validation
+    # and commit result path while the phase enforces the finite bound.
+    physical_commit_count = sum(
+        (
+            min(
+                _PHYSICAL_RELATIONS_PER_TASK,
+                relation_count - task_index * _PHYSICAL_RELATIONS_PER_TASK,
+            )
+            + relations_per_atomic_batch_max
+            - 1
         )
-        start = task_index * _PHYSICAL_RELATIONS_PER_TASK
-        stop = min(start + _PHYSICAL_RELATIONS_PER_TASK, relation_count)
-        relations = [
-            _physical_relation(
-                relation_index,
-                source_id=task["task_id"],
-                target_id=artifact_ids[relation_index % len(artifact_ids)],
-                activation_digest=activation_digest,
-                created_at=issued_at,
+        // relations_per_atomic_batch_max
+        for task_index in range(manifest["task_count"])
+    )
+    commit_phase = runtime.begin_verified_commit_phase(
+        max_operations=physical_commit_count
+    )
+    head = store.head()["batch_digest"]
+    try:
+        for task_index in range(manifest["task_count"]):
+            task = _bind_saturation_gate_definition(
+                runtime,
+                _physical_relation_task(
+                    task_index,
+                    activation_digest=activation_digest,
+                    candidate_digest=candidate_digest,
+                    created_at=issued_at,
+                ),
+                head_digest=head,
+                index=_SEARCH_FIXTURE_TASK_COUNT + task_index,
             )
-            for relation_index in range(start, stop)
-        ]
-        for chunk_index, relation_offset in enumerate(
-            range(0, len(relations), relations_per_atomic_batch_max)
-        ):
-            relation_chunk = relations[
-                relation_offset : relation_offset + relations_per_atomic_batch_max
+            start = task_index * _PHYSICAL_RELATIONS_PER_TASK
+            stop = min(start + _PHYSICAL_RELATIONS_PER_TASK, relation_count)
+            relations = [
+                _physical_relation(
+                    relation_index,
+                    source_id=task["task_id"],
+                    target_id=artifact_ids[relation_index % len(artifact_ids)],
+                    activation_digest=activation_digest,
+                    created_at=issued_at,
+                )
+                for relation_index in range(start, stop)
             ]
-            command = _command(
-                command_id=(
-                    "command:physical-relation-saturation:"
-                    f"{task_index:06d}:{chunk_index:04d}"
-                ),
-                command_kind="task.record",
-                subject_id=planner["subject_id"],
-                activation_digest=activation_digest,
-                requested_scope=_task_requested_scope(
-                    [dict(item) for item in planner_scope if isinstance(item, Mapping)],
-                    task["task_id"],
-                ),
-                expected_head_digest=head,
-                issued_at=issued_at,
-                payload=task,
-                authorization={
-                    "kind": "grant",
-                    "grant_id": planner["grant_id"],
-                    "grant_claim_digest": planner["claim_digest"],
-                },
-            )
-            head = _record_commit_observation(
-                commit_observations,
-                runtime.commit(command, auxiliary_relations=relation_chunk),
-                phase="physical-relation-corpus",
-            )
+            for chunk_index, relation_offset in enumerate(
+                range(0, len(relations), relations_per_atomic_batch_max)
+            ):
+                relation_chunk = relations[
+                    relation_offset : relation_offset + relations_per_atomic_batch_max
+                ]
+                command = _command(
+                    command_id=(
+                        "command:physical-relation-saturation:"
+                        f"{task_index:06d}:{chunk_index:04d}"
+                    ),
+                    command_kind="task.record",
+                    subject_id=planner["subject_id"],
+                    activation_digest=activation_digest,
+                    requested_scope=_task_requested_scope(
+                        [dict(item) for item in planner_scope if isinstance(item, Mapping)],
+                        task["task_id"],
+                    ),
+                    expected_head_digest=head,
+                    issued_at=issued_at,
+                    payload=task,
+                    authorization={
+                        "kind": "grant",
+                        "grant_id": planner["grant_id"],
+                        "grant_claim_digest": planner["claim_digest"],
+                    },
+                )
+                head = _record_commit_observation(
+                    commit_observations,
+                    commit_phase.commit(
+                        command,
+                        auxiliary_relations=relation_chunk,
+                    ),
+                    phase="physical-relation-corpus",
+                )
+    finally:
+        commit_phase.close()
     result = _inspect_physical_relation_corpus(
         runtime,
         activation_digest=activation_digest,

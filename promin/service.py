@@ -46,6 +46,7 @@ from .events import (
     EventStoreError,
     EventStorePolicy,
     PreparedCommit,
+    VerifiedCommitPhase as EventStoreVerifiedCommitPhase,
     VerifiedQueryLease,
     state_binding_leaf_id,
     state_binding_value_digest,
@@ -256,6 +257,56 @@ class ImmutableQueryPhase:
         self._service._close_immutable_query_phase(self)
 
     def __enter__(self) -> "ImmutableQueryPhase":
+        self._ensure_owner(self._service)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+class VerifiedCommitPhase:
+    """Opaque finite commit phase owned by exactly one ``ProminService``."""
+
+    def __init__(
+        self,
+        service: "ProminService",
+        phase: EventStoreVerifiedCommitPhase,
+        context: ActivationContext,
+    ) -> None:
+        self._service = service
+        self._event_phase = phase
+        self._store = phase._store
+        self._context_value = context
+        self._closed = False
+
+    def _ensure_owner(self, service: "ProminService") -> None:
+        if self._closed:
+            raise ServiceError("verified commit phase is closed")
+        if self._service is not service:
+            raise ServiceError("verified commit phase belongs to another service")
+
+    def commit(
+        self,
+        command: dict[str, Any],
+        *,
+        auxiliary_relations: Iterable[Mapping[str, Any]] = (),
+        workcard: Mapping[str, Any] | None = None,
+        evidence_payload: bytes | None = None,
+    ) -> dict[str, Any]:
+        """Commit through the service's complete validation/evidence route."""
+
+        return self._service._commit_verified_commit_phase(
+            self,
+            command,
+            auxiliary_relations=auxiliary_relations,
+            workcard=workcard,
+            evidence_payload=evidence_payload,
+        )
+
+    def close(self) -> None:
+        self._service._close_verified_commit_phase(self)
+
+    def __enter__(self) -> "VerifiedCommitPhase":
         self._ensure_owner(self._service)
         return self
 
@@ -2114,6 +2165,7 @@ class ProminService:
         self._verified_mutation_fingerprint: str | None = None
         self._verified_mutation_bindings: tuple[tuple[str, Path, str], ...] | None = None
         self._active_immutable_query_phase: ImmutableQueryPhase | None = None
+        self._active_verified_commit_phase: VerifiedCommitPhase | None = None
 
     def _clear_query_runtime(self) -> None:
         with self._query_runtime_lock:
@@ -2121,6 +2173,11 @@ class ProminService:
             if active_phase is not None and not active_phase._closed:
                 raise ServiceError(
                     "cannot clear service resources while immutable query phase is active"
+                )
+            commit_phase = self._active_verified_commit_phase
+            if commit_phase is not None and not commit_phase._closed:
+                raise ServiceError(
+                    "cannot clear service resources while verified commit phase is active"
                 )
             self._query_runtime_key = None
             self._query_runtime_value = None
@@ -2149,6 +2206,12 @@ class ProminService:
                     "cannot enter EventStore "
                     f"{operation} while immutable query phase is active"
                 )
+            commit_phase = self._active_verified_commit_phase
+            if commit_phase is not None and not commit_phase._closed:
+                raise ImmutableQueryPhaseActiveError(
+                    "cannot enter EventStore "
+                    f"{operation} while verified commit phase is active"
+                )
 
     def close(self) -> None:
         """Release cached EventStore resources without changing durable state."""
@@ -2157,6 +2220,9 @@ class ProminService:
             active_phase = self._active_immutable_query_phase
             if active_phase is not None and not active_phase._closed:
                 raise ServiceError("cannot close while immutable query phase is active")
+            commit_phase = self._active_verified_commit_phase
+            if commit_phase is not None and not commit_phase._closed:
+                raise ServiceError("cannot close while verified commit phase is active")
             self._clear_query_runtime()
 
     def __enter__(self) -> "ProminService":
@@ -2685,6 +2751,67 @@ class ProminService:
                 previous_store.close()
             return store
 
+    def begin_verified_commit_phase(
+        self, max_operations: int = 1
+    ) -> VerifiedCommitPhase:
+        """Open one bounded, authority-verified service commit phase.
+
+        Admission uses the normal mutation EventStore source.  Individual
+        phase commits still traverse the complete Promin validation, runtime,
+        projection, checkpoint, and evidence route; only EventStore admission
+        is reused across the bounded phase.
+        """
+
+        with self._query_runtime_lock:
+            self._reject_active_immutable_query_phase("commit phase")
+            context = self._context()
+            bundle = _bundle(context)
+            store = self._mutation_event_store(context, bundle)
+            try:
+                event_phase = store.begin_verified_commit_phase(max_operations)
+            except EventStoreError as exc:
+                raise ServiceError(str(exc)) from exc
+            phase = VerifiedCommitPhase(self, event_phase, context)
+            self._active_verified_commit_phase = phase
+            return phase
+
+    def _commit_verified_commit_phase(
+        self,
+        phase: VerifiedCommitPhase,
+        command: dict[str, Any],
+        *,
+        auxiliary_relations: Iterable[Mapping[str, Any]] = (),
+        workcard: Mapping[str, Any] | None = None,
+        evidence_payload: bytes | None = None,
+    ) -> dict[str, Any]:
+        with self._query_runtime_lock:
+            phase._ensure_owner(self)
+            try:
+                return self._commit_impl(
+                    command,
+                    auxiliary_relations=auxiliary_relations,
+                    workcard=workcard,
+                    evidence_payload=evidence_payload,
+                    verified_phase=phase,
+                )
+            except BaseException:
+                # A failed EventStore phase operation is poisoned by the store;
+                # do not retain an isolated prepared runtime for a later route.
+                self._prepared_runtime = None
+                raise
+
+    def _close_verified_commit_phase(self, phase: VerifiedCommitPhase) -> None:
+        with self._query_runtime_lock:
+            phase._ensure_owner(self)
+            try:
+                phase._event_phase.close()
+            except EventStoreError as exc:
+                raise ServiceError(str(exc)) from exc
+            finally:
+                phase._closed = True
+                if self._active_verified_commit_phase is phase:
+                    self._active_verified_commit_phase = None
+
     def begin_immutable_query_phase(
         self, max_operations: int = 1
     ) -> ImmutableQueryPhase:
@@ -2696,6 +2823,11 @@ class ProminService:
     ) -> ImmutableQueryPhase:
         """Open one bounded, authority-verified query phase."""
 
+        commit_phase = self._active_verified_commit_phase
+        if commit_phase is not None and not commit_phase._closed:
+            raise ImmutableQueryPhaseActiveError(
+                "cannot enter EventStore query phase while verified commit phase is active"
+            )
         if (
             not isinstance(max_operations, int)
             or isinstance(max_operations, bool)
@@ -3270,8 +3402,28 @@ class ProminService:
         workcard: Mapping[str, Any] | None = None,
         evidence_payload: bytes | None = None,
     ) -> dict[str, Any]:
+        return self._commit_impl(
+            command,
+            auxiliary_relations=auxiliary_relations,
+            workcard=workcard,
+            evidence_payload=evidence_payload,
+        )
+
+    def _commit_impl(
+        self,
+        command: dict[str, Any],
+        *,
+        auxiliary_relations: Iterable[Mapping[str, Any]] = (),
+        workcard: Mapping[str, Any] | None = None,
+        evidence_payload: bytes | None = None,
+        verified_phase: VerifiedCommitPhase | None = None,
+    ) -> dict[str, Any]:
         operation_started = time.perf_counter()
-        context = self._context()
+        context = (
+            verified_phase._context_value
+            if verified_phase is not None
+            else self._context()
+        )
         bundle = _bundle(context)
         activation = _activation(context)
         if command.get("activation_digest") != activation["activation_digest"]:
@@ -3283,7 +3435,16 @@ class ProminService:
             definition="CommandRequest",
             context=_validation_context(context),
         )
-        store = self._mutation_event_store(context, bundle)
+        if verified_phase is None:
+            # Keep the ordinary public route fresh: it must source the current
+            # mutation store for every command rather than inheriting phase
+            # admission semantics.
+            store = self._mutation_event_store(context, bundle)
+        else:
+            verified_phase._ensure_owner(self)
+            store = self._mutation_store
+            if store is None or store is not verified_phase._store:
+                raise ServiceError("verified commit phase store is not service-owned")
         resolved_workcard = self._resolve_mutation_workcard(
             context,
             command,
@@ -3314,11 +3475,18 @@ class ProminService:
             )
         if resolved_workcard is not None:
             _persist_workcard(self.root, resolved_workcard)
-        result = store.commit(
-            command,
-            auxiliary_relations=relations,
-            created_at=command["issued_at"],
-        )
+        if verified_phase is None:
+            result = store.commit(
+                command,
+                auxiliary_relations=relations,
+                created_at=command["issued_at"],
+            )
+        else:
+            result = verified_phase._event_phase.commit(
+                command,
+                auxiliary_relations=relations,
+                created_at=command["issued_at"],
+            )
         prepared = self._prepared_runtime
         committed_envelope = _committed_envelope(
             store,

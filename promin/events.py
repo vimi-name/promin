@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import contextlib
 import datetime as _datetime
 import errno
 import fnmatch
@@ -1984,6 +1985,132 @@ class VerifiedQueryLease:
 _VERIFIED_QUERY_PHASE_TOKEN = object()
 
 
+class VerifiedCommitPhase:
+    """Finite commit phase admitted by one full authority verification.
+
+    The phase deliberately does not retain the writer lock between operations:
+    service post-commit work may run between calls.  Each operation takes the
+    normal lock and checks the bounded durable control-file binding before
+    entering the shared commit mechanics.  A failed operation poisons the
+    phase and requires an explicit close before another phase can be admitted.
+    """
+
+    def __init__(self, store: "EventStore", max_operations: int) -> None:
+        if (
+            not isinstance(max_operations, int)
+            or isinstance(max_operations, bool)
+            or max_operations <= 0
+        ):
+            raise EventStoreError("max_operations must be a positive integer")
+        self._store = store
+        self._remaining = max_operations
+        self._closed = False
+        self._poison: BaseException | None = None
+        self._binding: tuple[Any, ...]
+        with _WriterLock(store.lock_path, store.lock_timeout):
+            if store._verified_commit_phase_active:
+                raise EventStoreError("verified commit phase is already active")
+            store._refresh_from_disk_locked()
+            self._binding = store._verified_commit_binding_locked()
+            store._verified_commit_phase_active = True
+
+    @property
+    def remaining_operations(self) -> int:
+        return self._remaining
+
+    @property
+    def head(self) -> dict[str, Any]:
+        if self._closed:
+            raise EventStoreError("verified commit phase is closed")
+        return self._store.head()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified commit phase is closed")
+        if self._poison is not None:
+            raise EventStoreError("verified commit phase is poisoned") from self._poison
+        if self._remaining <= 0:
+            raise EventStoreError("verified commit phase operation budget is exhausted")
+
+    def commit(
+        self,
+        command: Mapping[str, Any],
+        *,
+        auxiliary_relations: Iterable[Mapping[str, Any]] = (),
+        created_at: str | None = None,
+        crash_hook: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        store = self._store
+        try:
+            with _WriterLock(store.lock_path, store.lock_timeout):
+                if store._verified_commit_binding_locked() != self._binding:
+                    raise EventStoreError("verified commit phase binding changed")
+                if store._verified_commit_phase_in_progress:
+                    raise EventStoreError("verified commit phase operation is already active")
+                store._verified_commit_phase_token = self
+                store._verified_commit_phase_in_progress = True
+                try:
+                    result = store.commit(
+                        command,
+                        auxiliary_relations=auxiliary_relations,
+                        created_at=created_at,
+                        crash_hook=crash_hook,
+                    )
+                finally:
+                    store._verified_commit_phase_in_progress = False
+                    store._verified_commit_phase_token = None
+                self._binding = store._verified_commit_binding_locked()
+                self._remaining -= 1
+                return result
+        except BaseException as exc:
+            self._poison = exc
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified commit phase is closed")
+        error: BaseException | None = self._poison
+        mismatch = False
+        try:
+            with _WriterLock(self._store.lock_path, self._store.lock_timeout):
+                try:
+                    if self._store._verified_commit_binding_locked() != self._binding:
+                        mismatch = True
+                except BaseException as exc:
+                    mismatch = True
+                    if error is None:
+                        error = exc
+                try:
+                    self._store._strict_refresh_from_disk_locked()
+                    if self._store._verified_commit_binding_locked() != self._binding:
+                        mismatch = True
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+        except BaseException as exc:
+            if error is None:
+                error = exc
+        finally:
+            self._closed = True
+            self._store._verified_commit_phase_active = False
+            self._store._verified_commit_phase_token = None
+            self._store._verified_commit_phase_in_progress = False
+        if error is not None:
+            if isinstance(error, EventStoreError):
+                raise error
+            raise EventStoreError("verified commit phase close failed") from error
+        if mismatch:
+            raise EventStoreError("verified commit phase binding changed")
+
+    def __enter__(self) -> "VerifiedCommitPhase":
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
 class EventStore:
     """Single-writer, crash-recoverable authoritative event journal."""
 
@@ -2109,6 +2236,9 @@ class EventStore:
         self._derived_state_issues: dict[str, str | None] = {}
         self._derived_rows_issues: dict[str, str | None] = {}
         self._last_commit_write_metrics = self._empty_commit_write_metrics()
+        self._verified_commit_phase_active = False
+        self._verified_commit_phase_token: VerifiedCommitPhase | None = None
+        self._verified_commit_phase_in_progress = False
         os.makedirs(_native_os_path(self.root), exist_ok=True)
         os.makedirs(_native_os_path(self.journal), exist_ok=True)
         os.makedirs(_native_os_path(self.pending), exist_ok=True)
@@ -2129,6 +2259,76 @@ class EventStore:
         """Open one finite authority-verified read phase under the writer lock."""
 
         return VerifiedQueryLease(self, max_operations)
+
+    def begin_verified_commit_phase(self, max_operations: int) -> VerifiedCommitPhase:
+        """Open a finite authority-verified commit phase."""
+
+        return VerifiedCommitPhase(self, max_operations)
+
+    def _verified_commit_binding_locked(self) -> tuple[Any, ...]:
+        """Read the bounded durable binding used between phase operations."""
+
+        try:
+            disk_head = self._read_disk_head()
+            tail_digest = None
+            if disk_head["sequence"] > 0:
+                tail_path = self._journal_path_for_sequence(disk_head["sequence"])
+                tail_payload = _read_bytes(tail_path)
+                if len(tail_payload) > self.policy.max_envelope_bytes:
+                    raise EventStoreError("verified commit phase tail binding exceeds its limit")
+                tail_digest = hashlib.sha256(tail_payload).hexdigest()
+            authority = self._read_canonical_object(
+                self.authority_head_path,
+                limits=ParseLimits(max_bytes=self.policy.max_command_bytes),
+            )
+        except (CanonicalError, DerivedCheckpointError, JournalCorruption, OSError) as exc:
+            raise EventStoreError("verified commit phase binding is unreadable") from exc
+        if not isinstance(authority, Mapping):
+            raise EventStoreError("verified commit phase binding is malformed")
+        required = {
+            "record_type", "version", "authoritative", "activation_digest",
+            "implementation_closure_digest", "generation", "head", "segment_count",
+            "event_count", "event_semantic_digest", "authority_prefix_digest",
+            "state_binding_update_count", "state_binding_digest", "root_digest",
+        }
+        if set(authority) != required or authority.get("record_type") != "JournalPrefixRoot":
+            raise EventStoreError("verified commit phase binding is malformed")
+        supplied_root_digest = authority.get("root_digest")
+        unsigned = dict(authority)
+        unsigned.pop("root_digest", None)
+        if (
+            not isinstance(supplied_root_digest, str)
+            or not _DIGEST.fullmatch(supplied_root_digest)
+            or digest_value(unsigned) != supplied_root_digest
+        ):
+            raise EventStoreError("verified commit phase binding digest is invalid")
+        try:
+            authority_head = self._validate_head_value(dict(authority["head"]))
+        except (DerivedCheckpointError, TypeError, ValueError) as exc:
+            raise EventStoreError("verified commit phase head binding is malformed") from exc
+        if (
+            authority["version"] != 1
+            or authority["authoritative"] is not False
+            or authority["activation_digest"] != self.active_activation_digest
+            or authority["implementation_closure_digest"] != self.implementation_closure_digest
+            or authority_head != disk_head
+            or authority["segment_count"] != disk_head["sequence"]
+        ):
+            raise EventStoreError("verified commit phase binding changed")
+        return (
+            self._root_identity,
+            self.active_activation_digest,
+            self.implementation_closure_digest,
+            tuple(sorted(disk_head.items())),
+            tail_digest,
+            authority["generation"],
+            authority["root_digest"],
+            authority["authority_prefix_digest"],
+            authority["state_binding_digest"],
+            authority["event_semantic_digest"],
+            authority["event_count"],
+            authority["state_binding_update_count"],
+        )
 
     @staticmethod
     def _empty_head() -> dict[str, Any]:
@@ -3329,7 +3529,11 @@ class EventStore:
         _write_atomic(self.checkpoint_path, canonical_bytes(value))
         return value
 
-    def _load_journal_checkpoint_locked(self) -> None:
+    def _load_journal_checkpoint_locked(
+        self,
+        *,
+        verified_authority_root: Mapping[str, Any] | None = None,
+    ) -> None:
         if not _path_exists(self.checkpoint_path):
             raise DerivedCheckpointError("journal checkpoint is missing")
         value = self._read_canonical_object(
@@ -3377,7 +3581,11 @@ class EventStore:
             raise DerivedCheckpointError("journal checkpoint counts are invalid")
         if not isinstance(value["semantic_digest"], str) or not _DIGEST.fullmatch(value["semantic_digest"]):
             raise DerivedCheckpointError("journal checkpoint semantic digest is invalid")
-        authority_root = self._verify_authority_prefix_locked(head)
+        authority_root = (
+            dict(verified_authority_root)
+            if verified_authority_root is not None
+            else self._verify_authority_prefix_locked(head)
+        )
         authority_bindings = {
             "authority_generation": authority_root["generation"],
             "authority_prefix_digest": authority_root["authority_prefix_digest"],
@@ -5263,9 +5471,18 @@ class EventStore:
                 raise EventStoreError(
                     f"auxiliary Relation is not bounded canonical JSON: {exc}"
                 ) from exc
-        with _WriterLock(self.lock_path, self.lock_timeout):
+        phase_token = self._verified_commit_phase_token
+        if phase_token is not None and self._verified_commit_phase_in_progress is not True:
+            raise EventStoreError("verified commit phase operation is not active")
+        writer_scope = (
+            contextlib.nullcontext()
+            if phase_token is not None
+            else _WriterLock(self.lock_path, self.lock_timeout)
+        )
+        with writer_scope:
             self._last_commit_write_metrics = self._empty_commit_write_metrics()
-            self._refresh_from_disk_locked()
+            if phase_token is None:
+                self._refresh_from_disk_locked()
             normalized = normalize_command(
                 parse_json_strict(
                     command_payload,
@@ -5926,6 +6143,32 @@ class EventStore:
         else:
             self._fallback_reason = None
             self._open_mode = "verified-checkpoint"
+
+    def _strict_refresh_from_disk_locked(self) -> None:
+        """Validate durable authority without recovery or control-file repair."""
+
+        self._clear_committed_envelope_witness()
+        disk_head = self._read_disk_head()
+        authority_root = self._verify_authority_prefix_locked(disk_head)
+        if _matching_paths(self.pending, "*.json"):
+            raise DerivedCheckpointError("pending transaction requires recovery")
+        if _path_exists(self.checkpoint_path):
+            self._load_journal_checkpoint_locked(
+                verified_authority_root=authority_root,
+            )
+        else:
+            self._head = disk_head
+            self._batch_count = disk_head["sequence"]
+            self._event_count = authority_root["event_count"]
+            self._semantic_digest = authority_root["event_semantic_digest"]
+            self._authority_generation = authority_root["generation"]
+            self._authority_prefix_digest = authority_root["authority_prefix_digest"]
+            self._state_binding_digest = authority_root["state_binding_digest"]
+            self._state_binding_update_count = authority_root[
+                "state_binding_update_count"
+            ]
+        self._fallback_reason = None
+        self._open_mode = "verified-checkpoint"
 
     def envelope_at_head(self) -> dict[str, Any] | None:
         """Read only the authoritative envelope named by current HEAD."""

@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 275
+CANONICAL_PACKAGE_FILE_COUNT = 281
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -125,6 +125,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/audit/2026-08-21-public-workflow-and-tooling-design.md',
         'docs/audit/2026-08-21-public-workflow-implementation-plan.md',
         'docs/audit/2026-08-22-continuation-renewal-wave.md',
+        'docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
         'human/promin_appendices_ua.pdf',
@@ -319,6 +320,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_windows_publication.py',
         'tests/test_heavy_windows_seal_scaling.py',
         'tests/test_initial_project_work.py',
+        'tests/test_init_layer_configured_routes.py',
         'tests/test_installed_distribution.py',
         'tests/test_client_report_tool.py',
         'tests/test_language_tooling.py',
@@ -334,6 +336,10 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_search_scale.py',
         'tests/test_service_cli.py',
         'tests/test_service_mutation_cache.py',
+        'tests/test_verified_commit_phase.py',
+        'tests/test_verified_commit_phase_refresh_budget.py',
+        'tests/test_verified_commit_phase_service.py',
+        'tests/test_verified_commit_phase_tamper.py',
         'tests/test_verified_query_phase.py',
         'THIRD_PARTY_NOTICES.md',
         'tools/compile_schema.py',
