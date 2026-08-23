@@ -1842,6 +1842,148 @@ class _WriterLock:
             self.local.release()
 
 
+class VerifiedQueryLease:
+    """Opaque, finite read lease with an entry/exit authority proof."""
+
+    def __init__(self, store: "EventStore", max_operations: int) -> None:
+        if (
+            not isinstance(max_operations, int)
+            or isinstance(max_operations, bool)
+            or max_operations <= 0
+        ):
+            raise EventStoreError("max_operations must be a positive integer")
+        self._store = store
+        self._remaining = max_operations
+        self._closed = False
+        self._lock = _WriterLock(store.lock_path, store.lock_timeout)
+        self._lock.__enter__()
+        try:
+            store._refresh_from_disk_locked()
+            self._binding = self._binding_locked()
+        except BaseException as original_error:
+            self._closed = True
+            try:
+                self._lock.__exit__(None, None, None)
+            except BaseException as cleanup_error:
+                try:
+                    original_error.add_note(
+                        "verified query lease entry cleanup failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+            raise
+
+    def _binding_locked(self) -> tuple[Any, ...]:
+        store = self._store
+        try:
+            authority = store._read_canonical_object(
+                store.authority_head_path,
+                limits=ParseLimits(max_bytes=store.policy.max_command_bytes),
+            )
+        except (CanonicalError, DerivedCheckpointError, OSError) as exc:
+            raise EventStoreError("verified query authority binding is unreadable") from exc
+        if not isinstance(authority, Mapping):
+            raise EventStoreError("verified query authority binding is malformed")
+        authority_head = authority.get("head")
+        if not isinstance(authority_head, Mapping):
+            raise EventStoreError("verified query authority head binding is malformed")
+        try:
+            authority_head_items = tuple(sorted(authority_head.items()))
+        except (TypeError, ValueError) as exc:
+            raise EventStoreError(
+                "verified query authority head binding is not orderable"
+            ) from exc
+        return (
+            store._root_identity,
+            store.active_activation_digest,
+            store.implementation_closure_digest,
+            tuple(sorted(store.head().items())),
+            authority.get("activation_digest"),
+            authority.get("implementation_closure_digest"),
+            authority_head_items,
+            authority.get("generation"),
+            authority.get("root_digest"),
+            authority.get("authority_prefix_digest"),
+            authority.get("state_binding_digest"),
+            authority.get("event_semantic_digest"),
+            authority.get("state_binding_update_count"),
+            store._semantic_digest,
+        )
+
+    @property
+    def store(self) -> "EventStore":
+        if self._closed:
+            raise EventStoreError("verified query lease is closed")
+        return self._store
+
+    @property
+    def remaining_operations(self) -> int:
+        return self._remaining
+
+    @property
+    def binding(self) -> tuple[Any, ...]:
+        if self._closed:
+            raise EventStoreError("verified query lease is closed")
+        return self._binding
+
+    def consume_operation(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified query lease is closed")
+        if self._remaining <= 0:
+            raise EventStoreError("verified query lease operation budget is exhausted")
+        self._remaining -= 1
+
+    def close(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified query lease is closed")
+        mismatch = False
+        error: BaseException | None = None
+        try:
+            try:
+                if self._binding_locked() != self._binding:
+                    mismatch = True
+            except BaseException as exc:
+                mismatch = True
+                error = exc
+            try:
+                self._store._refresh_from_disk_locked()
+                if self._binding_locked() != self._binding:
+                    mismatch = True
+            except BaseException as exc:
+                mismatch = True
+                if error is None:
+                    error = exc
+        except BaseException as exc:
+            mismatch = True
+            if error is None:
+                error = exc
+        finally:
+            self._closed = True
+            try:
+                self._lock.__exit__(None, None, None)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            if isinstance(error, EventStoreError):
+                raise error
+            raise EventStoreError("verified query lease close failed") from error
+        if mismatch:
+            raise EventStoreError("verified query lease binding changed")
+
+    def __enter__(self) -> "VerifiedQueryLease":
+        if self._closed:
+            raise EventStoreError("verified query lease is closed")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+_VERIFIED_QUERY_PHASE_TOKEN = object()
+
+
 class EventStore:
     """Single-writer, crash-recoverable authoritative event journal."""
 
@@ -1862,6 +2004,7 @@ class EventStore:
         derived_state_validator: Callable[..., Any] | None = None,
         max_events_per_batch: int | None = None,
         lock_timeout: float = 10.0,
+        _phase_token: object | None = None,
     ) -> None:
         if not _DIGEST.fullmatch(active_activation_digest):
             raise EventStoreError("active activation digest must be SHA-256")
@@ -1974,7 +2117,18 @@ class EventStore:
         os.makedirs(_native_os_path(self.derived_state_root), exist_ok=True)
         os.makedirs(_native_os_path(self.derived_rows_root), exist_ok=True)
         self._verify_or_create_implementation_binding()
-        self._open_or_recover()
+        if _phase_token is not _VERIFIED_QUERY_PHASE_TOKEN:
+            self._open_or_recover()
+
+    @classmethod
+    def _for_verified_query_phase(cls, *args: Any, **kwargs: Any) -> "EventStore":
+        kwargs["_phase_token"] = _VERIFIED_QUERY_PHASE_TOKEN
+        return cls(*args, **kwargs)
+
+    def begin_verified_query_lease(self, max_operations: int) -> VerifiedQueryLease:
+        """Open one finite authority-verified read phase under the writer lock."""
+
+        return VerifiedQueryLease(self, max_operations)
 
     @staticmethod
     def _empty_head() -> dict[str, Any]:

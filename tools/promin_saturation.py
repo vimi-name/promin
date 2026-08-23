@@ -74,6 +74,7 @@ _CONTINUATION_STATE_TOTAL_BYTES_MAX = (
 _CONTINUATION_STATE_OBSERVATIONS_MAX = 100_000
 _SATURATION_CONTINUATION_TTL_SECONDS = 900
 _CONTINUATION_RENEWAL_SAFETY_SECONDS = 30
+_SATURATION_CONTINUATION_PAGE_LIMIT = 10_000
 _SEARCH_FIXTURE_TASK_COUNT = 32
 _SEARCH_FIXTURE_RELATION_COUNT = 28
 _PHYSICAL_RELATION_COUNT = (
@@ -1363,6 +1364,9 @@ class _StorageRunTelemetry:
 
 _ACTIVE_STORAGE_TELEMETRY: contextvars.ContextVar[_StorageRunTelemetry | None] = (
     contextvars.ContextVar("promin_saturation_storage_telemetry", default=None)
+)
+_ACTIVE_QUERY_PHASE: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "promin_saturation_query_phase", default=None
 )
 
 
@@ -3354,6 +3358,38 @@ def _mixed_query_depth(index: int, query_class: str) -> int:
     return index % 12 + 1
 
 
+def _query_phase_operation_budget(
+    query_plan: list[Mapping[str, Any]],
+    forced_chains: int,
+    *,
+    continuation_page_limit: int = _SATURATION_CONTINUATION_PAGE_LIMIT,
+) -> int:
+    """Derive a finite phase budget from the continuation contract.
+
+    Each planned query and forced chain consumes one initial search. A
+    continuation page consumes one search and may consume one renewal before
+    that search. The bounded continuation contract permits at most
+    ``continuation_page_limit`` pages per route, independently of depth.
+    """
+
+    if not isinstance(forced_chains, int) or isinstance(forced_chains, bool):
+        raise SaturationError("forced continuation count must be an integer")
+    if forced_chains < 0 or forced_chains > len(query_plan):
+        raise SaturationError("forced continuation count exceeds the query plan")
+    for item in query_plan:
+        depth = item.get("depth") if isinstance(item, Mapping) else None
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth <= 0:
+            raise SaturationError("query plan depth must be a positive integer")
+    if (
+        not isinstance(continuation_page_limit, int)
+        or isinstance(continuation_page_limit, bool)
+        or continuation_page_limit <= 0
+    ):
+        raise SaturationError("continuation page limit must be a positive integer")
+    route_count = len(query_plan) + forced_chains
+    return route_count + (route_count * continuation_page_limit * 2)
+
+
 def _mixed_query_budget(ceiling: Mapping[str, int]) -> dict[str, int]:
     selected = {
         key: int(ceiling[key])
@@ -3767,7 +3803,9 @@ def _drain_pages(
     ttl_seconds: int,
     continuation_observer: _ContinuationStateObserver | None = None,
     clock: Any | None = None,
+    query_phase: Any | None = None,
 ) -> dict[str, Any]:
+    query_runtime = runtime if query_phase is None else query_phase
     current = first
     seen_atoms: set[str] = set()
     seen_atom_identity_digests: set[str] = set()
@@ -3787,6 +3825,7 @@ def _drain_pages(
     refinement_required: bool | None = None
     refinement_hints: list[str] | None = None
     selected_seed_count: int | None = None
+    phase_operations = 0
     while True:
         truncated, token = _assert_workcard(current, maximums)
         current_value = _plain(current)
@@ -3926,8 +3965,10 @@ def _drain_pages(
             raise SaturationError("continuation token repeated within one page chain")
         seen_tokens.add(token)
         continuation_pages += 1
-        if continuation_pages > 10_000:
-            raise SaturationError("continuation exceeded the bounded 10000-page safety limit")
+        if continuation_pages > _SATURATION_CONTINUATION_PAGE_LIMIT:
+            raise SaturationError(
+                "continuation exceeded the bounded 10000-page safety limit"
+            )
         continuation_query = current_value.get("query")
         continuation_depth = current_value.get("depth")
         continuation_budget = current_value.get("budget")
@@ -3952,12 +3993,13 @@ def _drain_pages(
             raise SaturationError("continuation expired before renewal")
         next_token = token
         if 0 < remaining <= _CONTINUATION_RENEWAL_SAFETY_SECONDS:
-            renew_search = getattr(runtime, "renew_search", None)
+            renew_search = getattr(query_runtime, "renew_search", None)
             if not callable(renew_search):
                 raise SaturationError(
                     "continuation renewal is required inside its safety window"
                 )
-            renewed = renew_search(
+            phase_operations += 1
+            renewed = query_runtime.renew_search(
                 token,
                 query=continuation_query,
                 depth=continuation_depth,
@@ -3999,7 +4041,8 @@ def _drain_pages(
                 maximum_token_bytes,
                 len(renewed_token.encode("utf-8")),
             )
-        current = runtime.search(
+        phase_operations += 1
+        current = query_runtime.search(
             continuation_query,
             continuation_depth,
             budget=dict(continuation_budget),
@@ -4030,6 +4073,7 @@ def _drain_pages(
         "refinement_hints": refinement_hints or [],
         "selected_seed_count": selected_seed_count or 0,
         "selected_closure_complete": True,
+        "phase_operations": phase_operations,
     }
 
 
@@ -4473,6 +4517,23 @@ def _performance_result(
     }
 
 
+def _close_active_query_phase_after_failure(primary: BaseException) -> None:
+    phase = _ACTIVE_QUERY_PHASE.get()
+    if phase is None:
+        return
+    _ACTIVE_QUERY_PHASE.set(None)
+    try:
+        phase.close()
+    except BaseException as cleanup_error:
+        try:
+            primary.add_note(
+                "saturation query phase cleanup failed: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        except BaseException:
+            pass
+
+
 def _guard_storage_run(operation: Any) -> Any:
     @functools.wraps(operation)
     def guarded(
@@ -4514,6 +4575,7 @@ def _guard_storage_run(operation: Any) -> Any:
                 performance_profile=performance_profile,
             )
         except BaseException as exc:
+            _close_active_query_phase_after_failure(exc)
             if isinstance(exc, TerminalPublicationError):
                 raise
             failure_code = telemetry.failure_code(exc)
@@ -4875,7 +4937,7 @@ def run(
     }
     continuation_observer = _ContinuationStateObserver(workspace)
     query_results: list[dict[str, Any]] = []
-    search_started = time.perf_counter()
+    query_plan = []
     for index in range(queries):
         query_class, query = _mixed_query_case(
             index,
@@ -4884,12 +4946,30 @@ def run(
             semantic_query_ids=query_ids,
             continuation_query_ids=continuation_query_ids,
         )
-        depth = _mixed_query_depth(index, query_class)
+        query_plan.append(
+            {
+                "index": index,
+                "query_class": query_class,
+                "query": query,
+                "depth": _mixed_query_depth(index, query_class),
+            }
+        )
+    phase_budget = _query_phase_operation_budget(query_plan, forced_chains)
+    query_phase = runtime.begin_immutable_query_phase(max_operations=phase_budget)
+    _ACTIVE_QUERY_PHASE.set(query_phase)
+    phase_operations = 0
+    search_started = time.perf_counter()
+    for query_item in query_plan:
+        index = query_item["index"]
+        query_class = query_item["query_class"]
+        query = query_item["query"]
+        depth = query_item["depth"]
         query_mix_counts[query_class] = query_mix_counts.get(query_class, 0) + 1
         query_depth_counts[depth] = query_depth_counts.get(depth, 0) + 1
         query_class_depths.setdefault(query_class, set()).add(depth)
         started = time.perf_counter()
-        card = runtime.search(
+        phase_operations += 1
+        card = query_phase.search(
             query,
             depth,
             budget=query_budget,
@@ -4938,13 +5018,14 @@ def run(
             class_result_verified = _first_entity_id(card) == query
             exact_artifact_checks.append(class_result_verified)
         reference = _drain_pages(
-            runtime,
+            query_phase,
             card,
             ceiling,
             query_grant=query_grant,
             ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
             continuation_observer=continuation_observer,
         )
+        phase_operations += reference["phase_operations"]
         if reference["selected_closure_complete"]:
             selected_closure_chains += 1
         maximum_continuation_token_bytes = max(
@@ -4959,7 +5040,8 @@ def run(
         forced_trace: dict[str, Any] | None = None
         if index < forced_chains:
             forced_depths.add(depth)
-            forced_first = runtime.search(
+            phase_operations += 1
+            forced_first = query_phase.search(
                 query,
                 depth,
                 budget=forced_budget,
@@ -4969,13 +5051,14 @@ def run(
             )
             total_search_calls += 1
             forced = _drain_pages(
-                runtime,
+                query_phase,
                 forced_first,
                 forced_budget,
                 query_grant=query_grant,
                 ttl_seconds=_SATURATION_CONTINUATION_TTL_SECONDS,
                 continuation_observer=continuation_observer,
             )
+            phase_operations += forced["phase_operations"]
             if forced["selected_closure_complete"]:
                 selected_closure_chains += 1
             maximum_continuation_token_bytes = max(
@@ -5024,6 +5107,12 @@ def run(
                 "forced": forced_trace,
             }
         )
+    phase_closed_started = time.perf_counter()
+    try:
+        query_phase.close()
+    finally:
+        _ACTIVE_QUERY_PHASE.set(None)
+    phase_close_seconds = time.perf_counter() - phase_closed_started
     search_seconds = time.perf_counter() - search_started
     broad_query_refinement_required = bool(broad_checks) and all(broad_checks)
     high_cardinality_terms_verified = bool(high_cardinality_checks) and all(
@@ -5292,6 +5381,13 @@ def run(
         "query_authorization": dict(query_grant),
         "search": {
             "runtime_ingress": "promin.service.ProminService",
+            "immutable_query_phase": {
+                "operation_budget": phase_budget,
+                "operations": phase_operations,
+                "within_budget": phase_operations <= phase_budget,
+                "close_elapsed_ms": round(phase_close_seconds * 1000, 6),
+                "product_acceptance_credit": False,
+            },
             "actual_runtime_queries": queries,
             "promin_service_search_calls": total_search_calls,
             "promin_service_continuation_calls": continuations_checked,

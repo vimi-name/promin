@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -155,10 +157,12 @@ def test_each_continuation_is_measured_before_its_consuming_search(
     second_payload = {"query": "grant", "cursor": 2, "private": "second secret"}
     first_continuation = _insert_continuation(
         database,
-        handle="first-handle",
+        handle=base64.urlsafe_b64encode(b"first-handle-001").rstrip(b"=").decode("ascii"),
         payload=first_payload,
         cursor=1,
     )
+    first_parts = first_continuation["token"].split(".")
+    first_continuation["token"] = ".".join((*first_parts[:3], "s" * 43))
     expected_sizes = [len(canonical_bytes(first_payload))]
 
     class RecordingRuntime:
@@ -182,10 +186,14 @@ def test_each_continuation_is_measured_before_its_consuming_search(
                 second_continuation.update(
                     _insert_continuation(
                         database,
-                        handle="second-handle",
+                        handle=base64.urlsafe_b64encode(b"second-handle-01").rstrip(b"=").decode("ascii"),
                         payload=second_payload,
                         cursor=2,
                     )
+                )
+                second_parts = second_continuation["token"].split(".")
+                second_continuation["token"] = ".".join(
+                    (*second_parts[:3], "s" * 43)
                 )
                 expected_sizes.append(len(canonical_bytes(second_payload)))
                 return _page(
@@ -213,12 +221,147 @@ def test_each_continuation_is_measured_before_its_consuming_search(
         query_grant={"subject_id": "owner", "grant_id": "reader"},
         ttl_seconds=900,
         continuation_observer=observer,
+        clock=lambda: datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc),
     )
 
     assert runtime.calls == 2
     assert drained["continuation_pages"] == 2
     assert len(observer.measurement_rows()) == 2
     assert len(observer.manifest_rows()) == 2
+    assert _stored_rows(database) == []
+
+
+def test_drain_pages_routes_continuations_through_immutable_phase(
+    tmp_path: Path,
+) -> None:
+    workspace, database = _projection(tmp_path)
+    observer = saturation._ContinuationStateObserver(workspace)
+    continuation = _insert_continuation(
+        database,
+        handle=base64.urlsafe_b64encode(b"phase-handle-001").rstrip(b"=").decode("ascii"),
+        payload={"query": "grant", "cursor": 1},
+        cursor=1,
+    )
+    token_parts = continuation["token"].split(".")
+    continuation["token"] = ".".join((*token_parts[:3], "s" * 43))
+
+    class OrdinaryRuntime:
+        def search(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("ordinary runtime search bypassed immutable phase")
+
+    class ImmutablePhase:
+        def __init__(self) -> None:
+            self.search_calls = 0
+
+        def search(self, *_args: Any, **kwargs: Any) -> dict[str, Any]:
+            self.search_calls += 1
+            assert kwargs["continuation_token"] == continuation["token"]
+            _delete_continuation(database, continuation)
+            return _page(
+                entity_id="entity:phase-final",
+                continuation=None,
+                stream_cursor=1,
+            )
+
+        def renew_search(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("renewal was not expected in this phase witness")
+
+    phase = ImmutablePhase()
+    drained = saturation._drain_pages(
+        OrdinaryRuntime(),
+        _page(
+            entity_id="entity:phase-first",
+            continuation=continuation,
+            stream_cursor=0,
+        ),
+        _BUDGET,
+        query_grant={"subject_id": "owner", "grant_id": "reader"},
+        ttl_seconds=900,
+        continuation_observer=observer,
+        clock=lambda: datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc),
+        query_phase=phase,
+    )
+
+    assert phase.search_calls == 1
+    assert drained["continuation_pages"] == 1
+    assert drained["phase_operations"] == 1
+    assert _stored_rows(database) == []
+
+
+def test_depth_one_multi_page_chain_stays_within_contract_phase_budget(
+    tmp_path: Path,
+) -> None:
+    workspace, database = _projection(tmp_path)
+    observer = saturation._ContinuationStateObserver(workspace)
+
+    def make_continuation(index: int) -> dict[str, Any]:
+        handle = base64.urlsafe_b64encode(
+            f"depth-one-{index:06d}".encode("ascii").ljust(16, b"0")
+        ).rstrip(b"=").decode("ascii")
+        continuation = _insert_continuation(
+            database,
+            handle=handle,
+            payload={"query": "grant", "cursor": index},
+            cursor=index,
+        )
+        parts = continuation["token"].split(".")
+        continuation["token"] = ".".join((*parts[:3], "s" * 43))
+        return continuation
+
+    continuations = [make_continuation(index) for index in range(1, 4)]
+
+    class BudgetedPhase:
+        def __init__(self) -> None:
+            self.remaining = saturation._query_phase_operation_budget(
+                [{"depth": 1}], 0, continuation_page_limit=3
+            )
+            self.calls = 0
+
+        def search(self, *_args: Any, **kwargs: Any) -> dict[str, Any]:
+            assert self.remaining > 0
+            self.remaining -= 1
+            self.calls += 1
+            token = kwargs["continuation_token"]
+            current_index = next(
+                index
+                for index, continuation in enumerate(continuations)
+                if continuation["token"] == token
+            )
+            _delete_continuation(database, continuations[current_index])
+            next_continuation = (
+                continuations[current_index + 1]
+                if current_index + 1 < len(continuations)
+                else None
+            )
+            return _page(
+                entity_id=f"entity:depth-one:{self.calls}",
+                continuation=next_continuation,
+                stream_cursor=self.calls,
+            )
+
+        def renew_search(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("unexpected renewal in depth-one chain")
+
+    phase = BudgetedPhase()
+    drained = saturation._drain_pages(
+        object(),
+        _page(
+            entity_id="entity:depth-one:first",
+            continuation=continuations[0],
+            stream_cursor=0,
+        ),
+        _BUDGET,
+        query_grant={"subject_id": "owner", "grant_id": "reader"},
+        ttl_seconds=900,
+        continuation_observer=observer,
+        clock=lambda: datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc),
+        query_phase=phase,
+    )
+
+    assert phase.calls == 3
+    assert drained["continuation_pages"] == 3
+    assert drained["phase_operations"] == 3
+    assert phase.remaining == 4
     assert _stored_rows(database) == []
 
 

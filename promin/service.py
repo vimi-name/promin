@@ -43,8 +43,10 @@ from .events import (
     CommitReadView,
     CommitStateSnapshot,
     EventStore,
+    EventStoreError,
     EventStorePolicy,
     PreparedCommit,
+    VerifiedQueryLease,
     state_binding_leaf_id,
     state_binding_value_digest,
 )
@@ -163,14 +165,122 @@ class ServiceError(RuntimeError):
     """Raised when an application workflow cannot prove its prerequisites."""
 
 
+class ImmutableQueryPhaseActiveError(ServiceError):
+    """Raised when a phase-forbidden EventStore entry is attempted."""
+
+
+class ImmutableQueryPhase:
+    """Opaque finite query phase owned by exactly one ProminService."""
+
+    def __init__(
+        self,
+        service: "ProminService",
+        lease: VerifiedQueryLease,
+        context: ActivationContext,
+        projection: Projection,
+        projection_binding: tuple[Any, ...],
+    ) -> None:
+        self._service = service
+        self._lease = lease
+        self._context_value = context
+        self._projection = projection
+        self._projection_binding = projection_binding
+        self._closed = False
+
+    def _ensure_owner(self, service: "ProminService") -> None:
+        if self._closed:
+            raise ServiceError("immutable query phase is closed")
+        if self._service is not service:
+            raise ServiceError("immutable query phase belongs to another service")
+
+    def _consume(self, service: "ProminService") -> None:
+        self._ensure_owner(service)
+        try:
+            self._lease.consume_operation()
+        except EventStoreError as exc:
+            raise ServiceError(str(exc)) from exc
+
+    def search(
+        self,
+        query: str,
+        depth: int | None = None,
+        *,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        continuation_token: str | None = None,
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        return self._service._phase_search(
+            self,
+            query,
+            depth,
+            subject_id=subject_id,
+            grant_id=grant_id,
+            budget=budget,
+            ranking=ranking,
+            continuation_token=continuation_token,
+            now=now,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def renew_search(
+        self,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        return self._service._phase_renew_search(
+            self,
+            token,
+            query=query,
+            depth=depth,
+            subject_id=subject_id,
+            grant_id=grant_id,
+            budget=budget,
+            ranking=ranking,
+            now=now,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def close(self) -> None:
+        self._service._close_immutable_query_phase(self)
+
+    def __enter__(self) -> "ImmutableQueryPhase":
+        self._ensure_owner(self._service)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
 def _serialized_mutation(method: Any) -> Any:
     @wraps(method)
     def invoke(service: "ProminService", *args: Any, **kwargs: Any) -> Any:
         with service._query_runtime_lock:
+            service._reject_active_immutable_query_phase("mutation")
             try:
                 return method(service, *args, **kwargs)
-            except Exception:
-                service._clear_query_runtime()
+            except Exception as original:
+                try:
+                    service._clear_query_runtime()
+                except BaseException as cleanup_error:
+                    try:
+                        original.add_note(
+                            "mutation cleanup failed: "
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        )
+                    except BaseException:
+                        pass
                 raise
 
     return invoke
@@ -2003,9 +2113,15 @@ class ProminService:
         self._verified_mutation_cache: ActivationContext | None = None
         self._verified_mutation_fingerprint: str | None = None
         self._verified_mutation_bindings: tuple[tuple[str, Path, str], ...] | None = None
+        self._active_immutable_query_phase: ImmutableQueryPhase | None = None
 
     def _clear_query_runtime(self) -> None:
         with self._query_runtime_lock:
+            active_phase = self._active_immutable_query_phase
+            if active_phase is not None and not active_phase._closed:
+                raise ServiceError(
+                    "cannot clear service resources while immutable query phase is active"
+                )
             self._query_runtime_key = None
             self._query_runtime_value = None
             self._prepared_runtime = None
@@ -2025,10 +2141,23 @@ class ProminService:
                     closed.add(id(store))
                     store.close()
 
+    def _reject_active_immutable_query_phase(self, operation: str) -> None:
+        with self._query_runtime_lock:
+            active_phase = self._active_immutable_query_phase
+            if active_phase is not None and not active_phase._closed:
+                raise ImmutableQueryPhaseActiveError(
+                    "cannot enter EventStore "
+                    f"{operation} while immutable query phase is active"
+                )
+
     def close(self) -> None:
         """Release cached EventStore resources without changing durable state."""
 
-        self._clear_query_runtime()
+        with self._query_runtime_lock:
+            active_phase = self._active_immutable_query_phase
+            if active_phase is not None and not active_phase._closed:
+                raise ServiceError("cannot close while immutable query phase is active")
+            self._clear_query_runtime()
 
     def __enter__(self) -> "ProminService":
         return self
@@ -2390,6 +2519,18 @@ class ProminService:
         *,
         recover_publications: bool = True,
     ) -> EventStore:
+        with self._query_runtime_lock:
+            return self._event_store_locked(
+                context, recover_publications=recover_publications
+            )
+
+    def _event_store_locked(
+        self,
+        context: ActivationContext,
+        *,
+        recover_publications: bool = True,
+    ) -> EventStore:
+        self._reject_active_immutable_query_phase("recovery or refresh")
         activation_digest = _activation(context)["activation_digest"]
         implementation_digest = _implementation_closure_digest(context)
         policy = _event_store_policy(context)
@@ -2449,6 +2590,15 @@ class ProminService:
         context: ActivationContext,
         bundle: ContractBundle,
     ) -> EventStore:
+        with self._query_runtime_lock:
+            return self._mutation_event_store_locked(context, bundle)
+
+    def _mutation_event_store_locked(
+        self,
+        context: ActivationContext,
+        bundle: ContractBundle,
+    ) -> EventStore:
+        self._reject_active_immutable_query_phase("mutation")
         key = (
             _activation(context)["activation_digest"],
             _implementation_closure_digest(context),
@@ -2497,7 +2647,329 @@ class ProminService:
             ranked_candidate_cache=self._ranked_candidate_cache,
         )
 
+    def _immutable_query_phase_store(
+        self, context: ActivationContext
+    ) -> EventStore:
+        """Return the phase-only store path without a public refresh bypass."""
+
+        activation_digest = _activation(context)["activation_digest"]
+        implementation_digest = _implementation_closure_digest(context)
+        key = (activation_digest, implementation_digest)
+        with self._query_runtime_lock:
+            if self._read_store_key == key and self._read_store is not None:
+                return self._read_store
+            previous_store = self._read_store
+            policy = _event_store_policy(context)
+            validators = _event_store_validators(context)
+            store = EventStore._for_verified_query_phase(
+                _events_root(self.root),
+                activation_digest,
+                activation_record_digest=digest_value(_activation(context)),
+                implementation_closure_digest=implementation_digest,
+                policy=policy,
+                **validators,
+                commit_state_loader=lambda view, envelopes: self._load_commit_state(
+                    context, view, envelopes
+                ),
+                commit_prepare_callback=lambda view, command, relations: self._prepare_commit(
+                    context, view, command, relations
+                ),
+                derived_state_validator=self._validate_derived_runtime_state,
+            )
+            self._read_store = store
+            self._read_store_key = key
+            if (
+                previous_store is not None
+                and previous_store is not self._mutation_store
+            ):
+                previous_store.close()
+            return store
+
+    def begin_immutable_query_phase(
+        self, max_operations: int = 1
+    ) -> ImmutableQueryPhase:
+        with self._query_runtime_lock:
+            return self._begin_immutable_query_phase_locked(max_operations)
+
+    def _begin_immutable_query_phase_locked(
+        self, max_operations: int = 1
+    ) -> ImmutableQueryPhase:
+        """Open one bounded, authority-verified query phase."""
+
+        if (
+            not isinstance(max_operations, int)
+            or isinstance(max_operations, bool)
+            or max_operations <= 0
+        ):
+            raise EventStoreError("max_operations must be a positive integer")
+        active = self._active_immutable_query_phase
+        if active is not None and not active._closed:
+            raise ServiceError("nested immutable query phase is not allowed")
+        context = self._context()
+        store = self._immutable_query_phase_store(context)
+        lease: VerifiedQueryLease | None = None
+        try:
+            lease = store.begin_verified_query_lease(max_operations)
+            projection = self._projection(context)
+            status = projection.require_current(store)
+            projection_binding = (
+                _activation(context)["activation_digest"],
+                _implementation_closure_digest(context),
+                tuple(sorted(store.head().items())),
+                status["semantic_digest"],
+            )
+            phase = ImmutableQueryPhase(
+                self, lease, context, projection, projection_binding
+            )
+            self._active_immutable_query_phase = phase
+            return phase
+        except BaseException:
+            if lease is not None:
+                try:
+                    lease.close()
+                except BaseException:
+                    pass
+            raise
+
+    def _use_immutable_query_phase(
+        self,
+        phase: ImmutableQueryPhase,
+        operation: str,
+        kwargs: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(phase, ImmutableQueryPhase) or phase._service is not self:
+            raise ServiceError("immutable query phase belongs to another service")
+        if operation == "search":
+            return phase.search(**dict(kwargs))
+        if operation == "renew_search":
+            return phase.renew_search(**dict(kwargs))
+        raise ServiceError("immutable query phase operation is unsupported")
+
+    def _close_immutable_query_phase(self, phase: ImmutableQueryPhase) -> None:
+        with self._query_runtime_lock:
+            self._close_immutable_query_phase_locked(phase)
+
+    def _close_immutable_query_phase_locked(self, phase: ImmutableQueryPhase) -> None:
+        phase._ensure_owner(self)
+        projection_error: BaseException | None = None
+        lease_error: BaseException | None = None
+        try:
+            status = phase._projection.require_current(phase._lease.store)
+            current_binding = (
+                _activation(phase._context_value)["activation_digest"],
+                _implementation_closure_digest(phase._context_value),
+                tuple(sorted(phase._lease.store.head().items())),
+                status["semantic_digest"],
+            )
+            if current_binding != phase._projection_binding:
+                raise ProjectionError("immutable query projection binding changed")
+        except BaseException as exc:
+            projection_error = exc
+        try:
+            phase._lease.close()
+        except BaseException as exc:
+            lease_error = exc
+        finally:
+            phase._closed = True
+            if self._active_immutable_query_phase is phase:
+                self._active_immutable_query_phase = None
+        if projection_error is not None:
+            raise projection_error
+        if lease_error is not None:
+            raise lease_error
+
+    def _phase_search(
+        self,
+        phase: ImmutableQueryPhase,
+        query: str,
+        depth: int | None = None,
+        *,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        continuation_token: str | None = None,
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        with self._query_runtime_lock:
+            return self._phase_search_locked(
+                phase,
+                query,
+                depth,
+                subject_id=subject_id,
+                grant_id=grant_id,
+                budget=budget,
+                ranking=ranking,
+                continuation_token=continuation_token,
+                now=now,
+                ttl_seconds=ttl_seconds,
+            )
+
+    def _phase_search_locked(
+        self,
+        phase: ImmutableQueryPhase,
+        query: str,
+        depth: int | None = None,
+        *,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        continuation_token: str | None = None,
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        phase._consume(self)
+        if not query or not query.strip():
+            raise ServiceError("query must be non-empty")
+        if continuation_token is not None and not continuation_token:
+            raise ServiceError("continuation token must be non-empty")
+        context = phase._context_value
+        store = phase._lease.store
+        projection = phase._projection
+        selected_depth = _profile_depth(
+            _preset(context),
+            _activation(context),
+            _bundle(context).core["conformance.json"],
+            depth,
+        )
+        selected_budget = dict(
+            budget or _profile_budget(_preset(context), _activation(context))
+        )
+        now_text = _evaluation_time(now)
+        access = self._authorize_query_access(
+            context,
+            store,
+            subject_id=subject_id,
+            grant_id=grant_id,
+            evaluated_at=now_text,
+        )
+        result = projection.search(
+            query,
+            depth=selected_depth,
+            budget=selected_budget,
+            ranking=ranking,
+            continuation_token=continuation_token,
+            resume_binding=_projection_resume_binding(context, access),
+            now=now_text,
+            ttl_seconds=ttl_seconds,
+        )
+        _validate_search_result(
+            result,
+            selected_budget,
+            store.head(),
+            _activation(context),
+            now,
+            max_token_bytes=projection.limits.max_token_bytes,
+        )
+        validate_ingress(
+            _bundle(context),
+            result,
+            operation="replay",
+            definition="RetrievalPage",
+            context={**_validation_context(context), "retrieval_page": result},
+        )
+        return result
+
+    def _phase_renew_search(
+        self,
+        phase: ImmutableQueryPhase,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        with self._query_runtime_lock:
+            return self._phase_renew_search_locked(
+                phase,
+                token,
+                query=query,
+                depth=depth,
+                subject_id=subject_id,
+                grant_id=grant_id,
+                budget=budget,
+                ranking=ranking,
+                now=now,
+                ttl_seconds=ttl_seconds,
+            )
+
+    def _phase_renew_search_locked(
+        self,
+        phase: ImmutableQueryPhase,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        subject_id: str,
+        grant_id: str,
+        budget: dict[str, int] | None = None,
+        ranking: str = "bm25-v1",
+        now: datetime | None = None,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        phase._consume(self)
+        if not token:
+            raise ServiceError("continuation token must be non-empty")
+        context = phase._context_value
+        store = phase._lease.store
+        projection = phase._projection
+        now_text = _evaluation_time(now)
+        access = self._authorize_query_access(
+            context,
+            store,
+            subject_id=subject_id,
+            grant_id=grant_id,
+            evaluated_at=now_text,
+        )
+        selected_budget = dict(
+            budget or _profile_budget(_preset(context), _activation(context))
+        )
+        result = projection.renew_search(
+            token,
+            query=query,
+            depth=depth,
+            budget=selected_budget,
+            ranking=ranking,
+            resume_binding=_projection_resume_binding(context, access),
+            now=now_text,
+            ttl_seconds=ttl_seconds,
+        )
+        result["authorization_binding"] = {
+            "subject_id": access["subject_id"],
+            "grant_id": access["grant_id"],
+            "grant_claim_digest": access["grant_claim_digest"],
+            "capability_id": access["capability_id"],
+            "requested_scope_digest": digest_value(access["requested_scope"]),
+            "revocation_epoch": access["revocation_epoch"],
+        }
+        _validate_renewal_result(
+            result,
+            query=query,
+            depth=depth,
+            budget=selected_budget,
+            ranking=ranking,
+            ttl_seconds=ttl_seconds,
+            expected_binding=_projection_resume_binding(context, access),
+            head=store.head(),
+            activation=_activation(context),
+            authorization_binding=result["authorization_binding"],
+            max_token_bytes=projection.limits.max_token_bytes,
+        )
+        return result
+
     def initialize(self, request: InitRequest) -> dict[str, Any]:
+        with self._query_runtime_lock:
+            return self._initialize_locked(request)
+
+    def _initialize_locked(self, request: InitRequest) -> dict[str, Any]:
+        self._reject_active_immutable_query_phase("initialization")
         if Path(request.project_root).resolve() != self.root:
             raise ServiceError("InitRequest project_root differs from service root")
         result = initialize_project(request)

@@ -109,9 +109,10 @@
     "tests/test_scale_orchestration.py",
     "tests/test_search_scale.py",
     "tests/test_service_cli.py",
-    "tests/test_service_mutation_cache.py"
+    "tests/test_service_mutation_cache.py",
+    "tests/test_verified_query_phase.py"
   ],
-  "selector_count": 107,
+  "selector_count": 108,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
@@ -272,7 +273,8 @@
         "tests/test_continuation_renewal.py",
         "tests/test_revalidation_workflow.py",
         "tests/test_saturation_archive_binding.py",
-        "tests/test_saturation_raw_artifact_cardinality.py"
+        "tests/test_saturation_raw_artifact_cardinality.py",
+        "tests/test_verified_query_phase.py"
       ],
       "limits": {
         "timeout_seconds": 600,

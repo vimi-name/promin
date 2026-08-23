@@ -204,3 +204,7 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
     )
     assert len(declared) == len(set(declared))
     assert sorted(declared) == discovered
+    verified_query_phase = "tests/test_verified_query_phase.py"
+    assert manifest["selectors"].count(verified_query_phase) == 1
+    heavy_hardening = next(shard for shard in shards if shard["id"] == "heavy-hardening")
+    assert heavy_hardening["selectors"].count(verified_query_phase) == 1

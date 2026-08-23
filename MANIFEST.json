@@ -473,8 +473,8 @@
     },
     {
       "path": "promin/events.py",
-      "sha256": "d995a0e2f54bfbbf81c13a160e125a7ff29d52b57289f04ef8b2875744279a1e",
-      "size": 353187
+      "sha256": "d1ee313ee627025cb79ca835c285c59fb242714080dc31f64c1d444f4efae3d1",
+      "size": 359045
     },
     {
       "path": "promin/evidence.py",
@@ -638,8 +638,8 @@
     },
     {
       "path": "promin/service.py",
-      "sha256": "4c5a3d13c72d0355fd30e6881d31b67997ac991d84b19644876cf3e766a425db",
-      "size": 282262
+      "sha256": "2a0dd9e417064eddcdebb326467db38d0ee8ca3f4e3a37ab64532a2b4ed0c599",
+      "size": 299199
     },
     {
       "path": "promin/skills.py",
@@ -728,8 +728,8 @@
     },
     {
       "path": "tests/ALPHA4_TEST_SHARDS.json",
-      "sha256": "56aa35590ceb0fe081f89da4bee97d7512b43234b2708e280f2d04434124c9c4",
-      "size": 11803
+      "sha256": "52fa9daab3a50886c47adb8a539124140bc827d88263d55e562515b9d84910a1",
+      "size": 11891
     },
     {
       "path": "tests/test_alpha3_ingress_budget.py",
@@ -768,8 +768,8 @@
     },
     {
       "path": "tests/test_alpha3_reconciliation_static.py",
-      "sha256": "f6a88bafc27d2f365e98af88d24a38996d3f3d17dbc777483d18501f16da6a36",
-      "size": 7308
+      "sha256": "d2d1d3a668580f1807fdc68d1facbfee8240116d360a1502d8b3868f25db2408",
+      "size": 7601
     },
     {
       "path": "tests/test_alpha3_reconciliation_windows.py",
@@ -1108,8 +1108,8 @@
     },
     {
       "path": "tests/test_heavy_query_tail_scale.py",
-      "sha256": "687e7abf355dc40044c67ab1b8ae951cee9b5fca38bea102333d6aeaca2d5e52",
-      "size": 34524
+      "sha256": "588c50766e857aa8b65fb08545d368bbf59201d79b8c33b203c0c73ae5ffac92",
+      "size": 36933
     },
     {
       "path": "tests/test_heavy_receipt_cache.py",
@@ -1138,8 +1138,8 @@
     },
     {
       "path": "tests/test_heavy_saturation_continuation_sqlite.py",
-      "sha256": "9679c24cb40256ce50c11313a16aabef6a71c859ce6c6beb9008e84c0fff10f2",
-      "size": 13748
+      "sha256": "34ece54a4ee2ffbd3d20847c1acd2acf3adfce7c6923bc0ae7aa2d26520c831e",
+      "size": 19112
     },
     {
       "path": "tests/test_heavy_saturation_storage_budget.py",
@@ -1208,8 +1208,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "af0f7289580be2d6fd113af0f506b41c631fcf159b0dbed0c3fe4ae676e2e092",
-      "size": 70290
+      "sha256": "605bccbc74600dab93d8e23289487fd6be7ce1957407617d85b641d8225d0e8a",
+      "size": 70340
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1265,6 +1265,11 @@
       "path": "tests/test_service_mutation_cache.py",
       "sha256": "532124471ee3ca904babf217885a85094e03d456d4bd1473255cbbb78a9dd6e7",
       "size": 2936
+    },
+    {
+      "path": "tests/test_verified_query_phase.py",
+      "sha256": "549588e7b7e1c4c948886986f371b1ab96320bd67208f92a5eb15fb5153b71e1",
+      "size": 22941
     },
     {
       "path": "tools/compile_schema.py",
@@ -1343,8 +1348,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "3b91a8f4c2e51309ead63d4eef86e58b288770afd134bda2fe4e563bfe666c01",
-      "size": 238394
+      "sha256": "e52e41abf47c943c5a8482b041f59abd572976c4a356300d0ab598042f25e795",
+      "size": 242292
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1358,8 +1363,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "2dfba7e7b898ff0392dd781ce12fd5144aba72ec76169e0214b8bfc3e5ae7beb",
-      "size": 144152
+      "sha256": "a4a6ec24b0bc7a2ec303f23a5d1e4b1e626d1ff1bee553b9de0da10bf858542f",
+      "size": 144198
     }
   ],
   "generated_surfaces": [

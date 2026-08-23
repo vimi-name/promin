@@ -5,6 +5,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import inspect
 import math
 from pathlib import Path
 import sqlite3
@@ -554,6 +555,72 @@ def _query_plan(artifact_ids: list[str]) -> list[dict[str, Any]]:
             }
         )
     return plan
+
+
+def test_saturation_query_tail_declares_bounded_immutable_phase() -> None:
+    source = inspect.getsource(saturation.run)
+    assert "begin_immutable_query_phase" in source
+    assert "_query_phase_operation_budget" in source
+    assert "query_phase.close()" in source
+
+
+def test_query_phase_budget_is_derived_from_plan_and_forced_depths() -> None:
+    plan = [{"depth": 1}, {"depth": 2}, {"depth": 3}]
+    # Initial searches: 3 planned + 1 forced. Every route is allowed the
+    # contract's page limit, regardless of its traversal depth.
+    assert saturation._query_phase_operation_budget(
+        plan, 1, continuation_page_limit=3
+    ) == 28
+    with pytest.raises(saturation.SaturationError, match="positive integer"):
+        saturation._query_phase_operation_budget([{"depth": 0}], 0)
+
+
+def test_depth_one_multi_page_phase_budget_does_not_exhaust() -> None:
+    # A depth-1 route can still span multiple bounded pages. The budget is
+    # page-contract-derived, not depth-derived.
+    assert saturation._query_phase_operation_budget(
+        [{"depth": 1}], 0, continuation_page_limit=4
+    ) == 9
+
+
+def test_query_phase_failure_cleanup_preserves_primary_and_publishes_no_result(
+    tmp_path: Path,
+) -> None:
+    class Phase:
+        def __init__(self) -> None:
+            self.closed = False
+            self.lock_released = False
+
+        def close(self) -> None:
+            self.closed = True
+            self.lock_released = True
+            raise RuntimeError("close binding mismatch")
+
+    phase = Phase()
+    primary = RuntimeError("injected query failure")
+
+    def operation(
+        workspace: Path,
+        output: Path,
+        *,
+        archive: Path | None = None,
+        files: int = QUERY_COUNT_CONTRACT,
+        queries: int = QUERY_COUNT_CONTRACT,
+        reuse_product: bool = False,
+        performance_profile: str = "portable-local-v1",
+    ) -> dict[str, Any]:
+        saturation._ACTIVE_QUERY_PHASE.set(phase)
+        raise primary
+
+    wrapped = saturation._guard_storage_run(operation)
+    with pytest.raises(RuntimeError) as raised:
+        wrapped(tmp_path / "workspace", tmp_path / "output")
+
+    assert raised.value is primary
+    assert phase.closed is True
+    assert phase.lock_released is True
+    assert any("cleanup failed" in note for note in raised.value.__notes__)
+    assert not (tmp_path / "output" / "saturation-result.json").exists()
 
 
 def _assert_sample_class(page: Mapping[str, Any], item: Mapping[str, Any]) -> None:
