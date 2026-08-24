@@ -156,3 +156,30 @@ def test_init_preflight_does_not_rescan_just_verified_provider_receipts() -> Non
         )
         for call in preflight_calls
     )
+
+
+def test_semantic_corpus_uses_one_bounded_verified_commit_phase() -> None:
+    """Bootstrap and search corpus commands must not reopen public mutation admission."""
+
+    tree = ast.parse(SATURATION_SOURCE.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_semantic_corpus"
+    )
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "runtime"
+        and call.func.attr == "begin_verified_commit_phase"
+        for call in calls
+    )
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "commit_phase"
+        and call.func.attr == "commit"
+        for call in calls
+    )

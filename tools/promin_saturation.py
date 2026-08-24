@@ -2748,6 +2748,10 @@ def _ensure_semantic_corpus(
         raise SaturationError("saturation authority root scope is malformed")
     issued = datetime.now(timezone.utc).replace(microsecond=0)
     issued_at = issued.isoformat().replace("+00:00", "Z")
+    specs = _semantic_corpus_specs(activation_digest, candidate_digest, issued_at)
+    commit_phase = runtime.begin_verified_commit_phase(
+        max_operations=5 + len(specs)
+    )
     expires_at = (issued + timedelta(days=1)).isoformat().replace("+00:00", "Z")
     manager = _grant(
         authority,
@@ -2821,7 +2825,7 @@ def _ensure_semantic_corpus(
     ]
     head = _record_commit_observation(
         commit_observations,
-        runtime.commit(manager_command),
+        commit_phase.commit(manager_command),
         phase="semantic-corpus",
     )
     for name, grant in (
@@ -2846,7 +2850,7 @@ def _ensure_semantic_corpus(
         )
         head = _record_commit_observation(
             commit_observations,
-            runtime.commit(command),
+            commit_phase.commit(command),
             phase="semantic-corpus",
         )
 
@@ -2893,11 +2897,10 @@ def _ensure_semantic_corpus(
     )
     head = _record_commit_observation(
         commit_observations,
-        runtime.commit(candidate_command),
+        commit_phase.commit(candidate_command),
         phase="semantic-corpus",
     )
 
-    specs = _semantic_corpus_specs(activation_digest, candidate_digest, issued_at)
     for index, (task, relations) in enumerate(specs):
         task = _bind_saturation_gate_definition(
             runtime,
@@ -2923,9 +2926,10 @@ def _ensure_semantic_corpus(
         )
         head = _record_commit_observation(
             commit_observations,
-            runtime.commit(command, auxiliary_relations=relations),
+            commit_phase.commit(command, auxiliary_relations=relations),
             phase="semantic-corpus",
         )
+    commit_phase.close()
     result = _inspect_semantic_corpus(
         runtime,
         activation_digest=activation_digest,
