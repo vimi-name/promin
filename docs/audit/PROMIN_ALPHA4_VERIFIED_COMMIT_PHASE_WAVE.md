@@ -103,3 +103,29 @@ The snapshot now binds that canonical empty authority root with an explicit abse
 The fresh r24 candidate completed initialization, all 100 physical buckets, full Git add and commit with automatic maintenance disabled, and immutable Git archive. Live stack evidence then showed the first semantic corpus mutation calling the public `runtime.commit` route, which rehashed the activation byte surface before every batch. The root was stopped after this exact boundary was observed and is preserved as interrupted/no-credit evidence.
 
 The bootstrap grants, Candidate record, and bounded search tasks now use one verified service commit phase sized exactly to `5 + len(specs)`. Each command still uses the full service validation/evidence route; only repeated EventStore admission is reused under the finite phase binding. Focused saturation-policy, verified commit phase, and verified envelope snapshot suites passed `27/27` in `178.77s`. No new physical result, acceptance, performance result, or pass credit is claimed until a fresh candidate completes its 100k run and independent audit.
+
+## R25 cold provider-healthcheck correction
+
+The r25 exact candidate was bound to source `a66db7e`, archive SHA-256 `b7b1075335175019ff1f3f08d96632a2a3087db58ab39f65aabdc5ce5dc65874`, and a fresh direct child under `D:\ProminValidation`. The first launcher-created r25 root failed before a saturation workspace or output existed and remains preserved/no-credit. The succeeding fresh r25 root passed extracted-package validation and storage preflight, then rejected before physical corpus creation: its `SaturationFailure` records `python-control-runtime` timing out on the real bound `C:\Python313\python.exe --version` after the declared five-second limit. It has no completed result, no product corpus, and no authority evidence.
+
+The next same-version correction preserves the real executable healthchecks and their fail-closed behavior. It gives the Python and Git saturation provider bindings one explicit 30-second cold-start budget rather than a five-second limit that this Windows host demonstrably exceeded. The bound executable, argv, expected exit, dependency receipts, and output limits remain unchanged. The new focused policy regression and the complete saturation schema-meta policy file passed (`7 passed in 20.68s`). This is source/test evidence only: the r25 roots remain failed/no-credit and a newly bound candidate plus a fresh exact Windows 100k run are still required.
+
+## Updated claims
+
+validation_claim=targeted_partial
+runtime_diagnostic_pass=false
+acceptance_pass=false
+visual_acceptance=false
+performance_acceptance=false
+pass_credit=false
+g27_g45_pass_credit=false
+authority_confirmed=0
+authority_pending=8
+full_static_scan_deferred=true
+mrets_layer=preserved
+ugt_layer=additive
+proxy_acceptance=false
+
+## Next safe action
+
+Refresh exact package integrity, commit this bounded same-version provider-healthcheck policy wave, build one fresh candidate, and launch exactly one new isolated Windows 100k run from its extraction. Do not run aggregates, modeled Linux/WSL, the 72-bucket benchmark, product inspection, client PDF, or cleanup until that run is terminal and independently audited.

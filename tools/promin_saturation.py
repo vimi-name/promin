@@ -66,6 +66,7 @@ _PHYSICAL_CORPUS_RECIPE = "representative-operational-text-v3"
 _EXACT_PHYSICAL_FILES = 100_000
 _EXACT_CORE_VALID_RELATIONS = 198_999
 _EXACT_RUNTIME_QUERIES = 600
+_SATURATION_PROVIDER_HEALTHCHECK_TIMEOUT_MS = 30_000
 _CONTINUATION_STATE_ROWS_MAX = 10_000
 _CONTINUATION_STATE_BYTES_MAX = 16_384
 _CONTINUATION_STATE_TOTAL_BYTES_MAX = (
@@ -2067,7 +2068,7 @@ def _make_saturation_init_plan(workspace: Path) -> dict[str, Any]:
             "required": True,
             "healthcheck": {
                 "argv": [str(runtime_path), "--version"],
-                "timeout_ms": 5000,
+                "timeout_ms": _SATURATION_PROVIDER_HEALTHCHECK_TIMEOUT_MS,
                 "expected_exit": 0,
             },
             "license": runtime_license,
@@ -2097,7 +2098,7 @@ def _make_saturation_init_plan(workspace: Path) -> dict[str, Any]:
         "required": False,
         "healthcheck": {
             "argv": [str(git_path), "--version"],
-            "timeout_ms": 5000,
+            "timeout_ms": _SATURATION_PROVIDER_HEALTHCHECK_TIMEOUT_MS,
             "expected_exit": 0,
         },
         "license": git_license,

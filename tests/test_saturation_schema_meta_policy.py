@@ -130,6 +130,17 @@ def test_receipted_python_runtime_healthcheck_prefers_verified_host_identity() -
     )
 
 
+def test_saturation_provider_healthchecks_allow_a_bounded_cold_start() -> None:
+    """Exact saturation must not reject a real Windows provider on a 5s cold start."""
+
+    source = SATURATION_SOURCE.read_text(encoding="utf-8")
+
+    assert "_SATURATION_PROVIDER_HEALTHCHECK_TIMEOUT_MS = 30_000" in source
+    assert source.count(
+        '"timeout_ms": _SATURATION_PROVIDER_HEALTHCHECK_TIMEOUT_MS'
+    ) == 2
+
+
 def test_init_preflight_does_not_rescan_just_verified_provider_receipts() -> None:
     """Receipt identity reuses the transaction's completed full verification."""
 
