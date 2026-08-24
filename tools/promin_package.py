@@ -749,6 +749,16 @@ def verify_archive(
             },
         }
         exact_candidate = _candidate_binding(artifact_binding, archive_path.stat().st_size)
+        candidate_document_members = (
+            report.checks["documents"]["documents"] if require_docs else []
+        )
+        if not require_docs and any(
+            value is not None
+            for value in (evidence_manifest, evidence_root, release_decision)
+        ):
+            raise ValidationFailure(
+                "evidence or release-decision verification requires document checks"
+            )
         supplied_candidate = exact_candidate
         if candidate_binding is not None:
             supplied_candidate = validate_standard_release_candidate_binding(
@@ -779,7 +789,7 @@ def verify_archive(
                 candidate_binding=supplied_candidate,
                 evidence_root=evidence_root,
                 trust_configuration=trust_record,
-                candidate_document_members=report.checks["documents"]["documents"],
+                candidate_document_members=candidate_document_members,
             )
         decision_result: dict[str, Any] | None = None
         decision_record: dict[str, Any] | None = None
@@ -800,7 +810,7 @@ def verify_archive(
                 evidence_manifest=supplied_manifest,
                 evidence_root=evidence_root,
                 trust_configuration=trust_record,
-                candidate_document_members=report.checks["documents"]["documents"],
+                candidate_document_members=candidate_document_members,
             )
         distribution_status = standard_distribution_status(
             decision_record,
@@ -808,7 +818,7 @@ def verify_archive(
             evidence_manifest=supplied_manifest,
             evidence_root=evidence_root,
             trust_configuration=trust_record,
-            candidate_document_members=report.checks["documents"]["documents"],
+            candidate_document_members=candidate_document_members,
             trust_configuration_sha256=trust_sha256,
             expected_trust_root_sha256=expected_trust_root_sha256,
         )
@@ -825,7 +835,7 @@ def verify_archive(
             "second_build_sha256": rebuilt_digest,
             "artifact_binding": artifact_binding,
             "candidate_binding": exact_candidate,
-            "candidate_document_members": report.checks["documents"]["documents"],
+            "candidate_document_members": candidate_document_members,
             "evidence_manifest": evidence_result,
             "standard_release_decision": decision_result,
             "standard_distribution_status": distribution_status,

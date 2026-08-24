@@ -155,3 +155,29 @@ proxy_acceptance=false
 ## Next safe action
 
 Refresh exact package integrity, commit this same-version archive-binding correction, build a new candidate, and run exactly one fresh Windows 100k workload with Python 3.14. Only a terminal result and an independent strict audit can unlock downstream aggregates, modeled Linux/WSL, comparative benchmark, inspection, or client material.
+
+## R27 no-document archive binding correction
+
+The r27 launcher completed full extracted-package validation, then the saturation binder correctly entered `verify_archive(require_docs=False)`. That path still indexed `report.checks["documents"]` while constructing candidate and distribution outputs, causing a deterministic `KeyError` before workspace creation. The fresh root is preserved as failed/no-credit and has no corpus or result.
+
+The no-document internal path now creates an empty document-member list. It rejects any evidence or release-decision verification request unless document checks are enabled, while the public default remains `require_docs=True`. The focused saturation-policy file passed `8/8` after this correction. A new same-version candidate and fresh Windows run remain required.
+
+## Updated claims
+
+validation_claim=targeted_partial
+runtime_diagnostic_pass=false
+acceptance_pass=false
+visual_acceptance=false
+performance_acceptance=false
+pass_credit=false
+g27_g45_pass_credit=false
+authority_confirmed=0
+authority_pending=8
+full_static_scan_deferred=true
+mrets_layer=preserved
+ugt_layer=additive
+proxy_acceptance=false
+
+## Next safe action
+
+Refresh exact package integrity, commit the no-document archive-binding correction, build a fresh candidate, then run exactly one fresh Python 3.14 Windows 100k workload. Keep downstream aggregates, modeled Linux/WSL, benchmark, product inspection, client PDF, and cleanup gated behind terminal success and independent audit.

@@ -170,6 +170,8 @@ def test_saturation_archive_binding_avoids_only_repeated_document_parsing() -> N
         encoding="utf-8"
     )
     assert "require_docs: bool = True" in package_source
+    assert "candidate_document_members = (" in package_source
+    assert "if require_docs" in package_source
 
 
 def test_init_preflight_does_not_rescan_just_verified_provider_receipts() -> None:
