@@ -258,8 +258,8 @@
     },
     {
       "path": "docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md",
-      "sha256": "b2725584038c79630e2b6ae28a9091d577e848b3d856bfb07c51806c293a802c",
-      "size": 3585
+      "sha256": "0a86310bfa98d39c2ae4d2d620f82ff4a5cf4a104fe5828f32f5ac6db363985a",
+      "size": 4062
     },
     {
       "path": "examples/project-brief.json",
@@ -1283,8 +1283,8 @@
     },
     {
       "path": "tests/test_verified_commit_phase_activation_binding.py",
-      "sha256": "25c126e0d618bb50771228758c59d318e41632cc23400d03c06dec7ed4acb5e5",
-      "size": 4656
+      "sha256": "8dcacc668e601d33e5022b29cfbdf3158e4c476e36f1fbe4f6034f07818ab937",
+      "size": 4986
     },
     {
       "path": "tests/test_verified_commit_phase_refresh_budget.py",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import promin.service as service_module
@@ -67,20 +69,31 @@ def test_verified_phase_rejects_physical_bound_file_drift(service_fixture):
     service, manager, activation, issued_at, head = service_fixture
     authority = service._context().plans["authority.json"]
     phase = service.begin_verified_commit_phase(max_operations=1)
-    _label, bound_path, kind = next(
-        item for item in phase._binding.bindings if item[2] == "file"
+    _label, bound_path, _kind = next(
+        item
+        for item in phase._binding.bindings
+        if item[2] == "file" and item[1].is_relative_to(service.root)
     )
-    original = bound_path.read_bytes()
-    bound_path.write_bytes(original + b"phase-drift")
-    command = _grant_command(
-        authority, activation, issued_at, manager,
-        grant_id="grant:physical-binding-drift", expected_head=head,
-    )
-    with pytest.raises(ServiceError, match="binding"):
-        phase.commit(command)
-    with pytest.raises(ServiceError, match="binding"):
-        phase.close()
-    service.close()
+    original_stat = bound_path.stat()
+    try:
+        os.utime(
+            bound_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000),
+        )
+        command = _grant_command(
+            authority, activation, issued_at, manager,
+            grant_id="grant:physical-binding-drift", expected_head=head,
+        )
+        with pytest.raises(ServiceError, match="binding"):
+            phase.commit(command)
+        with pytest.raises(ServiceError, match="binding"):
+            phase.close()
+    finally:
+        os.utime(
+            bound_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        service.close()
 
 
 def test_verified_phase_close_revalidates_activation_bytes(service_fixture, monkeypatch):
