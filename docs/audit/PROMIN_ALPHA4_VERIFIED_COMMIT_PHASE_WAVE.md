@@ -18,7 +18,7 @@ The saturation route now calculates its exact number of physical relation commit
 
 - `tests/test_verified_commit_phase_service.py`: three real lifecycle cases passed. The remaining poison-close-to-ordinary-service-commit case reaches the real phase route, but a subsequent run was externally interrupted during initialization after the assertion was corrected. `PENDING_FUNCTIONAL_TIER_A`.
 - The restored physical-relation saturation test is a real service route but its current cold fixture materializes provider receipts before phase execution. A compact real service-route regression remains `PENDING_SATURATION_REAL_ROUTE`; no recorder/mock result is counted as evidence.
-- r18 Windows 100k remains an older, still-running physical attempt and has no terminal result. It receives no pass credit and is not evidence for this wave.
+- r18 Windows 100k was an older physical attempt without a terminal result. Its exact stale process tree was stopped after identity verification; the root is preserved, receives no pass credit, and is not evidence for this wave.
 
 ## Claims
 
@@ -38,7 +38,7 @@ proxy_acceptance=false
 
 ## Next safe action
 
-Refresh deterministic package integrity, make one coherent same-version commit, then terminate the superseded r18 attempt only through its launcher so it leaves a preserved terminal receipt. Build a fresh deterministic candidate from the committed source and run the next exact Windows 100k workload from that extraction only.
+This historic next action is superseded by the r20 interruption and deterministic VCS-boundary follow-up below.
 
 ## R19 observation and follow-up binding wave
 
@@ -53,3 +53,33 @@ The real binding suite subsequently reached its assertions: the initial run had 
 The r19 rejection exposed a post-corpus inspection bottleneck: the saturation inspector replayed schema validation for every envelope that had already been validated at commit time and bound by the authority chain. The follow-up creates an opaque `VerifiedEnvelopeSnapshot` only after strict admission validates the full journal, semantic rows, head/counts, and exact control/journal bytes. The snapshot yields the exact bound canonical records once; it checks state before every emission and fails closed on close, reuse, reopen, byte, head, authority, or foreign-writer drift. Public envelope iteration is unchanged and retains validation.
 
 Saturation prefers the snapshot only when that real API is available; otherwise it explicitly keeps the public `iter_envelopes(validate=True)` route. Focused evidence: snapshot `9/9`, consumer `3/3`; independent review found no residual P1/P2. This is a diagnostic performance-path correction only: `acceptance_pass=false`, `performance_acceptance=false`, and a fresh physical candidate is still required.
+
+## R20 interruption and deterministic VCS boundary
+
+Three r20 roots were created while the host still had an older r18 workload. Two r20 children were exact duplicate launches and were stopped after their Python and launcher command lines were matched; their roots remain preserved and receive no credit. The single intended r20 root generated all 100,000 physical files, then stopped progressing before any semantic event batch or terminal artifact. Read-only process tracing identified the blocking boundary as `git commit` spawning `git maintenance run --auto --quiet --detach`; the process tree was stopped after that fact was captured. The canonical r20 root is therefore preserved as `interrupted/no-credit`, not as a successful terminal run.
+
+The next source wave makes the VCS snapshot pass `-c maintenance.auto=false` explicitly to both the real `git add` and `git commit` operations. It still stages and commits the complete product tree; the returned descriptor records the policy and operations. A narrow test first failed because the configuration pair was absent, then passed after the production change (`1 passed in 41.15s`). This does not prove a new physical 100k run or a performance result; that evidence is pending a new committed deterministic candidate.
+
+## Minimal and advanced init slice
+
+`promin.simple_init` now provides a bounded, deterministic plan builder with default preflight limit `128` and an explicit `AdvancedInitConfiguration` for goal, autonomy, language, profile layers, brief, and bound. The apply function delegates to the existing canonical experience route and retains false authority, pass-credit, and acceptance fields. Its three focused plan tests passed. A real apply attempt hit the current external baseline-provider timeout and remains `PENDING_RUNTIME_EVIDENCE`; this API slice is not a claimed one-click product acceptance surface.
+
+## Updated claims
+
+validation_claim=targeted_partial
+runtime_diagnostic_pass=false
+acceptance_pass=false
+visual_acceptance=false
+performance_acceptance=false
+pass_credit=false
+g27_g45_pass_credit=false
+authority_confirmed=0
+authority_pending=8
+full_static_scan_deferred=true
+mrets_layer=preserved
+ugt_layer=additive
+proxy_acceptance=false
+
+## Next safe action
+
+Run the focused init and VCS-policy tests together, refresh exact package integrity, commit this same-version source wave, then build a fresh r21 candidate. Launch exactly one fresh Windows 100k workload from that extraction; only a terminal result plus the independent strict auditor can unlock aggregates or modeled Linux/WSL.

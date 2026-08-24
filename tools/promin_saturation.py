@@ -2211,7 +2211,7 @@ def _initialize_saturation_workspace(workspace: Path) -> dict[str, Any]:
     return _validate_saturation_workspace(workspace, status="created")
 
 
-def _prepare_vcs_snapshot(workspace: Path, *, reuse_product: bool) -> dict[str, str]:
+def _prepare_vcs_snapshot(workspace: Path, *, reuse_product: bool) -> dict[str, Any]:
     provider = _snapshot_provider(workspace)
     provider_id = provider["provider_id"]
     executable = provider["executable"]
@@ -2237,9 +2237,20 @@ def _prepare_vcs_snapshot(workspace: Path, *, reuse_product: bool) -> dict[str, 
         raise SaturationError("reused physical product differs from its committed VCS snapshot")
 
     if not reuse_product:
-        _git(workspace, "add", "--force", "--", "product", executable=executable)
         _git(
             workspace,
+            "-c",
+            "maintenance.auto=false",
+            "add",
+            "--force",
+            "--",
+            "product",
+            executable=executable,
+        )
+        _git(
+            workspace,
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "commit.gpgSign=false",
             "commit",
@@ -2284,6 +2295,11 @@ def _prepare_vcs_snapshot(workspace: Path, *, reuse_product: bool) -> dict[str, 
         "tree_digest": tree,
         "tree_file_count": str(tracked_files),
         "provider_version": provider["version"],
+        "vcs_maintenance_policy": {
+            "automatic_maintenance": False,
+            "git_config": "maintenance.auto=false",
+            "operations": ["git add", "git commit"],
+        },
     }
 
 
