@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 286
+CANONICAL_PACKAGE_FILE_COUNT = 284
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -208,7 +208,6 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/semantic_scope.py',
         'promin/service.py',
         'promin/skills.py',
-        'promin/simple_init.py',
         'promin/static_admission.py',
         'promin/system_check.py',
         'promin/telemetry.py',
@@ -271,7 +270,6 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_alpha4_selector_shard_runner.py',
         'tests/test_alpha4_selector_shards.py',
         'tests/test_alpha4_semantic_scope_gates.py',
-        'tests/test_alpha4_simple_init.py',
         'tests/test_alpha4_static_admission.py',
         'tests/test_alpha4_windows_publication.py',
         'tests/test_authority_domain.py',

@@ -60,9 +60,9 @@ Three r20 roots were created while the host still had an older r18 workload. Two
 
 The next source wave makes the VCS snapshot pass `-c maintenance.auto=false` explicitly to both the real `git add` and `git commit` operations. It still stages and commits the complete product tree; the returned descriptor records the policy and operations. A narrow test first failed because the configuration pair was absent, then passed after the production change (`1 passed in 41.15s`). This does not prove a new physical 100k run or a performance result; that evidence is pending a new committed deterministic candidate.
 
-## Minimal and advanced init slice
+## Canonical init product inspection
 
-`promin.simple_init` now provides a bounded, deterministic plan builder with default preflight limit `128` and an explicit `AdvancedInitConfiguration` for goal, autonomy, language, profile layers, brief, and bound. The apply function delegates to the existing canonical experience route and retains false authority, pass-credit, and acceptance fields. Its three focused plan tests passed. A real apply attempt hit the current external baseline-provider timeout and remains `PENDING_RUNTIME_EVIDENCE`; this API slice is not a claimed one-click product acceptance surface.
+The main product command already exposes `promin init` with deterministic `minimal` as its default `--init-experience`, explicit `expert` selection, bounded `--max-preflight-files`, and advanced goal, autonomy, language, profile, brief, capability-selection, plan, bundle, review, and dry-run options. The temporary duplicate simple-init API/CLI surface was removed rather than retained as parallel authority. This inspection proves command discovery and option wiring only; provider-backed apply/runtime evidence remains pending.
 
 ## Updated claims
 
@@ -82,4 +82,4 @@ proxy_acceptance=false
 
 ## Next safe action
 
-Run the focused init and VCS-policy tests together, refresh exact package integrity, commit this same-version source wave, then build a fresh r21 candidate. Launch exactly one fresh Windows 100k workload from that extraction; only a terminal result plus the independent strict auditor can unlock aggregates or modeled Linux/WSL.
+Run the focused canonical-init and VCS-policy tests together, refresh exact package integrity, commit the minimal same-version source wave, then build one fresh candidate. Launch exactly one fresh Windows 100k workload from that extraction; only a terminal result plus the independent strict auditor can unlock aggregates or modeled Linux/WSL.

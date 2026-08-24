@@ -258,8 +258,8 @@
     },
     {
       "path": "docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md",
-      "sha256": "77aaeec09bcb7f6569d79d42ae12c3252586d520e5064b390e6de1fbf463f97c",
-      "size": 7581
+      "sha256": "852135d1cb22bc07112e64f9753a2cd4c76e21029deb33e061983c921ac4cf67",
+      "size": 7558
     },
     {
       "path": "examples/project-brief.json",
@@ -647,11 +647,6 @@
       "size": 309627
     },
     {
-      "path": "promin/simple_init.py",
-      "sha256": "d900796670a60ee4f0263a76c44f566fd6eb45a9ae60043581324154e8954fe3",
-      "size": 5561
-    },
-    {
       "path": "promin/skills.py",
       "sha256": "40b09507e77757158f40f9ef0af644286cd7a2b1e1c76fb45a1cdd37de804833",
       "size": 34018
@@ -895,11 +890,6 @@
       "path": "tests/test_alpha4_semantic_scope_gates.py",
       "sha256": "60f0a3127de7c44c50161bba04e5842338e24ffebfe1d72960ebfb5c3d736c50",
       "size": 1903
-    },
-    {
-      "path": "tests/test_alpha4_simple_init.py",
-      "sha256": "75c076c6a3516118fd368c0d0e4a06c64a4b7cd30318e4720e26e1cd006cb6f9",
-      "size": 1864
     },
     {
       "path": "tests/test_alpha4_static_admission.py",
@@ -1228,7 +1218,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "443a75269bc6d69e0baee92b1cdb11199447b415ff838cca60f726ab62a6b141",
+      "sha256": "1e7bace4626c75c8057189ac4845b4750693e7d2694d0bbeded486cce7564fb0",
       "size": 70758
     },
     {
@@ -1418,8 +1408,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "4aaacc6e076e349c6b87aa415950345cac309e13524bd0ba6acba38767316939",
-      "size": 144790
+      "sha256": "d8e2f5362093010cdf687bdb42eee3eac43ad567e1a72d48b0889487e12032f9",
+      "size": 144713
     }
   ],
   "generated_surfaces": [
