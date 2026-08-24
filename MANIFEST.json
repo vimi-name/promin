@@ -258,8 +258,8 @@
     },
     {
       "path": "docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md",
-      "sha256": "852135d1cb22bc07112e64f9753a2cd4c76e21029deb33e061983c921ac4cf67",
-      "size": 7558
+      "sha256": "b2e848501424751c547c04d6e5ba3cbeaf03ab4e80224fcbb37f89496311d788",
+      "size": 9286
     },
     {
       "path": "examples/project-brief.json",
@@ -513,8 +513,8 @@
     },
     {
       "path": "promin/init.py",
-      "sha256": "8c74f0af1c904bc6f8830f9dd31273672cc4448c6e5a320df1b2ef8784199e00",
-      "size": 182341
+      "sha256": "29c011bf1308eef2ba52252ee4f37b9443a52a7183748374880f613da2556715",
+      "size": 183744
     },
     {
       "path": "promin/init_profiles.py",
@@ -1218,7 +1218,7 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "1e7bace4626c75c8057189ac4845b4750693e7d2694d0bbeded486cce7564fb0",
+      "sha256": "aa674ddbdafc4f6667704de759e59c3b9be398a449a7fa83a754221b4f830419",
       "size": 70758
     },
     {
@@ -1255,6 +1255,11 @@
       "path": "tests/test_saturation_raw_artifact_cardinality.py",
       "sha256": "9828f4aa1c6307b8e425b84675a188607e8cab46c0a0fccccb19ed4cf997d0f7",
       "size": 8019
+    },
+    {
+      "path": "tests/test_saturation_schema_meta_policy.py",
+      "sha256": "33431a5f9a401f881031bedf74b43544a4125cb58b36af51eb5c8cb0cdb71c05",
+      "size": 5161
     },
     {
       "path": "tests/test_saturation_vcs_maintenance_policy.py",
@@ -1393,8 +1398,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "541fdf7e4178f488833be5a0dad73c8cff3dec1e03d0b21380400376a844a3ae",
-      "size": 244460
+      "sha256": "76115bc344d00bd4f81bfeb8dd2d8fd8bbc4d694eb8876c8def70a3726c162c9",
+      "size": 244631
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1408,8 +1413,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "d8e2f5362093010cdf687bdb42eee3eac43ad567e1a72d48b0889487e12032f9",
-      "size": 144713
+      "sha256": "692cfc14abe744d478e8ae10072bb5586f4ce6e2c8edf0fdd0b2a680e898da12",
+      "size": 144768
     }
   ],
   "generated_surfaces": [

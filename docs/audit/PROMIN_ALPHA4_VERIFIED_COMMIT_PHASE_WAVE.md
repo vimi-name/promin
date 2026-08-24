@@ -83,3 +83,11 @@ proxy_acceptance=false
 ## Next safe action
 
 Run the focused canonical-init and VCS-policy tests together, refresh exact package integrity, commit the minimal same-version source wave, then build one fresh candidate. Launch exactly one fresh Windows 100k workload from that extraction; only a terminal result plus the independent strict auditor can unlock aggregates or modeled Linux/WSL.
+
+## Cheap saturation-init repair wave
+
+The first r22 root was rejected before corpus creation because its manual launcher pre-created the saturation output directory. The second r22 root passed that precondition but was deliberately interrupted after more than 625 seconds without `.promin`, semantic rows, or a child provider process. Both roots are preserved and receive no credit.
+
+Stack probes then isolated five distinct cold-init costs: repeated Draft 2020-12 schema meta-validation, thread startup in the complete jsonschema receipt, per-file provider-directory syncs, a non-relocatable copied Python payload used for `--version`, and a second full scan of receipts already verified in the same preflight transaction. The repair keeps full Core validation for public/default routes, full provider dependency bytes/digests, final per-directory durability, and persisted/recovery receipt verification. It makes only the exact package-admitted saturation route opt into already-admitted schema metadata, hashes the same jsonschema file set serially, batches directory durability after all component copies, runs an independently digest-verified host Python interpreter for receipt-backed runtime healthchecks, and reuses the preflight's completed receipt verification for the transient identity.
+
+Focused evidence: `tests/test_saturation_schema_meta_policy.py` plus three relevant canonical init/provider tests passed `8/8` in `14.75s`. A fresh clean saturation-init diagnostic returned `status=created` in approximately 18 seconds. This is init-stage diagnostic evidence only; no physical 100k, acceptance, performance, or pass credit is granted. A new deterministic candidate is required before any new physical workload.

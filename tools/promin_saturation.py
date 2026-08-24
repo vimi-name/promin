@@ -1997,7 +1997,9 @@ def _canonical_saturation_project_plan() -> dict[str, Any]:
     except ImportError as exc:  # pragma: no cover - distribution fault path
         raise SaturationError(f"production project compiler is unavailable: {exc}") from exc
     preset_path = PACKAGE_ROOT / "presets" / "semantic-standard.json"
-    bundle = load_contract_bundle(PACKAGE_ROOT, preset_path)
+    bundle = load_contract_bundle(
+        PACKAGE_ROOT, preset_path, verify_schema_meta=False
+    )
     return compile_project_init(_saturation_project_plan(), bundle)
 
 
@@ -2046,7 +2048,9 @@ def _make_saturation_init_plan(workspace: Path) -> dict[str, Any]:
         raise SaturationError("filesystem-inventory provider is not git-compatible")
 
     preset_path = PACKAGE_ROOT / "presets" / "semantic-standard.json"
-    bundle = load_contract_bundle(PACKAGE_ROOT, preset_path)
+    bundle = load_contract_bundle(
+        PACKAGE_ROOT, preset_path, verify_schema_meta=False
+    )
     runtime_path = Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True)
     runtime_license = {
         "expression": "Python-2.0",
@@ -2147,6 +2151,7 @@ def _make_saturation_init_plan(workspace: Path) -> dict[str, Any]:
         technologies_plan=technologies,
         licenses_plan=licenses,
         authority_plan=_saturation_authority_plan(),
+        verify_schema_meta=False,
     )
 
 
@@ -2205,7 +2210,11 @@ def _initialize_saturation_workspace(workspace: Path) -> dict[str, Any]:
         from promin.init import apply_explicit_init_plan as apply_plan
     except ImportError as exc:  # pragma: no cover - distribution fault path
         raise SaturationError(f"production initialization tool is unavailable: {exc}") from exc
-    result = apply_plan(workspace, _make_saturation_init_plan(workspace))
+    result = apply_plan(
+        workspace,
+        _make_saturation_init_plan(workspace),
+        verify_schema_meta=False,
+    )
     if result.get("status") != "created" or result.get("product_tree_scans") != 0:
         raise SaturationError("fresh saturation initialization was not a zero-scan creation")
     return _validate_saturation_workspace(workspace, status="created")

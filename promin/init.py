@@ -15,7 +15,6 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1674,7 +1673,6 @@ def _copy_provider_receipt(source: Path, destination: Path, expected: str) -> No
         if stat.S_ISLNK(source_mode) or not stat.S_ISREG(source_mode):
             raise InitError(f"provider source is not a regular file: {source}")
         materialize_from_store(source, destination, expected)
-        fsync_directory(destination.parent)
     except InitError:
         raise
     except Exception as exc:
@@ -2173,8 +2171,7 @@ def _jsonschema_files() -> tuple[Any, Path, tuple[tuple[Path, Path], ...]]:
 
 def _jsonschema_receipt() -> dict[str, Any]:
     distribution, _distribution_root, selected_files = _jsonschema_files()
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(selected_files)))) as pool:
-        digests = tuple(pool.map(_digest_verified_file, (item[1] for item in selected_files)))
+    digests = tuple(_digest_verified_file(item[1]) for item in selected_files)
     files = [
         {
             "path": item[0].as_posix(),
@@ -2676,6 +2673,7 @@ def _provider_input_identities(
     project_root: Path,
     *,
     receipt_root: Path | None,
+    provider_receipts_verified: bool = False,
 ) -> list[dict[str, Any]]:
     """Return path-free provider identities after verifying their actual bytes."""
 
@@ -2685,7 +2683,7 @@ def _provider_input_identities(
     if receipt_root is None:
         for binding in bindings:
             verify_provider_dependency_receipt(binding, project_root)
-    else:
+    elif not provider_receipts_verified:
         verify_provider_receipt_inventory(technologies, receipt_root, project_root)
     identities: list[dict[str, Any]] = []
     for binding in sorted(
@@ -2725,6 +2723,7 @@ def _init_input_identity(
     project_root: Path,
     *,
     provider_receipt_root: Path | None,
+    provider_receipts_verified: bool = False,
 ) -> dict[str, Any]:
     """Recompute the complete transient identity needed to publish initialization."""
 
@@ -2753,6 +2752,7 @@ def _init_input_identity(
             plans["technologies.json"],
             project_root,
             receipt_root=provider_receipt_root,
+            provider_receipts_verified=provider_receipts_verified,
         ),
         "implementation_closure_digest": implementation_closure_digest(
             plans["technologies.json"]
@@ -2831,6 +2831,7 @@ def _preflight_init_inputs(
             activation,
             project_root,
             provider_receipt_root=receipt_root,
+            provider_receipts_verified=True,
         )
     return activation, identity, _init_preflight_receipt(observations)
 
@@ -2903,6 +2904,7 @@ def build_explicit_init_plan(
     licenses_plan: Mapping[str, Any],
     authority_plan: Mapping[str, Any],
     activation_proofs: Sequence[Mapping[str, Any]] | None = None,
+    verify_schema_meta: bool = True,
 ) -> dict[str, Any]:
     """Validate an entirely explicit init envelope without inventing policy."""
 
@@ -2914,7 +2916,11 @@ def build_explicit_init_plan(
         raise InitError("project root must be a real existing directory")
     package = resolve_identity_path(standard_bundle, strict=True)
     preset = resolve_identity_path(preset_path, strict=True)
-    bundle = load_contract_bundle(package, preset)
+    if not isinstance(verify_schema_meta, bool):
+        raise InitError("verify_schema_meta must be boolean")
+    bundle = load_contract_bundle(
+        package, preset, verify_schema_meta=verify_schema_meta
+    )
     explicit_records = {
         "project.json": project_plan,
         "standards.json": standards_plan,
@@ -2954,6 +2960,7 @@ def initialize_explicit_init_plan(
     plan: Mapping[str, Any],
     *,
     project_root: str | Path | None = None,
+    verify_schema_meta: bool = True,
 ) -> InitResult:
     """Apply a validated explicit envelope through the canonical InitRequest path."""
 
@@ -3006,13 +3013,20 @@ def initialize_explicit_init_plan(
             authority_plan=paths["authority.json"],
             activation_proofs=plan.get("activation_proofs"),
         )
-        return initialize_project(request)
+        return initialize_project(request, verify_schema_meta=verify_schema_meta)
 
 
 def apply_explicit_init_plan(
-    project_root: str | Path, plan: Mapping[str, Any]
+    project_root: str | Path,
+    plan: Mapping[str, Any],
+    *,
+    verify_schema_meta: bool = True,
 ) -> dict[str, Any]:
-    result = initialize_explicit_init_plan(plan, project_root=project_root)
+    result = initialize_explicit_init_plan(
+        plan,
+        project_root=project_root,
+        verify_schema_meta=verify_schema_meta,
+    )
     return {
         "record_type": "InitResult",
         "status": "created" if result.created else "idempotent",
@@ -3775,19 +3789,34 @@ def verify_provider_preflight(
         verify_implementation=False,
     )
     observations: list[dict[str, Any]] = []
+    source_runtime_dispatch: ProviderDispatch | None = None
     for source_binding in dispatch_input["bindings"]:
         capability_id = str(source_binding["capability_id"])
         binding = dispatch.binding(capability_id)
-        identity = binding["identity"]
-        invocation = binding["invocation"]
-        healthcheck = binding["healthcheck"]
+        healthcheck_binding = binding
+        if (
+            receipt_root is not None
+            and source_binding["invocation"]["kind"] == "python-runtime"
+        ):
+            if source_runtime_dispatch is None:
+                verify_provider_identities(dispatch_input, project_root)
+                source_runtime_dispatch = resolve_provider_dispatch(
+                    dispatch_input,
+                    project_root,
+                    contract_bundle=contract_bundle,
+                    verify_implementation=False,
+                )
+            healthcheck_binding = source_runtime_dispatch.binding(capability_id)
+        identity = healthcheck_binding["identity"]
+        invocation = healthcheck_binding["invocation"]
+        healthcheck = healthcheck_binding["healthcheck"]
         argv = list(healthcheck["argv"])
         if not argv:
             raise InitError(f"provider healthcheck has no argv: {binding['provider_id']}")
         invocation_kind = invocation["kind"]
         if invocation_kind in {"python-runtime", "executable"}:
             source = _matching_provider_source(
-                binding, project_root, str(invocation["value"])
+                healthcheck_binding, project_root, str(invocation["value"])
             )
             checked = _init_identity_path(str(argv[0]), project_root)
             if source != checked:
@@ -3851,7 +3880,7 @@ def verify_provider_preflight(
             else None
         )
         started_at = _utc_second_text()
-        spawn_argv = _spawn_provider_argv(binding, argv, project_root)
+        spawn_argv = _spawn_provider_argv(healthcheck_binding, argv, project_root)
         expected_git_argv: list[str] | None = None
         if adapter.adapter_id == "git-executable-v1":
             expected_git_argv = [
@@ -4259,7 +4288,9 @@ def verify_before_mutation(
     ).verify_authoritative_mutation()
 
 
-def initialize_project(request: InitRequest) -> InitResult:
+def initialize_project(
+    request: InitRequest, *, verify_schema_meta: bool = True
+) -> InitResult:
     supplied_root = Path(request.project_root)
     if supplied_root.is_symlink():
         raise InitError("project root symbolic link rejected")
@@ -4267,11 +4298,19 @@ def initialize_project(request: InitRequest) -> InitResult:
     if not project_root.is_dir():
         raise InitError("project root must be a real existing directory")
     with _project_init_lock(project_root):
-        return _initialize_project_locked(request, project_root)
+        return _initialize_project_locked(
+            request, project_root, verify_schema_meta=verify_schema_meta
+        )
 
 
-def _initialize_project_locked(request: InitRequest, project_root: Path) -> InitResult:
-    bundle = load_contract_bundle(request.standard_bundle, request.preset_path)
+def _initialize_project_locked(
+    request: InitRequest, project_root: Path, *, verify_schema_meta: bool = True
+) -> InitResult:
+    bundle = load_contract_bundle(
+        request.standard_bundle,
+        request.preset_path,
+        verify_schema_meta=verify_schema_meta,
+    )
     plans, licenses = _load_plan_files(request, bundle)
     validate_plan_objects(plans, bundle, licenses)
     _validate_project_bound_authority(plans)
