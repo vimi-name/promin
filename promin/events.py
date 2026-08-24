@@ -2489,6 +2489,52 @@ class EventStore:
         return VerifiedEnvelopeSnapshot(self)
 
     def _verified_envelope_control_binding_locked(self) -> tuple[Any, ...]:
+        head_exists = self.head_path.exists()
+        authority_exists = self.authority_head_path.exists()
+        if not head_exists and not authority_exists:
+            if (
+                self._head != self._empty_head()
+                or self._event_count != 0
+                or self._semantic_digest
+                != self.policy.genesis_event_semantic_digest
+            ):
+                raise EventStoreError(
+                    "verified envelope snapshot empty authority state differs from memory"
+                )
+            return (
+                self._root_identity,
+                self.active_activation_digest,
+                self.implementation_closure_digest,
+                None,
+                None,
+            )
+        if not head_exists:
+            if (
+                self._head != self._empty_head()
+                or self._event_count != 0
+                or self._semantic_digest
+                != self.policy.genesis_event_semantic_digest
+            ):
+                raise EventStoreError(
+                    "verified envelope snapshot empty authority state differs from memory"
+                )
+            try:
+                authority_payload = _read_bytes(self.authority_head_path)
+            except OSError as exc:
+                raise EventStoreError(
+                    "verified envelope snapshot control binding is unreadable"
+                ) from exc
+            return (
+                self._root_identity,
+                self.active_activation_digest,
+                self.implementation_closure_digest,
+                None,
+                authority_payload,
+            )
+        if not authority_exists:
+            raise EventStoreError(
+                "verified envelope snapshot control binding is incomplete"
+            )
         try:
             head_payload = _read_bytes(self.head_path)
             authority_payload = _read_bytes(self.authority_head_path)

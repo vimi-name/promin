@@ -80,6 +80,17 @@ def test_public_iterator_still_rejects_validation_bypass(tmp_path: Path) -> None
         store.close()
 
 
+def test_snapshot_allows_a_fresh_empty_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        with store.begin_verified_envelope_snapshot() as snapshot:
+            assert list(snapshot) == []
+        _commit(store, 0)
+        assert store.head()["sequence"] == 1
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("target", ["tail", "old", "head", "authority"])
 def test_snapshot_fails_closed_on_bound_byte_drift(tmp_path: Path, target: str) -> None:
     store = _store(tmp_path)
