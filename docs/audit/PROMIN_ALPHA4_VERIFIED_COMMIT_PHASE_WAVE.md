@@ -39,3 +39,9 @@ proxy_acceptance=false
 ## Next safe action
 
 Refresh deterministic package integrity, make one coherent same-version commit, then terminate the superseded r18 attempt only through its launcher so it leaves a preserved terminal receipt. Build a fresh deterministic candidate from the committed source and run the next exact Windows 100k workload from that extraction only.
+
+## R19 observation and follow-up binding wave
+
+The fresh r19 candidate reached the exact physical corpus sequence of 1604 commits, then spent an extended period revalidating every durable envelope during corpus inspection. The run was deliberately stopped after this bottleneck was directly observed. Its preserved launcher terminal is `LAUNCHER_REJECTED_NO_PASS_CREDIT` with exit code `-1`; independent audit found no raw saturation artifact chain, so neither the physical corpus nor its performance receives credit.
+
+The follow-up source change makes the verified commit phase retain an exact phase-owned activation and implementation binding. Each phase operation now rechecks that binding before it can use cached mutation context, and close clears the phase mutation cache before a public commit resumes. Static review approved the fail-closed lifecycle. Collection of the five real-fixture tests succeeds; their execution remains `PENDING_FUNCTIONAL_TIER_A` because provider identity initialization did not reach assertions within the bounded run.

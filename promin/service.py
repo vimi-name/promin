@@ -264,6 +264,15 @@ class ImmutableQueryPhase:
         self.close()
 
 
+@dataclass(frozen=True)
+class _VerifiedCommitPhaseBinding:
+    context: ActivationContext
+    bindings: tuple[tuple[str, Path, str], ...]
+    fingerprint: str
+    activation_digest: str
+    implementation_closure_digest: str
+
+
 class VerifiedCommitPhase:
     """Opaque finite commit phase owned by exactly one ``ProminService``."""
 
@@ -272,11 +281,13 @@ class VerifiedCommitPhase:
         service: "ProminService",
         phase: EventStoreVerifiedCommitPhase,
         context: ActivationContext,
+        binding: _VerifiedCommitPhaseBinding,
     ) -> None:
         self._service = service
         self._event_phase = phase
         self._store = phase._store
         self._context_value = context
+        self._binding: _VerifiedCommitPhaseBinding | None = binding
         self._closed = False
 
     def _ensure_owner(self, service: "ProminService") -> None:
@@ -2341,7 +2352,30 @@ class ProminService:
     def _verified_mutation_context(
         self,
         expected: ActivationContext,
+        *,
+        verified_phase: VerifiedCommitPhase | None = None,
+        revalidate_phase_binding: bool = True,
     ) -> ActivationContext:
+        if verified_phase is not None:
+            verified_phase._ensure_owner(self)
+            binding = verified_phase._binding
+            if (
+                self._active_verified_commit_phase is not verified_phase
+                or binding is None
+                or _activation(expected)["activation_digest"] != binding.activation_digest
+                or _implementation_closure_digest(expected)
+                != binding.implementation_closure_digest
+            ):
+                raise ServiceError("verified commit phase binding drifted")
+            if revalidate_phase_binding:
+                current = _fast_implementation_stat_fingerprint(
+                    binding.context,
+                    self.root,
+                    bindings=binding.bindings,
+                )
+                if current != binding.fingerprint:
+                    raise ServiceError("verified commit phase binding drifted")
+            return binding.context
         cached = self._verified_mutation_cache
         if cached is not None and self._verified_mutation_fingerprint is not None:
             try:
@@ -2400,7 +2434,12 @@ class ProminService:
         view: CommitReadView,
         envelopes: Any,
     ) -> CommitStateSnapshot:
-        verified = self._verified_mutation_context(expected)
+        phase = self._active_verified_commit_phase
+        verified = self._verified_mutation_context(
+            expected,
+            verified_phase=phase,
+            revalidate_phase_binding=False,
+        )
         key = (
             view.activation_digest,
             view.implementation_closure_digest,
@@ -2765,13 +2804,31 @@ class ProminService:
         with self._query_runtime_lock:
             self._reject_active_immutable_query_phase("commit phase")
             context = self._context()
+            verified = self._verified_mutation_context(context)
+            bindings = self._verified_mutation_bindings
+            fingerprint = self._verified_mutation_fingerprint
+            if (
+                bindings is None
+                or fingerprint is None
+                or verified.activation_digest != _activation(context)["activation_digest"]
+                or verified.implementation_closure_digest
+                != _implementation_closure_digest(context)
+            ):
+                raise ServiceError("verified commit phase admission binding is unavailable")
+            binding = _VerifiedCommitPhaseBinding(
+                context=verified,
+                bindings=bindings,
+                fingerprint=fingerprint,
+                activation_digest=_activation(verified)["activation_digest"],
+                implementation_closure_digest=_implementation_closure_digest(verified),
+            )
             bundle = _bundle(context)
             store = self._mutation_event_store(context, bundle)
             try:
                 event_phase = store.begin_verified_commit_phase(max_operations)
             except EventStoreError as exc:
                 raise ServiceError(str(exc)) from exc
-            phase = VerifiedCommitPhase(self, event_phase, context)
+            phase = VerifiedCommitPhase(self, event_phase, context, binding)
             self._active_verified_commit_phase = phase
             return phase
 
@@ -2804,11 +2861,32 @@ class ProminService:
         with self._query_runtime_lock:
             phase._ensure_owner(self)
             try:
+                binding = phase._binding
+                if binding is None:
+                    raise ServiceError("verified commit phase binding is unavailable")
+                if (
+                    _activation(phase._context_value)["activation_digest"]
+                    != binding.activation_digest
+                    or _implementation_closure_digest(phase._context_value)
+                    != binding.implementation_closure_digest
+                ):
+                    raise ServiceError("verified commit phase binding drifted")
+                current = _fast_implementation_stat_fingerprint(
+                    binding.context,
+                    self.root,
+                    bindings=binding.bindings,
+                )
+                if current != binding.fingerprint:
+                    raise ServiceError("verified commit phase binding drifted")
                 phase._event_phase.close()
             except EventStoreError as exc:
                 raise ServiceError(str(exc)) from exc
             finally:
                 phase._closed = True
+                phase._binding = None
+                self._verified_mutation_cache = None
+                self._verified_mutation_fingerprint = None
+                self._verified_mutation_bindings = None
                 if self._active_verified_commit_phase is phase:
                     self._active_verified_commit_phase = None
 
@@ -3420,7 +3498,10 @@ class ProminService:
     ) -> dict[str, Any]:
         operation_started = time.perf_counter()
         context = (
-            verified_phase._context_value
+            self._verified_mutation_context(
+                verified_phase._context_value,
+                verified_phase=verified_phase,
+            )
             if verified_phase is not None
             else self._context()
         )
