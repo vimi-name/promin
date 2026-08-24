@@ -141,6 +141,37 @@ def test_saturation_provider_healthchecks_allow_a_bounded_cold_start() -> None:
     ) == 2
 
 
+def test_saturation_archive_binding_avoids_only_repeated_document_parsing() -> None:
+    """Archive bytes are closed locally; package and public verification keep docs on."""
+
+    saturation_tree = ast.parse(SATURATION_SOURCE.read_text(encoding="utf-8"))
+    binding = next(
+        node
+        for node in ast.walk(saturation_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "build_artifact_binding"
+    )
+    calls = [
+        node
+        for node in ast.walk(binding)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "verify_archive"
+    ]
+
+    assert len(calls) == 1
+    assert any(
+        keyword.arg == "require_docs"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value is False
+        for keyword in calls[0].keywords
+    )
+    package_source = (PACKAGE_ROOT / "tools" / "promin_package.py").read_text(
+        encoding="utf-8"
+    )
+    assert "require_docs: bool = True" in package_source
+
+
 def test_init_preflight_does_not_rescan_just_verified_provider_receipts() -> None:
     """Receipt identity reuses the transaction's completed full verification."""
 

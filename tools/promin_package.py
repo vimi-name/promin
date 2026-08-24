@@ -654,6 +654,7 @@ def verify_archive(
     archive_path: Path,
     *,
     install_mode: str | None = "current-environment",
+    require_docs: bool = True,
     wheelhouse: Path | None = None,
     rebuild_docs: bool = False,
     font_bindings: dict[str, tuple[Path, str]] | None = None,
@@ -681,7 +682,7 @@ def verify_archive(
         report = validate_tree(
             extracted_root,
             require_integrity=True,
-            require_docs=True,
+            require_docs=require_docs,
             install_mode=install_mode,
             wheelhouse=wheelhouse,
             rebuild_docs=rebuild_docs,

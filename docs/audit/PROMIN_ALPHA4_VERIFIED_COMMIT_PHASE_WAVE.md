@@ -129,3 +129,29 @@ proxy_acceptance=false
 ## Next safe action
 
 Refresh exact package integrity, commit this bounded same-version provider-healthcheck policy wave, build one fresh candidate, and launch exactly one new isolated Windows 100k run from its extraction. Do not run aggregates, modeled Linux/WSL, the 72-bucket benchmark, product inspection, client PDF, or cleanup until that run is terminal and independently audited.
+
+## R26 archive-binding document-revalidation correction
+
+The Python 3.14 r26 route removed the host Python 3.13 timeout boundary, completed launcher extraction validation, and reached saturation archive binding. It then spent more than twelve minutes in a second `pypdf` text extraction of the same packaged human documents before creating the saturation workspace. The package build and the launcher had already performed their full document checks; the saturation binder was also independently checking ZIP CRC, canonical entries, every member byte against the folder, manifest/checksum closure, and a deterministic archive rebuild. The interrupted root is preserved with an operator interruption record and has no corpus, result, authority, acceptance, or performance credit.
+
+`verify_archive` now has an explicit `require_docs` switch that defaults to `true` for package build, public/archive verification, and launcher validation. Only `build_artifact_binding` sets it to `false`, after its local member-byte closure, so it avoids repeating PDF text parsing while retaining all archive and candidate-binding checks. The saturation-policy file passed `8/8` after the regression was added. This remains a targeted source correction only; a new exact archive and a fresh Windows 100k run are required.
+
+## Updated claims
+
+validation_claim=targeted_partial
+runtime_diagnostic_pass=false
+acceptance_pass=false
+visual_acceptance=false
+performance_acceptance=false
+pass_credit=false
+g27_g45_pass_credit=false
+authority_confirmed=0
+authority_pending=8
+full_static_scan_deferred=true
+mrets_layer=preserved
+ugt_layer=additive
+proxy_acceptance=false
+
+## Next safe action
+
+Refresh exact package integrity, commit this same-version archive-binding correction, build a new candidate, and run exactly one fresh Windows 100k workload with Python 3.14. Only a terminal result and an independent strict audit can unlock downstream aggregates, modeled Linux/WSL, comparative benchmark, inspection, or client material.

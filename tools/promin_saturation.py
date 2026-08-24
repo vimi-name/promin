@@ -1790,7 +1790,11 @@ def build_artifact_binding(package_root: Path, archive: Path | None) -> dict[str
         from promin_package import verify_archive
         from promin_validate import ValidationFailure
 
-        canonical_archive = verify_archive(archive_path, install_mode=None)
+        canonical_archive = verify_archive(
+            archive_path,
+            install_mode=None,
+            require_docs=False,
+        )
     except (ImportError, ValidationFailure, ValueError) as exc:
         raise SaturationError(
             f"exact StandardReleaseCandidateBinding verification failed: {exc}"
