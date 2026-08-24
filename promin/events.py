@@ -1843,6 +1843,223 @@ class _WriterLock:
             self.local.release()
 
 
+@dataclass(frozen=True)
+class _VerifiedEnvelopeRecord:
+    journal_file: str
+    payload: bytes
+    payload_digest: str
+
+
+class VerifiedEnvelopeSnapshot:
+    """One authority-bound, schema-free read of pre-validated envelopes.
+
+    Admission performs the same full envelope validation as public replay and
+    retains the exact canonical journal bytes.  Iteration only parses those
+    already-bound bytes; it never invokes the command/event/schema validators.
+    The writer lock is held for admission and each binding check, not for the
+    potentially long consumer pass.  Any durable byte drift poisons the view.
+    """
+
+    def __init__(self, store: "EventStore") -> None:
+        self._store = store
+        self._closed = False
+        self._iterated = False
+        self._poison: BaseException | None = None
+        self._records: tuple[_VerifiedEnvelopeRecord, ...]
+        self._binding: tuple[Any, ...]
+        self._lock = _WriterLock(store.lock_path, store.lock_timeout)
+        self._lock.__enter__()
+        try:
+            if store._verified_envelope_snapshot_active:
+                raise EventStoreError("verified envelope snapshot is already active")
+            # Strict refresh rejects pending/recovery state and verifies the
+            # journal-owned authority prefix before this snapshot is admitted.
+            store._strict_refresh_from_disk_locked()
+            control_binding = store._verified_envelope_control_binding_locked()
+            records: list[_VerifiedEnvelopeRecord] = []
+            previous_digest: str | None = None
+            sequence = 1
+            event_count = 0
+            semantic_digest = store.policy.genesis_event_semantic_digest
+            paths = sorted(_matching_paths(store.journal, "*.json"))
+            for path in paths:
+                envelope = store._read_envelope(path)
+                batch_digest = store._validate_envelope(
+                    envelope,
+                    expected_sequence=sequence,
+                    expected_previous_digest=previous_digest,
+                    validate_runtime=True,
+                    validation_operation="replay",
+                )
+                batch = envelope["batch"]
+                for event in batch["events"]:
+                    semantic_digest = _extend_event_semantic_digest(
+                        semantic_digest, event
+                    )
+                    event_count += 1
+                if (
+                    batch["cumulative_event_count"] != event_count
+                    or batch["event_semantic_digest"] != semantic_digest
+                ):
+                    raise JournalCorruption(
+                        "verified envelope snapshot semantic prefix differs from authority"
+                    )
+                payload = canonical_bytes(
+                    envelope,
+                    limits=ParseLimits(max_bytes=store.policy.max_envelope_bytes),
+                )
+                records.append(
+                    _VerifiedEnvelopeRecord(
+                        journal_file=path.name,
+                        payload=payload,
+                        payload_digest=hashlib.sha256(payload).hexdigest(),
+                    )
+                )
+                previous_digest = batch_digest
+                sequence += 1
+            expected_head = (
+                store._empty_head()
+                if not records
+                else {
+                    "sequence": sequence - 1,
+                    "batch_id": store._read_envelope(
+                        store._journal_path_for_sequence(sequence - 1)
+                    )["batch"]["batch_id"],
+                    "batch_digest": previous_digest,
+                }
+            )
+            if (
+                expected_head != store._head
+                or event_count != store._event_count
+                or semantic_digest != store._semantic_digest
+            ):
+                raise JournalCorruption(
+                    "verified envelope snapshot does not terminate at authority"
+                )
+            self._records = tuple(records)
+            self._binding = (
+                control_binding,
+                tuple(
+                    (record.journal_file, record.payload)
+                    for record in self._records
+                ),
+            )
+            if store._verified_envelope_binding_locked(self._binding) is not True:
+                raise EventStoreError("verified envelope snapshot binding changed during admission")
+            store._verified_envelope_snapshot_active = True
+        except BaseException as original_error:
+            self._closed = True
+            try:
+                self._lock.__exit__(None, None, None)
+            except BaseException as cleanup_error:
+                try:
+                    original_error.add_note(
+                        "verified envelope snapshot entry cleanup failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        else:
+            self._lock.__exit__(None, None, None)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified envelope snapshot is closed")
+        if self._poison is not None:
+            raise EventStoreError("verified envelope snapshot is poisoned") from self._poison
+        if not self._store._verified_envelope_snapshot_active:
+            raise EventStoreError("verified envelope snapshot lease is not active")
+
+    def _assert_binding(self) -> None:
+        self._ensure_open()
+        lock = _WriterLock(self._store.lock_path, self._store.lock_timeout)
+        lock.__enter__()
+        try:
+            if not self._store._verified_envelope_binding_locked(self._binding):
+                raise EventStoreError("verified envelope snapshot binding changed")
+        except BaseException as exc:
+            self._poison = exc
+            raise
+        finally:
+            lock.__exit__(None, None, None)
+
+    def iter_envelopes(self) -> Iterator[dict[str, Any]]:
+        """Consume this exact snapshot once without schema validation."""
+
+        self._ensure_open()
+        if self._iterated:
+            raise EventStoreError("verified envelope snapshot is already consumed")
+        self._iterated = True
+        return self._iterate_records()
+
+    def _iterate_records(self) -> Iterator[dict[str, Any]]:
+        try:
+            self._assert_binding()
+            limits = ParseLimits(max_bytes=self._store.policy.max_envelope_bytes)
+            for record in self._records:
+                # A consumer may suspend this generator between records and
+                # close the owning snapshot before resuming it.  Re-check the
+                # lease state immediately before every emission so a closed
+                # or poisoned view can never yield another envelope.
+                self._ensure_open()
+                value = parse_json_strict(record.payload, limits=limits)
+                if (
+                    not isinstance(value, dict)
+                    or canonical_bytes(value, limits=limits) != record.payload
+                    or hashlib.sha256(record.payload).hexdigest()
+                    != record.payload_digest
+                ):
+                    raise EventStoreError(
+                        "verified envelope snapshot record bytes are invalid"
+                    )
+                self._ensure_open()
+                yield copy.deepcopy(value)
+            self._assert_binding()
+        except BaseException as exc:
+            self._poison = exc
+            raise
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return self.iter_envelopes()
+
+    def close(self) -> None:
+        if self._closed:
+            raise EventStoreError("verified envelope snapshot is closed")
+        error: BaseException | None = self._poison
+        try:
+            lock = _WriterLock(self._store.lock_path, self._store.lock_timeout)
+            lock.__enter__()
+            try:
+                if not self._store._verified_envelope_binding_locked(self._binding):
+                    if error is None:
+                        error = EventStoreError(
+                            "verified envelope snapshot binding changed"
+                        )
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            finally:
+                lock.__exit__(None, None, None)
+        except BaseException as exc:
+            if error is None:
+                error = exc
+        finally:
+            self._closed = True
+            self._store._verified_envelope_snapshot_active = False
+        if error is not None:
+            if isinstance(error, EventStoreError):
+                raise error
+            raise EventStoreError("verified envelope snapshot close failed") from error
+
+    def __enter__(self) -> "VerifiedEnvelopeSnapshot":
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
 class VerifiedQueryLease:
     """Opaque, finite read lease with an entry/exit authority proof."""
 
@@ -2239,6 +2456,7 @@ class EventStore:
         self._verified_commit_phase_active = False
         self._verified_commit_phase_token: VerifiedCommitPhase | None = None
         self._verified_commit_phase_in_progress = False
+        self._verified_envelope_snapshot_active = False
         os.makedirs(_native_os_path(self.root), exist_ok=True)
         os.makedirs(_native_os_path(self.journal), exist_ok=True)
         os.makedirs(_native_os_path(self.pending), exist_ok=True)
@@ -2264,6 +2482,42 @@ class EventStore:
         """Open a finite authority-verified commit phase."""
 
         return VerifiedCommitPhase(self, max_operations)
+
+    def begin_verified_envelope_snapshot(self) -> VerifiedEnvelopeSnapshot:
+        """Open one finite, authority-bound schema-free envelope read."""
+
+        return VerifiedEnvelopeSnapshot(self)
+
+    def _verified_envelope_control_binding_locked(self) -> tuple[Any, ...]:
+        try:
+            head_payload = _read_bytes(self.head_path)
+            authority_payload = _read_bytes(self.authority_head_path)
+        except OSError as exc:
+            raise EventStoreError(
+                "verified envelope snapshot control binding is unreadable"
+            ) from exc
+        return (
+            self._root_identity,
+            self.active_activation_digest,
+            self.implementation_closure_digest,
+            head_payload,
+            authority_payload,
+        )
+
+    def _verified_envelope_binding_locked(
+        self, expected: tuple[Any, ...]
+    ) -> bool:
+        try:
+            control = self._verified_envelope_control_binding_locked()
+            current_records = tuple(
+                (path.name, _read_bytes(path))
+                for path in sorted(_matching_paths(self.journal, "*.json"))
+            )
+        except OSError as exc:
+            raise EventStoreError(
+                "verified envelope snapshot journal binding is unreadable"
+            ) from exc
+        return (control, current_records) == expected
 
     def _verified_commit_binding_locked(self) -> tuple[Any, ...]:
         """Read the bounded durable binding used between phase operations."""

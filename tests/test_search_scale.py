@@ -535,6 +535,113 @@ def test_saturation_audit_executes_pytest_only_sentinel() -> None:
 
 
 class SearchScaleFocusedTests(unittest.TestCase):
+    @staticmethod
+    def _event_record_runtime(store: object) -> object:
+        class Runtime:
+            def _context(self) -> object:
+                return object()
+
+            def _event_store(self, _context: object) -> object:
+                return store
+
+        return Runtime()
+
+    @staticmethod
+    def _envelope(*payloads: dict[str, object]) -> dict[str, object]:
+        return {"batch": {"events": [{"payload": payload} for payload in payloads]}}
+
+    def test_event_records_consumes_verified_envelope_snapshot_without_replay(self) -> None:
+        envelopes = [
+            self._envelope(
+                {"record_type": "Task", "task_id": "task:saturation:second"},
+                {"record_type": "Relation", "relation_id": "relation:saturation:second"},
+            ),
+            self._envelope(
+                {"record_type": "Task", "task_id": "task:saturation:first"},
+                {"record_type": "Grant", "grant_id": "grant:saturation:planner"},
+            ),
+        ]
+
+        class Store:
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+                self.replay_calls = 0
+
+            @contextmanager
+            def begin_verified_envelope_snapshot(self) -> Iterator[list[dict[str, object]]]:
+                self.snapshot_calls += 1
+                yield envelopes
+
+            def iter_envelopes(self, *, validate: bool = True) -> Iterator[dict[str, object]]:
+                self.replay_calls += 1
+                raise AssertionError("snapshot consumer must not replay the journal")
+
+        store = Store()
+        tasks, relations, grants = saturation._event_records(
+            self._event_record_runtime(store),
+            task_prefixes=("task:saturation:",),
+            relation_prefixes=("relation:saturation:",),
+            grant_ids={"grant:saturation:planner"},
+        )
+        self.assertEqual(list(tasks), ["task:saturation:second", "task:saturation:first"])
+        self.assertEqual(list(relations), ["relation:saturation:second"])
+        self.assertEqual(list(grants), ["grant:saturation:planner"])
+        self.assertEqual(store.snapshot_calls, 1)
+        self.assertEqual(store.replay_calls, 0)
+
+    def test_event_records_falls_back_to_public_validated_replay(self) -> None:
+        envelope = self._envelope({"record_type": "Task", "task_id": "task:saturation:fallback"})
+
+        class Store:
+            def iter_envelopes(self, *, validate: bool = True) -> Iterator[dict[str, object]]:
+                self.validate = validate
+                yield envelope
+
+        store = Store()
+        tasks, relations, grants = saturation._event_records(
+            self._event_record_runtime(store), task_prefixes=("task:saturation:",)
+        )
+        self.assertTrue(store.validate)
+        self.assertEqual(list(tasks), ["task:saturation:fallback"])
+        self.assertEqual(relations, {})
+        self.assertEqual(grants, {})
+
+    def test_verified_snapshot_entry_and_drift_errors_are_not_hidden(self) -> None:
+        class Store:
+            @contextmanager
+            def begin_verified_envelope_snapshot(self) -> Iterator[list[dict[str, object]]]:
+                raise RuntimeError("authority snapshot drift")
+                yield []
+
+        with self.assertRaisesRegex(RuntimeError, "authority snapshot drift"):
+            saturation._event_records(
+                self._event_record_runtime(Store()),
+                task_prefixes=("task:saturation:",),
+            )
+
+        drift = self._envelope(
+            {
+                "record_type": "Task",
+                "task_id": "task:physical-relation-saturation:000000",
+                "candidate_digest": "wrong",
+            }
+        )
+
+        class DriftStore:
+            @contextmanager
+            def begin_verified_envelope_snapshot(self) -> Iterator[list[dict[str, object]]]:
+                yield [drift]
+
+        with self.assertRaisesRegex(saturation.SaturationError, "partial or stale"):
+            saturation._inspect_physical_relation_corpus(
+                self._event_record_runtime(DriftStore()),
+                activation_digest=ACTIVATION,
+                candidate_digest="candidate",
+                artifact_ids=["artifact:0"],
+                relation_count=1,
+                relations_per_atomic_batch_max=1,
+            )
+
     def test_saturation_entrypoint_precedes_tools_module_shadow(self) -> None:
         original_path = list(sys.path)
         try:

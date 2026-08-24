@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 282
+CANONICAL_PACKAGE_FILE_COUNT = 283
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -341,6 +341,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_verified_commit_phase_refresh_budget.py',
         'tests/test_verified_commit_phase_service.py',
         'tests/test_verified_commit_phase_tamper.py',
+        'tests/test_verified_envelope_snapshot.py',
         'tests/test_verified_query_phase.py',
         'THIRD_PARTY_NOTICES.md',
         'tools/compile_schema.py',

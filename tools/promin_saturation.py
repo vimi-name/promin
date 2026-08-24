@@ -2534,23 +2534,34 @@ def _event_records(
     tasks: dict[str, dict[str, Any]] = {}
     relations: dict[str, dict[str, Any]] = {}
     grants: dict[str, dict[str, Any]] = {}
-    for envelope in store.iter_envelopes():
-        for event in envelope.get("batch", {}).get("events", ()):
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("record_type") == "Task" and isinstance(payload.get("task_id"), str):
-                task_id = payload["task_id"]
-                if task_prefixes is None or task_id.startswith(task_prefixes):
-                    tasks[task_id] = payload
-            elif payload.get("record_type") == "Relation" and isinstance(payload.get("relation_id"), str):
-                relation_id = payload["relation_id"]
-                if relation_prefixes is None or relation_id.startswith(relation_prefixes):
-                    relations[relation_id] = payload
-            elif payload.get("record_type") == "Grant" and isinstance(payload.get("grant_id"), str):
-                grant_id = payload["grant_id"]
-                if grant_ids is None or grant_id in grant_ids:
-                    grants[grant_id] = payload
+    # Post-commit corpus inspection must consume the atomically admitted
+    # envelope view when the EventStore provides it.  The view is already
+    # fully authority-validated; importantly, we do not weaken the public
+    # replay API or manufacture an unvalidated alternative for older stores.
+    def consume(envelopes: Any) -> None:
+        for envelope in envelopes:
+            for event in envelope.get("batch", {}).get("events", ()):
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("record_type") == "Task" and isinstance(payload.get("task_id"), str):
+                    task_id = payload["task_id"]
+                    if task_prefixes is None or task_id.startswith(task_prefixes):
+                        tasks[task_id] = payload
+                elif payload.get("record_type") == "Relation" and isinstance(payload.get("relation_id"), str):
+                    relation_id = payload["relation_id"]
+                    if relation_prefixes is None or relation_id.startswith(relation_prefixes):
+                        relations[relation_id] = payload
+                elif payload.get("record_type") == "Grant" and isinstance(payload.get("grant_id"), str):
+                    grant_id = payload["grant_id"]
+                    if grant_ids is None or grant_id in grant_ids:
+                        grants[grant_id] = payload
+    snapshot_factory = getattr(store, "begin_verified_envelope_snapshot", None)
+    if callable(snapshot_factory):
+        with snapshot_factory() as envelopes:
+            consume(envelopes)
+    else:
+        consume(store.iter_envelopes(validate=True))
     return tasks, relations, grants
 
 
