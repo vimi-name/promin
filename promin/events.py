@@ -2004,14 +2004,9 @@ class VerifiedEnvelopeSnapshot:
                 # or poisoned view can never yield another envelope.
                 self._ensure_open()
                 value = parse_json_strict(record.payload, limits=limits)
-                if (
-                    not isinstance(value, dict)
-                    or canonical_bytes(value, limits=limits) != record.payload
-                    or hashlib.sha256(record.payload).hexdigest()
-                    != record.payload_digest
-                ):
+                if not isinstance(value, dict):
                     raise EventStoreError(
-                        "verified envelope snapshot record bytes are invalid"
+                        "verified envelope snapshot record is not an object"
                     )
                 self._ensure_open()
                 yield copy.deepcopy(value)

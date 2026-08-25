@@ -258,8 +258,8 @@
     },
     {
       "path": "docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md",
-      "sha256": "05d57ef80b27e9093bcbe83b839c5e9f71c931ab889908266eb5dc98da31d65f",
-      "size": 16958
+      "sha256": "1d0d4891ac8c5ce09cbc424a23d7ea21508d12881a9f4173d0af0c377e02beb6",
+      "size": 18981
     },
     {
       "path": "examples/project-brief.json",
@@ -478,8 +478,8 @@
     },
     {
       "path": "promin/events.py",
-      "sha256": "f81548bdf3f7fd106db9a17f04753afeede226f050c343546fa84819afc59e92",
-      "size": 382312
+      "sha256": "212ecb6bb4ad0f14477da1cbde7104274f98485f978ca74ff093a6abb1dc88a6",
+      "size": 382081
     },
     {
       "path": "promin/evidence.py",
@@ -1313,8 +1313,8 @@
     },
     {
       "path": "tests/test_verified_envelope_snapshot.py",
-      "sha256": "689563c7e8230ed0fce7a21fe7cecec0d923a04087883131991bede980dd4fbd",
-      "size": 5903
+      "sha256": "7aee9e268641c4552bca46bee7132091eebfdecf40a683cb1d7234c6fef708f8",
+      "size": 6785
     },
     {
       "path": "tests/test_verified_query_phase.py",

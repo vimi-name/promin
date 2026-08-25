@@ -181,3 +181,29 @@ proxy_acceptance=false
 ## Next safe action
 
 Refresh exact package integrity, commit the no-document archive-binding correction, build a fresh candidate, then run exactly one fresh Python 3.14 Windows 100k workload. Keep downstream aggregates, modeled Linux/WSL, benchmark, product inspection, client PDF, and cleanup gated behind terminal success and independent audit.
+
+## R28 physical corpus and snapshot iteration correction
+
+The r28 Python 3.14 run passed exact package binding, initialization, physical generation of all 100,000 files, immutable Git snapshot, one inventory pass, and physical relation corpus generation. Its journal reached exactly 1,604 durable batches. It then spent a sustained interval in full verified-envelope snapshot admission and a further public validated replay/rebuild before ending with launcher exit `-1`; no saturation result or failure receipt was published. The root, its partial workspace, archive identity, launcher terminal, and all generated evidence remain preserved/no-credit.
+
+The read-only scaling review established that verified snapshot admission already strictly validates, canonicalizes, hashes, and retains every payload, while snapshot iteration repeated canonicalization and SHA-256 on those same immutable bytes. Iteration now strictly parses an admitted payload and checks it is an object, while preserving pre-iteration, post-iteration, and close-time durable binding checks. A focused regression forbids `canonical_bytes` and SHA-256 inside the iterator; the full snapshot suite passed `11/11`. This is a bounded performance correction, not a release or performance claim. A new exact candidate and fresh physical run remain necessary.
+
+## Updated claims
+
+validation_claim=targeted_partial
+runtime_diagnostic_pass=false
+acceptance_pass=false
+visual_acceptance=false
+performance_acceptance=false
+pass_credit=false
+g27_g45_pass_credit=false
+authority_confirmed=0
+authority_pending=8
+full_static_scan_deferred=true
+mrets_layer=preserved
+ugt_layer=additive
+proxy_acceptance=false
+
+## Next safe action
+
+Refresh exact package integrity, commit the snapshot-iteration correction, build a fresh candidate, and run exactly one fresh Python 3.14 Windows 100k workload. Keep all aggregates, modeled Linux/WSL, comparative benchmark, product inspection, client PDF, and cleanup gated behind a terminal successful result and an independent audit.

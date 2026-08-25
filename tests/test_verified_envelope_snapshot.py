@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
 from promin.canonical import canonical_bytes
+import promin.events as events_module
 from promin.events import EventStoreError
 from tests.test_events_projection import (
     ACTIVATION,
@@ -69,6 +71,29 @@ def test_snapshot_matches_public_order_and_payload_without_revalidating_iteratio
         assert validate_calls == len(public) + 1
     finally:
         store.close()
+
+
+def test_snapshot_iteration_reuses_admitted_payload_binding() -> None:
+    """Iteration must not canonicalize or hash bytes already bound at admission."""
+
+    tree = ast.parse(Path(events_module.__file__).read_text(encoding="utf-8"))
+    snapshot_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "VerifiedEnvelopeSnapshot"
+    )
+    iterator = next(
+        node
+        for node in snapshot_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_iterate_records"
+    )
+    names = {node.id for node in ast.walk(iterator) if isinstance(node, ast.Name)}
+    attributes = {
+        node.attr for node in ast.walk(iterator) if isinstance(node, ast.Attribute)
+    }
+
+    assert "canonical_bytes" not in names
+    assert "sha256" not in attributes
 
 
 def test_public_iterator_still_rejects_validation_bypass(tmp_path: Path) -> None:
