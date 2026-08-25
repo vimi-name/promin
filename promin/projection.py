@@ -60,6 +60,7 @@ _COMPACT_INVENTORY_ENTRY_THRESHOLD = 100_000
 _INVENTORY_BUCKET_COUNT = 256
 _INVENTORY_BUCKET_DIGEST_ALGORITHM = "inventory-path-buckets-v1"
 _INVENTORY_STORAGE_LAYOUT = "physical-inventory-buckets-v1"
+_INVENTORY_CONTENT_INDEX_ALGORITHM = "inventory-content-fts-v1"
 _SEARCH_ROUTE = "search-v1"
 _READY_FRONTIER_ROUTE = "ready-frontier-v1"
 _READY_FRONTIER_ORDERING = ("created_at-ascending", "task_id-ascending")
@@ -576,6 +577,12 @@ class Projection:
             "inventory_storage_mode": "none",
             "inventory_bucket_count": 0,
             "inventory_bucket_manifest_digest": "",
+            "inventory_stream_digest": "",
+            "inventory_digest": "",
+            "inventory_manifest_digest": "",
+            "inventory_content_index_algorithm": "",
+            "inventory_content_index_rows": 0,
+            "inventory_content_index_digest": "",
         }
         try:
             connection = sqlite3.connect(sqlite_path(temporary))
@@ -627,6 +634,18 @@ class Projection:
                     "inventory_bucket_count": str(stats["inventory_bucket_count"]),
                     "inventory_bucket_manifest_digest": stats[
                         "inventory_bucket_manifest_digest"
+                    ],
+                    "inventory_stream_digest": stats["inventory_stream_digest"],
+                    "inventory_digest": stats["inventory_digest"],
+                    "inventory_manifest_digest": stats["inventory_manifest_digest"],
+                    "inventory_content_index_algorithm": stats[
+                        "inventory_content_index_algorithm"
+                    ],
+                    "inventory_content_index_rows": str(
+                        stats["inventory_content_index_rows"]
+                    ),
+                    "inventory_content_index_digest": stats[
+                        "inventory_content_index_digest"
                     ],
                 }
                 connection.executemany("INSERT INTO metadata(key,value) VALUES (?,?)", sorted(metadata.items()))
@@ -821,6 +840,12 @@ class Projection:
               FOREIGN KEY(state_id) REFERENCES ready_frontiers(state_id) ON DELETE CASCADE
             ) WITHOUT ROWID;
             CREATE VIRTUAL TABLE entity_fts USING fts5(
+              id UNINDEXED,
+              text,
+              tokenize='unicode61',
+              detail='none'
+            );
+            CREATE VIRTUAL TABLE inventory_content_fts USING fts5(
               id UNINDEXED,
               text,
               tokenize='unicode61',
@@ -1409,6 +1434,113 @@ class Projection:
             for bucket in range(_INVENTORY_BUCKET_COUNT)
         )
 
+    @classmethod
+    def _inventory_content_index_digest(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        stream_digest: str,
+        inventory_digest: str,
+        manifest_digest: str,
+        bucket_manifest_digest: str,
+    ) -> tuple[int, str]:
+        """Commit the derived physical text index to its verified inputs."""
+
+        inventory_count = connection.execute(
+            "SELECT COUNT(*) FROM inventory_records"
+        ).fetchone()[0]
+        content_count = connection.execute(
+            "SELECT COUNT(*) FROM inventory_content_fts"
+        ).fetchone()[0]
+        distinct_content_ids = connection.execute(
+            "SELECT COUNT(DISTINCT id) FROM inventory_content_fts"
+        ).fetchone()[0]
+        if (
+            type(inventory_count) is not int
+            or type(content_count) is not int
+            or type(distinct_content_ids) is not int
+            or content_count != inventory_count
+            or distinct_content_ids != inventory_count
+        ):
+            raise ProjectionError(
+                "compact inventory content index cardinality is invalid"
+            )
+        orphan = connection.execute(
+            """
+            SELECT 1
+            FROM inventory_content_fts AS content
+            LEFT JOIN inventory_records AS records ON records.id=content.id
+            WHERE records.id IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if orphan is not None:
+            raise ProjectionError("compact inventory content index contains an orphan row")
+
+        row_hasher = hashlib.sha256(b"promin:inventory-content-rows:v1\x00")
+        row_count = 0
+        previous: tuple[int, str] | None = None
+        for entity_id, path, file_digest, size, bucket, content_id, search_text in connection.execute(
+            """
+            SELECT records.id,records.path,records.digest,records.size,records.bucket,
+                   content.id,content.text
+            FROM inventory_records AS records
+            LEFT JOIN inventory_content_fts AS content ON content.id=records.id
+            ORDER BY records.bucket,records.path
+            """
+        ):
+            if (
+                not isinstance(entity_id, str)
+                or not isinstance(path, str)
+                or not isinstance(file_digest, str)
+                or type(size) is not int
+                or type(bucket) is not int
+                or not 0 <= bucket < _INVENTORY_BUCKET_COUNT
+                or content_id != entity_id
+                or not isinstance(search_text, str)
+                or not search_text
+                or len(search_text.encode("utf-8")) > 4096
+                or "\x00" in search_text
+            ):
+                raise ProjectionError("compact inventory content index row is invalid")
+            cls._validate_inventory_path(path)
+            if _DIGEST.fullmatch(file_digest) is None or size < 0:
+                raise ProjectionError("compact inventory content index row is invalid")
+            expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            if entity_id != expected_id:
+                raise ProjectionError("compact inventory content index identity is invalid")
+            position = (bucket, path)
+            if previous is not None and position <= previous:
+                raise ProjectionError("compact inventory content index rows are not ordered")
+            previous = position
+            row = {
+                "id": entity_id,
+                "path": path,
+                "digest": file_digest,
+                "size": size,
+                "search_text": search_text,
+            }
+            encoded = canonical_bytes(row)
+            row_hasher.update(len(encoded).to_bytes(8, "big"))
+            row_hasher.update(encoded)
+            row_count += 1
+        if row_count != inventory_count:
+            raise ProjectionError(
+                "compact inventory content index cardinality is invalid"
+            )
+        return row_count, digest_value(
+            {
+                "record_type": "InventoryContentIndexCommitment",
+                "algorithm": _INVENTORY_CONTENT_INDEX_ALGORITHM,
+                "stream_digest": stream_digest,
+                "inventory_digest": inventory_digest,
+                "manifest_digest": manifest_digest,
+                "bucket_manifest_digest": bucket_manifest_digest,
+                "row_count": row_count,
+                "rows_digest": row_hasher.hexdigest(),
+            }
+        )
+
     def _ingest_compact_inventory_for_rebuild(
         self,
         connection: sqlite3.Connection,
@@ -1439,6 +1571,7 @@ class Projection:
         ]
         bucket_counts = [0] * _INVENTORY_BUCKET_COUNT
         pending: list[tuple[str, str, str, int, int]] = []
+        pending_content: list[tuple[str, str]] = []
 
         def flush() -> None:
             if pending:
@@ -1449,6 +1582,14 @@ class Projection:
                     tuple(pending),
                 )
                 pending.clear()
+            if pending_content:
+                self._insert_bulk_values(
+                    connection,
+                    "inventory_content_fts",
+                    ("id", "text"),
+                    tuple(pending_content),
+                )
+                pending_content.clear()
 
         for row, encoded_line in source:
             stats["inventory_entries"] += 1
@@ -1476,6 +1617,7 @@ class Projection:
                 search_text = row["search_text"]
                 if (
                     not isinstance(search_text, str)
+                    or not search_text
                     or len(search_text.encode("utf-8")) > 4096
                     or "\x00" in search_text
                 ):
@@ -1500,6 +1642,11 @@ class Projection:
             bucket_counts[bucket] += 1
             expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
             pending.append((expected_id, path, file_digest, size, bucket))
+            if not persisted:
+                raise ProjectionError(
+                    "compact inventory content index requires a persisted stream"
+                )
+            pending_content.append((expected_id, search_text))
             if len(pending) >= _BULK_REBUILD_BATCH_ROWS:
                 flush()
             stats["inventory_proxies"] += 1
@@ -1539,6 +1686,21 @@ class Projection:
         stats["inventory_bucket_manifest_digest"] = self._inventory_bucket_manifest_digest(
             inventory.entry_count, manifest_rows
         )
+        content_rows, content_digest = self._inventory_content_index_digest(
+            connection,
+            stream_digest=inventory.stream_digest,
+            inventory_digest=inventory.inventory_digest or "",
+            manifest_digest=inventory.manifest_digest or "",
+            bucket_manifest_digest=stats["inventory_bucket_manifest_digest"],
+        )
+        if content_rows != inventory.entry_count:
+            raise ProjectionError("compact inventory content index cardinality differs from manifest")
+        stats["inventory_stream_digest"] = inventory.stream_digest
+        stats["inventory_digest"] = inventory.inventory_digest or ""
+        stats["inventory_manifest_digest"] = inventory.manifest_digest or ""
+        stats["inventory_content_index_algorithm"] = _INVENTORY_CONTENT_INDEX_ALGORITHM
+        stats["inventory_content_index_rows"] = content_rows
+        stats["inventory_content_index_digest"] = content_digest
 
     def _ingest_events(self, connection: sqlite3.Connection, event_store: EventStore, stats: dict[str, int]) -> None:
         for envelope in event_store.iter_envelopes(validate=True):
@@ -2748,6 +2910,9 @@ class Projection:
             "projection_compaction_count",
             "inventory_storage_mode", "inventory_bucket_count",
             "inventory_bucket_manifest_digest",
+            "inventory_stream_digest", "inventory_digest", "inventory_manifest_digest",
+            "inventory_content_index_algorithm", "inventory_content_index_rows",
+            "inventory_content_index_digest",
         }
         if set(metadata) != required:
             raise ProjectionError("projection metadata is incomplete or unknown")
@@ -2769,7 +2934,7 @@ class Projection:
             "inventory_proxies", "inventory_relations", "inventory_passes",
             "product_passes", "event_count", "incremental_commit_count",
             "incremental_changed_records", "projection_compaction_count",
-            "inventory_bucket_count",
+            "inventory_bucket_count", "inventory_content_index_rows",
         )
         try:
             numeric = {key: int(metadata[key]) for key in numeric_keys}
@@ -2795,11 +2960,31 @@ class Projection:
             or numeric["inventory_passes"] not in {0, 1}
             or numeric["product_passes"] != 0
             or numeric["inventory_bucket_count"] not in {0, _INVENTORY_BUCKET_COUNT}
+            or numeric["inventory_content_index_rows"] < 0
         ):
             raise ProjectionError("projection metadata binding is invalid")
         storage_mode = metadata["inventory_storage_mode"]
         if storage_mode not in {"none", "semantic-artifacts-v1", _INVENTORY_STORAGE_LAYOUT}:
             raise ProjectionError("projection inventory storage mode is invalid")
+        if storage_mode == _INVENTORY_STORAGE_LAYOUT:
+            if (
+                metadata["inventory_content_index_algorithm"]
+                != _INVENTORY_CONTENT_INDEX_ALGORITHM
+                or not _DIGEST.fullmatch(metadata["inventory_stream_digest"])
+                or not _DIGEST.fullmatch(metadata["inventory_digest"])
+                or not _DIGEST.fullmatch(metadata["inventory_manifest_digest"])
+                or not _DIGEST.fullmatch(metadata["inventory_content_index_digest"])
+            ):
+                raise ProjectionError("compact inventory content index metadata is invalid")
+        elif (
+            metadata["inventory_content_index_algorithm"] != ""
+            or metadata["inventory_content_index_rows"] != "0"
+            or metadata["inventory_content_index_digest"] != ""
+            or metadata["inventory_stream_digest"] != ""
+            or metadata["inventory_digest"] != ""
+            or metadata["inventory_manifest_digest"] != ""
+        ):
+            raise ProjectionError("non-compact inventory has content index metadata")
         if storage_mode == _INVENTORY_STORAGE_LAYOUT:
             if numeric["inventory_bucket_count"] != _INVENTORY_BUCKET_COUNT:
                 raise ProjectionError("compact inventory bucket cardinality is invalid")
@@ -2833,6 +3018,21 @@ class Projection:
                 numeric["inventory_entries"], manifest_rows
             ):
                 raise ProjectionError("compact inventory bucket manifest digest differs from metadata")
+            content_rows, content_digest = self._inventory_content_index_digest(
+                connection,
+                stream_digest=metadata["inventory_stream_digest"],
+                inventory_digest=metadata["inventory_digest"],
+                manifest_digest=metadata["inventory_manifest_digest"],
+                bucket_manifest_digest=metadata["inventory_bucket_manifest_digest"],
+            )
+            if content_rows != numeric["inventory_entries"]:
+                raise ProjectionError("compact inventory content index cardinality is invalid")
+            if connection.execute(
+                "SELECT COUNT(*) FROM inventory_content_fts"
+            ).fetchone()[0] != numeric["inventory_content_index_rows"]:
+                raise ProjectionError("compact inventory content index row count differs from metadata")
+            if content_digest != metadata["inventory_content_index_digest"]:
+                raise ProjectionError("compact inventory content index commitment differs from metadata")
         elif (
             numeric["inventory_bucket_count"] != 0
             or metadata["inventory_bucket_manifest_digest"] != ""
@@ -2842,6 +3042,10 @@ class Projection:
             raise ProjectionError("non-compact inventory has bucket commitment rows")
         elif connection.execute("SELECT COUNT(*) FROM inventory_records").fetchone()[0] != 0:
             raise ProjectionError("non-compact inventory has physical inventory rows")
+        if storage_mode != _INVENTORY_STORAGE_LAYOUT and connection.execute(
+            "SELECT COUNT(*) FROM inventory_content_fts"
+        ).fetchone()[0] != 0:
+            raise ProjectionError("non-compact inventory has physical content index rows")
         try:
             parse_timestamp(metadata["built_at"])
             actual_entity_count, actual_relation_count = self._read_projection_cardinality(
@@ -2869,6 +3073,7 @@ class Projection:
             "inventory_bucket_manifest_digest": metadata[
                 "inventory_bucket_manifest_digest"
             ],
+            "inventory_content_index_rows": numeric["inventory_content_index_rows"],
             "inventory_relations": numeric["inventory_relations"],
             "inventory_passes": numeric["inventory_passes"],
             "product_passes": numeric["product_passes"],
@@ -2967,6 +3172,58 @@ class Projection:
         now: str | _datetime.datetime | None = None,
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
+        return self._search_internal(
+            query,
+            depth=depth,
+            budget=budget,
+            ranking=ranking,
+            continuation_token=continuation_token,
+            resume_binding=resume_binding,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            phase_status=None,
+        )
+
+    def _search_with_phase_status(
+        self,
+        query: str,
+        *,
+        depth: int | None = None,
+        budget: Mapping[str, int] | None = None,
+        ranking: str | None = None,
+        continuation_token: str | None = None,
+        resume_binding: Mapping[str, str] | None = None,
+        now: str | _datetime.datetime | None = None,
+        ttl_seconds: int | None = None,
+        phase_status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Search using a status validated at immutable query phase entry."""
+
+        return self._search_internal(
+            query,
+            depth=depth,
+            budget=budget,
+            ranking=ranking,
+            continuation_token=continuation_token,
+            resume_binding=resume_binding,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            phase_status=phase_status,
+        )
+
+    def _search_internal(
+        self,
+        query: str,
+        *,
+        depth: int | None,
+        budget: Mapping[str, int] | None,
+        ranking: str | None,
+        continuation_token: str | None,
+        resume_binding: Mapping[str, str] | None,
+        now: str | _datetime.datetime | None,
+        ttl_seconds: int | None,
+        phase_status: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         resolved_depth = self.limits.default_depth if depth is None else depth
         resolved_ttl = (
             self.limits.default_ttl_seconds
@@ -2986,6 +3243,7 @@ class Projection:
                 resume_binding=resume_binding,
                 now=now,
                 ttl_seconds=resolved_ttl,
+                phase_status=phase_status,
             )
         normalized_query = self._normalize_query(query)
         checked_budget = self._validate_budget(
@@ -3033,6 +3291,7 @@ class Projection:
                 connection=connection,
                 persist_continuation=False,
                 database_path=database_path,
+                phase_status=phase_status,
             )
         if not initial_result["truncated"]:
             return initial_result
@@ -3049,6 +3308,7 @@ class Projection:
                 checked_binding,
                 connection=connection,
                 database_path=database_path,
+                phase_status=phase_status,
             )
 
     def ready_frontier(
@@ -3277,6 +3537,58 @@ class Projection:
         now: str | _datetime.datetime | None = None,
         ttl_seconds: int,
     ) -> dict[str, Any]:
+        return self._renew_search_internal(
+            token,
+            query=query,
+            depth=depth,
+            budget=budget,
+            ranking=ranking,
+            resume_binding=resume_binding,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            phase_status=None,
+        )
+
+    def _renew_search_with_phase_status(
+        self,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        budget: Mapping[str, int],
+        ranking: str,
+        resume_binding: Mapping[str, str],
+        now: str | _datetime.datetime | None = None,
+        ttl_seconds: int,
+        phase_status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Renew a phase continuation without rescanning projection status."""
+
+        return self._renew_search_internal(
+            token,
+            query=query,
+            depth=depth,
+            budget=budget,
+            ranking=ranking,
+            resume_binding=resume_binding,
+            now=now,
+            ttl_seconds=ttl_seconds,
+            phase_status=phase_status,
+        )
+
+    def _renew_search_internal(
+        self,
+        token: str,
+        *,
+        query: str,
+        depth: int,
+        budget: Mapping[str, int],
+        ranking: str,
+        resume_binding: Mapping[str, str],
+        now: str | _datetime.datetime | None,
+        ttl_seconds: int,
+        phase_status: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         """Issue a fresh token for an authenticated, still-valid search cursor."""
 
         current_time = _canonical_now(now)
@@ -3302,7 +3614,11 @@ class Projection:
             for key, value in expected.items():
                 if payload[key] != value:
                     raise ContinuationError(f"continuation {key} binding mismatch")
-            status = self._status_connection(connection)
+            status = (
+                phase_status
+                if phase_status is not None
+                else self._status_connection(connection)
+            )
             self._validate_token_snapshot_binding(payload, status)
             issued_at = current_time
             expiry = format_utc_second(
@@ -3346,6 +3662,7 @@ class Projection:
         resume_binding: Mapping[str, str] | None,
         now: str | _datetime.datetime | None,
         ttl_seconds: int,
+        phase_status: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         current_time = _canonical_now(now)
         checked_budget = self._validate_budget(
@@ -3378,6 +3695,7 @@ class Projection:
                 payload["resume_binding"],
                 token_binding=payload,
                 connection=connection,
+                phase_status=phase_status,
             )
 
     def _search_page(
@@ -3395,6 +3713,7 @@ class Projection:
         connection: sqlite3.Connection | None = None,
         persist_continuation: bool = True,
         database_path: Path | None = None,
+        phase_status: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if cursor < 0:
             raise ContinuationError("continuation cursor is negative")
@@ -3404,7 +3723,11 @@ class Projection:
             else contextlib.nullcontext(connection)
         )
         with connection_context as connection:
-            status = self._status_connection(connection)
+            status = (
+                phase_status
+                if phase_status is not None
+                else self._status_connection(connection)
+            )
             if token_binding is not None:
                 self._validate_token_snapshot_binding(token_binding, status)
             ranked, refinement_required, refinement_hints = self._ranked_candidates_for_status(
@@ -4196,7 +4519,10 @@ class Projection:
         if physical is not None:
             return ([{"id": physical[0], "tier": 0, "score": 0.0}], False, [])
         ranked: list[dict[str, Any]] = []
-        tokens = _QUERY_TOKEN.findall(query)
+        normalized_fts_query = " ".join(query.split())
+        tokens = _QUERY_TOKEN.findall(normalized_fts_query)
+        if not tokens:
+            return [], False, []
         expression = " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
         rows = connection.execute(
             "SELECT id,bm25(entity_fts) AS score FROM entity_fts "
@@ -4208,6 +4534,17 @@ class Projection:
             if entity_id not in seen:
                 ranked.append({"id": entity_id, "tier": 1, "score": float(score)})
                 seen.add(entity_id)
+        physical_rows = connection.execute(
+            "SELECT id,bm25(inventory_content_fts) AS score "
+            "FROM inventory_content_fts "
+            "WHERE inventory_content_fts MATCH ? ORDER BY score ASC,id ASC LIMIT ?",
+            (expression, top_k + 1),
+        )
+        for entity_id, score in physical_rows:
+            if entity_id not in seen:
+                ranked.append({"id": entity_id, "tier": 1, "score": float(score)})
+                seen.add(entity_id)
+        ranked.sort(key=lambda candidate: (candidate["tier"], candidate["score"], candidate["id"]))
         refinement_required = len(ranked) > top_k
         selected = ranked[:top_k]
         hints = (
@@ -4237,6 +4574,7 @@ class Projection:
             status["head_sequence"],
             status["head_digest"],
             status["semantic_digest"],
+            status["inventory_content_index_digest"],
             ranking,
             query,
             top_k,
@@ -4380,7 +4718,10 @@ class Projection:
     def _normalize_query(self, query: str) -> str:
         if not isinstance(query, str):
             raise ProjectionError("query must be text")
-        normalized = " ".join(query.strip().split())
+        # Preserve internal whitespace for exact inventory ID/path lookup.
+        # FTS receives a separately token-normalized expression only after
+        # both exact endpoints miss.
+        normalized = query.strip()
         if not normalized or len(normalized.encode("utf-8")) > self.limits.max_query_bytes:
             raise ProjectionError("query is empty or exceeds the verified byte ceiling")
         if not _QUERY_TOKEN.search(normalized):

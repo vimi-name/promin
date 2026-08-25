@@ -2296,6 +2296,67 @@ class EventsProjectionTests(unittest.TestCase):
         self.assertEqual(result["entities"][0]["payload"]["inventory_path"], raw["path"])
         self.assertNotIn("search_text", result["entities"][0]["payload"])
 
+    def test_compact_persisted_content_stays_out_of_semantic_storage(self) -> None:
+        raw = {
+            "path": "src/compact-semantic-source.txt",
+            "digest": hashlib.sha256(b"compact semantic source").hexdigest(),
+            "size": len(b"compact semantic source"),
+            "search_text": "compact semantic source",
+        }
+        encoded = canonical_owner_bytes(raw)
+        stream_path = self.root / "compact-verified-inventory.jsonl"
+        stream_path.write_bytes(encoded)
+        identity_digest = hashlib.sha256(
+            canonical_owner_bytes(
+                {"path": raw["path"], "digest": raw["digest"], "size": raw["size"]}
+            )
+        ).hexdigest()
+        inventory = VerifiedInventoryInput(
+            activation_digest=ACTIVATION,
+            stream_digest=hashlib.sha256(encoded).hexdigest(),
+            inventory_digest=identity_digest,
+            entry_count=1,
+            stream_path=stream_path,
+            stream_bytes=len(encoded),
+            manifest_digest="5" * 64,
+            observed_at=NOW,
+            retain_artifact_entities=False,
+        )
+        projection = Projection(
+            self.root / "compact-streamed-projection.sqlite",
+            token_key=b"j" * 32,
+            implementation_closure_digest=IMPLEMENTATION,
+            limits=PROJECTION_LIMITS,
+            relation_domains=DOMAINS,
+        )
+        rebuilt = projection.rebuild(self.store, inventory=inventory)
+        result = projection.search(
+            "compact semantic source", depth=1, resume_binding=RESUME_BINDING
+        )
+        artifact_id = "artifact:file:" + hashlib.sha256(raw["path"].encode("utf-8")).hexdigest()[:48]
+        self.assertEqual(rebuilt["inventory_content_index_rows"], 1)
+        self.assertEqual([entity["id"] for entity in result["entities"]], [artifact_id])
+        self.assertEqual(
+            result["entities"][0]["payload"]["inventory_path"], raw["path"]
+        )
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM entities WHERE entity_type='Artifact'"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM inventory_content_fts").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM entity_fts WHERE id=?", (artifact_id,)
+                ).fetchone()[0],
+                0,
+            )
+
     def test_exact_punctuated_id_bypasses_fts_and_token_search_remains_compatible(self) -> None:
         task_id = "task:mutation-primary"
         self.store.commit(

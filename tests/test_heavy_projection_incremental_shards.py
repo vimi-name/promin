@@ -271,3 +271,109 @@ def test_compact_physical_task_artifact_endpoint_is_exact_path_bound_and_typed(
         )["entities"] == []
     finally:
         store.close()
+
+
+def test_compact_stream_indexes_content_without_semantic_materialization(
+    tmp_path: Path,
+) -> None:
+    """Persisted compact content is searchable only through physical storage."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-content")
+    try:
+        rebuilt = projection.rebuild(store, inventory=compact_inventory)
+        binding = {
+            field: f"compact-content-{index}"
+            for index, field in enumerate(projection.limits.required_resume_binding_fields)
+        }
+        result = projection.search(
+            "synthetic source 00000000",
+            depth=1,
+            resume_binding=binding,
+            now=profile.CREATED_AT,
+        )
+        artifact_id = profile._artifact_id(0)
+        assert rebuilt["inventory_content_index_algorithm"] == "inventory-content-fts-v1"
+        assert rebuilt["inventory_content_index_rows"] == 4
+        assert isinstance(rebuilt["inventory_content_index_digest"], str)
+        assert [entity["id"] for entity in result["entities"]] == [artifact_id]
+        assert result["entities"][0]["payload"]["inventory_path"] == (
+            "product/record-00000000.txt"
+        )
+        with sqlite3.connect(projection.db_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM entities WHERE entity_type='Artifact'"
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM entity_fts WHERE id=?", (artifact_id,)
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM semantic_rows WHERE key LIKE 'artifact:file:%'"
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM inventory_content_fts"
+            ).fetchone()[0] == 4
+    finally:
+        store.close()
+
+
+def test_compact_content_index_is_deterministic_and_tamper_fails_status(
+    tmp_path: Path,
+) -> None:
+    """Content commitments are stable across rebuilds and bind FTS text."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    first = _projection(tmp_path, "compact-content-first")
+    second = _projection(tmp_path, "compact-content-second")
+    try:
+        first_result = first.rebuild(store, inventory=compact_inventory)
+        second_result = second.rebuild(store, inventory=compact_inventory)
+        assert first_result["inventory_content_index_digest"] == second_result[
+            "inventory_content_index_digest"
+        ]
+        assert first.status()["inventory_content_index_digest"] == first_result[
+            "inventory_content_index_digest"
+        ]
+        with sqlite3.connect(first.db_path) as connection:
+            connection.execute(
+                "UPDATE inventory_content_fts SET text='tampered physical content' WHERE id=?",
+                (profile._artifact_id(0),),
+            )
+            connection.commit()
+        with pytest.raises(projection_module.ProjectionError, match="content index"):
+            first.status()
+    finally:
+        store.close()
+
+
+def test_compact_content_index_rejects_orphan_even_with_forged_row_metadata(
+    tmp_path: Path,
+) -> None:
+    """Orphan FTS rows cannot be hidden by changing the mutable row count."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-content-orphan")
+    try:
+        projection.rebuild(store, inventory=compact_inventory)
+        with sqlite3.connect(projection.db_path) as connection:
+            connection.execute(
+                "INSERT INTO inventory_content_fts(id,text) VALUES (?,?)",
+                ("artifact:file:orphan", "orphan content"),
+            )
+            connection.execute(
+                "UPDATE metadata SET value='5' WHERE key='inventory_content_index_rows'"
+            )
+            connection.commit()
+        with pytest.raises(projection_module.ProjectionError, match="content index"):
+            projection.status()
+    finally:
+        store.close()

@@ -4078,8 +4078,64 @@ def _contains_inventory_artifact(card: Any) -> bool:
         isinstance(entity, Mapping)
         and isinstance(entity.get("id"), str)
         and entity["id"].startswith("artifact:file:")
+        and entity.get("entity_type") == "Artifact"
+        and entity.get("data_class") == "untrusted-source"
+        and isinstance(entity.get("payload"), Mapping)
+        and entity["payload"].get("record_type") == "Artifact"
+        and entity["payload"].get("artifact_id") == entity["id"]
+        and isinstance(entity["payload"].get("inventory_path"), str)
+        and bool(entity["payload"]["inventory_path"])
         for entity in entities
     )
+
+
+def _verify_compact_query_result(
+    query_class: str,
+    card: Any,
+    *,
+    query: str,
+    top_k: int,
+) -> bool:
+    """Recompute saturation query predicates from the physical result page.
+
+    Compact content candidates are valid only when the public page materializes
+    the derived physical inventory endpoint.  An ``artifact:file`` identifier
+    alone is insufficient: that shape could be a semantic row or a fabricated
+    proxy and would not prove that the FTS route was exercised.
+    """
+
+    value = _plain(card)
+    if not isinstance(value, Mapping):
+        return False
+    if query_class == "broad":
+        return (
+            value.get("refinement_required") is True
+            and isinstance(value.get("refinement_hints"), list)
+            and 0 < len(value["refinement_hints"]) <= 4
+            and value.get("unselected_matches_traversable") is False
+            and _contains_inventory_artifact(value)
+        )
+    if query_class == "content-high-cardinality":
+        selected_seed_count = value.get("selected_seed_count")
+        return (
+            value.get("refinement_required") is True
+            and isinstance(selected_seed_count, int)
+            and not isinstance(selected_seed_count, bool)
+            and 0 < selected_seed_count <= top_k
+            and value.get("unselected_matches_traversable") is False
+            and _contains_inventory_artifact(value)
+        )
+    if query_class in {"content-probe", "hostile-content"}:
+        return _contains_inventory_artifact(value)
+    if query_class == "miss":
+        return _is_empty_miss(value)
+    if query_class == "hostile-exact":
+        return _first_entity_id(value) == f"{_CORPUS_PREFIX}needle"
+    if query_class == "exact-artifact":
+        return _first_entity_id(value) == query
+    if query_class in {"exact-semantic", "forced-continuation"}:
+        return True
+    raise SaturationError(f"unknown saturation query class: {query_class}")
 
 
 def _first_entity_id(card: Any) -> str | None:
@@ -5818,40 +5874,25 @@ def run(
         query_latencies_ms.append(elapsed_query_ms)
         query_class_latencies_ms.setdefault(query_class, []).append(elapsed_query_ms)
         card_value = _plain(card)
-        class_result_verified = True
+        class_result_verified = _verify_compact_query_result(
+            query_class,
+            card_value,
+            query=query,
+            top_k=int(query_budget["top_k"]),
+        )
         if query_class == "broad":
-            class_result_verified = (
-                isinstance(card_value, Mapping)
-                and card_value.get("refinement_required") is True
-                and isinstance(card_value.get("refinement_hints"), list)
-                and 0 < len(card_value["refinement_hints"]) <= 4
-                and card_value.get("unselected_matches_traversable") is False
-            )
             broad_checks.append(class_result_verified)
         elif query_class == "content-high-cardinality":
-            class_result_verified = (
-                isinstance(card_value, Mapping)
-                and card_value.get("refinement_required") is True
-                and isinstance(card_value.get("selected_seed_count"), int)
-                and 0 < card_value["selected_seed_count"] <= ceiling["top_k"]
-                and card_value.get("unselected_matches_traversable") is False
-                and _contains_inventory_artifact(card)
-            )
             high_cardinality_checks.append(class_result_verified)
         elif query_class == "content-probe":
-            class_result_verified = _contains_inventory_artifact(card)
             content_checks.append(class_result_verified)
         elif query_class == "miss":
-            class_result_verified = _is_empty_miss(card)
             miss_checks.append(class_result_verified)
         elif query_class == "hostile-content":
-            class_result_verified = _contains_inventory_artifact(card)
             hostile_content_checks.append(class_result_verified)
         elif query_class == "hostile-exact":
-            class_result_verified = _first_entity_id(card) == f"{_CORPUS_PREFIX}needle"
             hostile_exact_checks.append(class_result_verified)
         elif query_class == "exact-artifact":
-            class_result_verified = _first_entity_id(card) == query
             exact_artifact_checks.append(class_result_verified)
         reference = _drain_pages(
             query_phase,

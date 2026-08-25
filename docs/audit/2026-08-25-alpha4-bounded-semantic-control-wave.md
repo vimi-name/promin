@@ -88,6 +88,23 @@ renewal and identity facts through the real release recomputation path, while
 acceptance and pass-credit remain false.  This regression documents the
 correction only; it does not claim that r37 passed or promote any evidence.
 
+## r39 compact physical search closure (source and targeted evidence only)
+
+r39 preserves r38 as terminal `FAILED_NO_CREDIT` evidence and does not reuse,
+delete, or promote its result.  The current source wave adds a derived,
+stream-bound compact physical FTS endpoint and immutable query-phase status
+reuse.  Saturation content, broad, high-cardinality, and hostile-content
+predicates now require the returned `Artifact` page to carry the physical
+`untrusted-source` endpoint and its `inventory_path`; an `artifact:file` ID by
+itself receives no credit.  Compact physical evidence continues to report
+`semantic_proxies=0`; no semantic per-file materialization is implied.
+
+This is a targeted runtime/package closure only.  No fresh 100,000-file run,
+performance authority measurement, visual evidence, acceptance decision, or
+public-release decision was made in this wave.  The newly tracked r39 plan is
+included in the canonical package inventory (290 files); unexpected-file
+rejection remains strict.
+
 validation_claim=targeted_functional_tier_a
 runtime_diagnostic_pass=false
 acceptance_pass=false

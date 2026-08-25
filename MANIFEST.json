@@ -253,8 +253,13 @@
     },
     {
       "path": "docs/audit/2026-08-25-alpha4-bounded-semantic-control-wave.md",
-      "sha256": "f9bd660c51b8c32e50e1e60b9ebda2bbe0559ea8e32da75ab553593c14a44d79",
-      "size": 5291
+      "sha256": "faf7f287bb0401f87a9503628aa270cfec2c2ea875f322b0916cc33c550606b5",
+      "size": 6296
+    },
+    {
+      "path": "docs/audit/2026-08-25-compact-physical-search-performance-plan.md",
+      "sha256": "7e065c353c0d68d34746fa3955b9df91115575660dbda104f5991e8bfb0c1b94",
+      "size": 10544
     },
     {
       "path": "docs/audit/2026-08-25-saturation-query-trace-implementation-plan.md",
@@ -588,8 +593,8 @@
     },
     {
       "path": "promin/projection.py",
-      "sha256": "97b37848aa70b94211b5db1d537652c900decb3a0d4a77d55ef6573e13383fb9",
-      "size": 204137
+      "sha256": "9114910b0cb316541e8648359ea5cfbfeac6aa6f6bf2895b2f46c8f7f2232b7e",
+      "size": 218659
     },
     {
       "path": "promin/provider_envelope.py",
@@ -658,8 +663,8 @@
     },
     {
       "path": "promin/service.py",
-      "sha256": "c1536eb98dbe454a161743085c2e56d2c3a7426b99d1d4d1652c82879a2ce873",
-      "size": 309627
+      "sha256": "d496f1f88a3bc6434a940bae270fd36adfa4f73ebcb58a467ea40bdcd82a38bd",
+      "size": 310493
     },
     {
       "path": "promin/skills.py",
@@ -1008,8 +1013,8 @@
     },
     {
       "path": "tests/test_events_projection.py",
-      "sha256": "f871076b7391c608816acbc1fe5a24ee65a087c23bd16bc8173276284fc8299e",
-      "size": 111510
+      "sha256": "ff9935b9803eea1ac7a639ecfdd60e97104be801724615ab7255df379b756f35",
+      "size": 114128
     },
     {
       "path": "tests/test_expert_init_bundle_roundtrip.py",
@@ -1113,8 +1118,8 @@
     },
     {
       "path": "tests/test_heavy_projection_incremental_shards.py",
-      "sha256": "ee594f6bcc352f70e50d557cfc4dc0b2cdd264de5a65e308bdb9e96e44da073e",
-      "size": 10620
+      "sha256": "4b4b932f4fd7ae87736ca294322a4f31622f44de07be8f4378e59c9313f77fe5",
+      "size": 15324
     },
     {
       "path": "tests/test_heavy_projection_profile.py",
@@ -1163,8 +1168,8 @@
     },
     {
       "path": "tests/test_heavy_saturation_storage_budget.py",
-      "sha256": "04321f8251d87bdf08142604f976fc1e03b1e275a1db39caae93879cf2f70335",
-      "size": 36971
+      "sha256": "031461406a5825736c56d84c6cc31faa3e95a7cc58db6ec52a7ad1c7b717bc48",
+      "size": 39101
     },
     {
       "path": "tests/test_heavy_state_binding_batch_union.py",
@@ -1233,8 +1238,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "c763bc27a0e75e059672d135074aa61648bca7883ca7d5f7050b2ca2f8a2b35c",
-      "size": 74998
+      "sha256": "25c2fec53aaf497a18efcf13c19af786cc1f8c46ef5546e354c1af5b9365376f",
+      "size": 75079
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1293,8 +1298,8 @@
     },
     {
       "path": "tests/test_search_scale.py",
-      "sha256": "8c347fbd85089ccd91eddad8c33756622dc14b0f9b3717f85471863be84d3f62",
-      "size": 67438
+      "sha256": "6371230ce258ab4ea2f9137709c4217ae65153e4c272b955571b0ca3f6375a15",
+      "size": 80729
     },
     {
       "path": "tests/test_service_cli.py",
@@ -1338,8 +1343,8 @@
     },
     {
       "path": "tests/test_verified_query_phase.py",
-      "sha256": "549588e7b7e1c4c948886986f371b1ab96320bd67208f92a5eb15fb5153b71e1",
-      "size": 22941
+      "sha256": "017378ab6c431d519d4e31ae2bf3d0953761b7dc51cac8a9dafbb66201719762",
+      "size": 25533
     },
     {
       "path": "tools/compile_schema.py",
@@ -1418,8 +1423,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "bf69b5cd470c2d6d01516167b2b579529dab16d1be5e6fc56d8781d60ba29fd2",
-      "size": 284838
+      "sha256": "6a6718ce3836e3160cacdc8fd0beab83be9788a321f4458103854c18e3c44dfc",
+      "size": 286175
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1433,8 +1438,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "f52a83c082358b1d869eb4022486fea0bfb623e902c0b4895f4f5aa5ffb490df",
-      "size": 145012
+      "sha256": "b9913d639b63e25c67a2cb0123d60193a0a70f8fe7fe27593d813591ede99da6",
+      "size": 145089
     }
   ],
   "generated_surfaces": [

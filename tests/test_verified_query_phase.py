@@ -601,3 +601,69 @@ def test_public_search_remains_fresh_after_phase_close(tmp_path: Path, monkeypat
     service.search(**_query_kwargs(grants))
     assert count == 4
     service.close()
+
+
+def test_phase_reuses_validated_projection_status_for_search_and_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
+    status_calls = 0
+    original_status_connection = type(service._projection(service._context()))._status_connection
+
+    def counted_status(instance, connection):
+        nonlocal status_calls
+        status_calls += 1
+        return original_status_connection(instance, connection)
+
+    monkeypatch.setattr(
+        "promin.projection.Projection._status_connection", counted_status
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=1)
+    phase = service.begin_immutable_query_phase(max_operations=2)
+    assert status_calls == 1
+    first = phase.search(**_query_kwargs(grants, now=now))
+    assert status_calls == 1
+    assert first["continuation"] is not None
+    phase.renew_search(
+        token=first["continuation"]["token"],
+        query="grant",
+        depth=1,
+        subject_id=grants["reader"]["subject_id"],
+        grant_id=grants["reader"]["grant_id"],
+        budget=_query_kwargs(grants)["budget"],
+        now=now,
+        ttl_seconds=60,
+    )
+    assert status_calls == 1
+    phase.close()
+    assert status_calls == 2
+    service.close()
+
+
+def test_phase_close_rejects_physical_content_binding_drift(tmp_path: Path) -> None:
+    service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
+    phase = service.begin_immutable_query_phase(max_operations=1)
+    phase.search(**_query_kwargs(grants))
+    projection = phase._projection
+    with sqlite3.connect(str(projection.db_path)) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='inventory_content_index_digest'",
+            ("f" * 64,),
+        )
+        connection.commit()
+    with pytest.raises(ProjectionError, match="content index metadata"):
+        phase.close()
+    with pytest.raises(ServiceError, match="closed"):
+        phase.search(**_query_kwargs(grants))
+    service.close()
+
+
+def test_phase_close_ignores_continuation_persistence_byte_growth(tmp_path: Path) -> None:
+    service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
+    phase = service.begin_immutable_query_phase(max_operations=1)
+    result = phase.search(**_query_kwargs(grants))
+    assert result["continuation"] is not None
+    with sqlite3.connect(str(phase._projection.db_path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM continuations").fetchone()[0] == 1
+    phase.close()
+    service.close()

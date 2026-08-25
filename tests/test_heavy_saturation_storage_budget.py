@@ -23,6 +23,70 @@ saturation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(saturation)
 
 
+def test_compact_query_verification_requires_physical_fts_endpoint() -> None:
+    physical_page = {
+        "entities": [
+            {
+                "id": "artifact:file:" + "a" * 48,
+                "entity_type": "Artifact",
+                "data_class": "untrusted-source",
+                "payload": {
+                    "record_type": "Artifact",
+                    "artifact_id": "artifact:file:" + "a" * 48,
+                    "inventory_path": "product/physical.txt",
+                },
+            }
+        ],
+        "relations": [],
+        "evidence": [],
+        "selected_seed_count": 1,
+        "refinement_required": False,
+        "refinement_hints": [],
+        "unselected_matches_traversable": False,
+        "truncated": False,
+        "silent_truncation": False,
+        "selected_closure_complete": True,
+    }
+    semantic_only_page = {
+        **physical_page,
+        "entities": [
+            {
+                "id": "artifact:file:" + "b" * 48,
+                "entity_type": "Artifact",
+                "data_class": "semantic",
+                "payload": {"record_type": "Artifact"},
+            }
+        ],
+    }
+    broad_page = {
+        **physical_page,
+        "refinement_required": True,
+        "refinement_hints": ["add an exact ID or path term"],
+    }
+    high_cardinality_page = {
+        **broad_page,
+        "selected_seed_count": 1,
+    }
+
+    assert saturation._verify_compact_query_result(
+        "content-probe", physical_page, query="semantic source", top_k=1
+    ) is True
+    assert saturation._verify_compact_query_result(
+        "content-probe", semantic_only_page, query="semantic source", top_k=1
+    ) is False
+    assert saturation._verify_compact_query_result(
+        "broad", broad_page, query="record", top_k=1
+    ) is True
+    assert saturation._verify_compact_query_result(
+        "content-high-cardinality", high_cardinality_page,
+        query="high-cardinality content", top_k=1
+    ) is True
+    assert saturation._verify_compact_query_result(
+        "hostile-content", physical_page,
+        query="hostile exact identity", top_k=1
+    ) is True
+
+
 def _performance_contract() -> dict[str, object]:
     return {
         "profile_id": "portable-local-v1",

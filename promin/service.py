@@ -170,6 +170,38 @@ class ImmutableQueryPhaseActiveError(ServiceError):
     """Raised when a phase-forbidden EventStore entry is attempted."""
 
 
+_IMMUTABLE_QUERY_STATUS_BINDING_FIELDS = (
+    "activation_digest",
+    "head_digest",
+    "head_sequence",
+    "implementation_closure_digest",
+    "semantic_digest",
+    "semantic_digest_algorithm",
+    "storage_layout",
+    "inventory_storage_mode",
+    "inventory_bucket_count",
+    "inventory_entries",
+    "inventory_proxies",
+    "inventory_relations",
+    "inventory_passes",
+    "inventory_digest",
+    "inventory_stream_digest",
+    "inventory_manifest_digest",
+    "inventory_bucket_manifest_digest",
+    "inventory_content_index_algorithm",
+    "inventory_content_index_rows",
+    "inventory_content_index_digest",
+)
+
+
+def _immutable_query_projection_binding(status: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Bind immutable projection identity while excluding continuation DB bytes."""
+
+    return tuple(
+        (field, status[field]) for field in _IMMUTABLE_QUERY_STATUS_BINDING_FIELDS
+    )
+
+
 class ImmutableQueryPhase:
     """Opaque finite query phase owned by exactly one ProminService."""
 
@@ -179,12 +211,14 @@ class ImmutableQueryPhase:
         lease: VerifiedQueryLease,
         context: ActivationContext,
         projection: Projection,
+        projection_status: Mapping[str, Any],
         projection_binding: tuple[Any, ...],
     ) -> None:
         self._service = service
         self._lease = lease
         self._context_value = context
         self._projection = projection
+        self._projection_status = MappingProxyType(deepcopy(dict(projection_status)))
         self._projection_binding = projection_binding
         self._closed = False
 
@@ -2922,14 +2956,14 @@ class ProminService:
             lease = store.begin_verified_query_lease(max_operations)
             projection = self._projection(context)
             status = projection.require_current(store)
-            projection_binding = (
-                _activation(context)["activation_digest"],
-                _implementation_closure_digest(context),
-                tuple(sorted(store.head().items())),
-                status["semantic_digest"],
-            )
+            projection_binding = _immutable_query_projection_binding(status)
             phase = ImmutableQueryPhase(
-                self, lease, context, projection, projection_binding
+                self,
+                lease,
+                context,
+                projection,
+                status,
+                projection_binding,
             )
             self._active_immutable_query_phase = phase
             return phase
@@ -2965,12 +2999,7 @@ class ProminService:
         lease_error: BaseException | None = None
         try:
             status = phase._projection.require_current(phase._lease.store)
-            current_binding = (
-                _activation(phase._context_value)["activation_digest"],
-                _implementation_closure_digest(phase._context_value),
-                tuple(sorted(phase._lease.store.head().items())),
-                status["semantic_digest"],
-            )
+            current_binding = _immutable_query_projection_binding(status)
             if current_binding != phase._projection_binding:
                 raise ProjectionError("immutable query projection binding changed")
         except BaseException as exc:
@@ -3055,7 +3084,7 @@ class ProminService:
             grant_id=grant_id,
             evaluated_at=now_text,
         )
-        result = projection.search(
+        result = projection._search_with_phase_status(
             query,
             depth=selected_depth,
             budget=selected_budget,
@@ -3064,6 +3093,7 @@ class ProminService:
             resume_binding=_projection_resume_binding(context, access),
             now=now_text,
             ttl_seconds=ttl_seconds,
+            phase_status=phase._projection_status,
         )
         _validate_search_result(
             result,
@@ -3141,7 +3171,7 @@ class ProminService:
         selected_budget = dict(
             budget or _profile_budget(_preset(context), _activation(context))
         )
-        result = projection.renew_search(
+        result = projection._renew_search_with_phase_status(
             token,
             query=query,
             depth=depth,
@@ -3150,6 +3180,7 @@ class ProminService:
             resume_binding=_projection_resume_binding(context, access),
             now=now_text,
             ttl_seconds=ttl_seconds,
+            phase_status=phase._projection_status,
         )
         result["authorization_binding"] = {
             "subject_id": access["subject_id"],

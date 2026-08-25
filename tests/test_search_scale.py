@@ -34,6 +34,7 @@ from promin.projection import (
     Projection,
     ProjectionError,
     ProjectionLimits,
+    RankedCandidateCache,
     VerifiedInventoryInput,
     compile_relation_domains,
 )
@@ -323,6 +324,50 @@ def _verified_inventory(rows: list[dict[str, object]]) -> VerifiedInventoryInput
         stream_digest=stream.hexdigest(),
         entry_count=len(rows),
         entries=tuple(rows),
+    )
+
+
+def _persisted_compact_inventory(
+    root: Path,
+    rows: list[tuple[str, str]],
+) -> VerifiedInventoryInput:
+    """Create the persisted stream shape used by compact physical projections."""
+
+    ordered = sorted(rows)
+    stream_lines = [
+        canonical_bytes(
+            {
+                "path": path,
+                "digest": f"{index + 1:064x}",
+                "size": index + 1,
+                "search_text": search_text,
+            }
+        )
+        for index, (path, search_text) in enumerate(ordered)
+    ]
+    stream_path = root / "inventory.jsonl"
+    stream_path.write_bytes(b"".join(stream_lines))
+    identity = hashlib.sha256()
+    for index, (path, _search_text) in enumerate(ordered):
+        identity.update(
+            canonical_bytes(
+                {"path": path, "digest": f"{index + 1:064x}", "size": index + 1}
+            )
+        )
+    return VerifiedInventoryInput(
+        activation_digest=ACTIVATION,
+        stream_digest=hashlib.sha256(stream_path.read_bytes()).hexdigest(),
+        entry_count=len(ordered),
+        inventory_digest=identity.hexdigest(),
+        stream_path=stream_path,
+        stream_bytes=stream_path.stat().st_size,
+        manifest_digest=digest_value(
+            {
+                "record_type": "PersistedInventoryFixture",
+                "rows": [[path, search_text] for path, search_text in ordered],
+            }
+        ),
+        retain_artifact_entities=False,
     )
 
 
@@ -1034,6 +1079,294 @@ class SearchScaleFocusedTests(unittest.TestCase):
             self.assertFalse(pages[0]["silent_truncation"])
             self.assertFalse(pages[-1]["truncated"])
             self.assertTrue(pages[-1]["selected_closure_complete"])
+
+    def test_compact_broad_content_refines_without_unselected_paging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            inventory = _persisted_compact_inventory(
+                root,
+                [
+                    ("product/0000.txt", "record alpha"),
+                    ("product/0001.txt", "record beta"),
+                    ("product/0002.txt", "record gamma"),
+                ],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"c" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            page = projection.search(
+                "record",
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertEqual(len(page["entities"]), 1)
+            self.assertEqual(page["entities"][0]["entity_type"], "Artifact")
+            self.assertTrue(page["refinement_required"])
+            self.assertFalse(page["unselected_matches_traversable"])
+
+    def test_compact_content_high_cardinality_materializes_bounded_artifact_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            inventory = _persisted_compact_inventory(
+                root,
+                [
+                    (f"product/{index:04d}.txt", "high-cardinality content")
+                    for index in range(18)
+                ],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"h" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            page = projection.search(
+                "high-cardinality",
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 2,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 2,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertLessEqual(len(page["entities"]), 2)
+            self.assertTrue(page["entities"])
+            self.assertTrue(all(item["entity_type"] == "Artifact" for item in page["entities"]))
+            self.assertTrue(all("inventory_path" in item["payload"] for item in page["entities"]))
+            connection = sqlite3.connect(root / "projection.sqlite3")
+            try:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
+            finally:
+                connection.close()
+
+    def test_compact_hostile_content_is_parameterized_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            inventory = _persisted_compact_inventory(
+                root,
+                [("product/hostile.txt", "hostile OR content")],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"i" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            page = projection.search(
+                'hostile " OR *',
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertEqual(len(page["entities"]), 1)
+            self.assertLessEqual(len(page["entities"]), 1)
+            self.assertEqual(page["entities"][0]["entity_type"], "Artifact")
+
+    def test_compact_content_miss_returns_no_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            inventory = _persisted_compact_inventory(
+                root,
+                [("product/known.txt", "known content")],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"j" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            page = projection.search(
+                "absent needle",
+                depth=1,
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertEqual(page["entities"], [])
+            self.assertFalse(page["refinement_required"])
+            self.assertFalse(page["unselected_matches_traversable"])
+
+    def test_compact_exact_id_and_path_precede_content_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            path = "product/exact.txt"
+            artifact_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            inventory = _persisted_compact_inventory(
+                root,
+                [
+                    (path, "shared exact content"),
+                    ("product/other.txt", "shared exact content"),
+                ],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"k" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            search_kwargs = {
+                "depth": 1,
+                "budget": {
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                "resume_binding": RESUME_BINDING,
+                "now": NOW,
+            }
+            by_path = projection.search(path, **search_kwargs)
+            by_id = projection.search(artifact_id, **search_kwargs)
+            self.assertEqual([item["id"] for item in by_path["entities"]], [artifact_id])
+            self.assertEqual([item["id"] for item in by_id["entities"]], [artifact_id])
+            self.assertFalse(by_path["refinement_required"])
+            self.assertFalse(by_id["refinement_required"])
+
+    def test_compact_exact_path_preserves_internal_whitespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            path = "product/a  b.txt"
+            artifact_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            inventory = _persisted_compact_inventory(
+                root,
+                [
+                    (path, "exact path content"),
+                    ("product/other.txt", "exact path content"),
+                ],
+            )
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"m" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+            )
+            projection.rebuild(store, inventory=inventory)
+            page = projection.search(
+                path,
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertEqual([item["id"] for item in page["entities"]], [artifact_id])
+            self.assertFalse(page["refinement_required"])
+
+    def test_compact_candidate_cache_binds_derived_content_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, _event_store(
+            Path(temporary) / "state"
+        ) as store:
+            root = Path(temporary)
+            cache = RankedCandidateCache()
+            projection = Projection(
+                root / "projection.sqlite3",
+                b"l" * 32,
+                implementation_closure_digest=IMPLEMENTATION,
+                limits=PROJECTION_LIMITS,
+                relation_domains=compile_relation_domains(_SEMANTIC_MODEL),
+                ranked_candidate_cache=cache,
+            )
+            first_inventory = _persisted_compact_inventory(
+                root,
+                [
+                    ("product/a.txt", "cache needle"),
+                    ("product/b.txt", "other content"),
+                ],
+            )
+            projection.rebuild(store, inventory=first_inventory)
+            first = projection.search(
+                "cache needle",
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            first_id = "artifact:file:" + hashlib.sha256(
+                b"product/a.txt"
+            ).hexdigest()[:48]
+            second_id = "artifact:file:" + hashlib.sha256(
+                b"product/b.txt"
+            ).hexdigest()[:48]
+            self.assertEqual([item["id"] for item in first["entities"]], [first_id])
+
+            second_inventory = _persisted_compact_inventory(
+                root,
+                [
+                    ("product/a.txt", "other content"),
+                    ("product/b.txt", "cache needle"),
+                ],
+            )
+            projection.rebuild(store, inventory=second_inventory)
+            second = projection.search(
+                "cache needle",
+                depth=1,
+                budget={
+                    "max_bytes": 16_384,
+                    "max_entities": 1,
+                    "max_relations": 1,
+                    "max_fanout_per_entity": 1,
+                    "top_k": 1,
+                },
+                resume_binding=RESUME_BINDING,
+                now=NOW,
+            )
+            self.assertEqual([item["id"] for item in second["entities"]], [second_id])
 
     def test_continuation_v2_is_bound_to_query_ranking_budget_and_depth(self) -> None:
         semantic = json.loads(
