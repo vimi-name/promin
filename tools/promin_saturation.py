@@ -49,6 +49,7 @@ from promin.evidence import (
     validate_release_archive_basename,
     validate_saturation_evidence,
 )
+from promin.saturation_query_trace import build_saturation_query_trace, validate_saturation_query_trace
 
 EVIDENCE_PROTOCOL_VERSION = "promin-evidence-v1"
 EVIDENCE_TOOL_VERSIONS = {
@@ -4867,7 +4868,10 @@ def _drain_pages(
         "expiry_comparisons": expiry_comparisons,
         "renewals": renewals,
         "maximum_token_bytes": maximum_token_bytes,
-        "identity_digests": seen_atom_identity_digests,
+        "identity_digests": {
+            identity.rsplit(":", 1)[-1]
+            for identity in seen_atom_identity_digests
+        },
         "refinement_required": refinement_required is True,
         "refinement_hints": refinement_hints or [],
         "selected_seed_count": selected_seed_count or 0,
@@ -4877,32 +4881,7 @@ def _drain_pages(
 
 
 def _raw_page_trace(value: Mapping[str, Any]) -> dict[str, Any]:
-    atoms = sorted(value["atoms"])
-    return {
-        "pages": value["pages"],
-        "continuation_pages": value["continuation_pages"],
-        "first_truncated": value["first_truncated"],
-        "initial_expiry": value["initial_expiry"],
-        "expiry_monotonic": value["expiry_monotonic"],
-        "renewal_count": len(value["renewals"]),
-        "renewal_events": [
-            {
-                "cursor": renewal["cursor"],
-                "old_expiry": renewal["old_expiry"],
-                "new_expiry": renewal["new_expiry"],
-                "renewed_at": renewal["renewed_at"],
-            }
-            for renewal in value["renewals"]
-        ],
-        "maximum_token_bytes": value["maximum_token_bytes"],
-        "selected_closure_complete": value["selected_closure_complete"],
-        "atoms": atoms,
-        "atoms_count": len(atoms),
-        "atoms_digest": _digest(atoms),
-        "page_digests": list(value["page_digests"]),
-        "page_identity_digests": list(value["page_identity_digests"]),
-        "identity_digests": sorted(value["identity_digests"]),
-    }
+    return build_saturation_query_trace(value)
 
 
 def _snapshot_signal(inventory: Any, descriptor: Mapping[str, str]) -> dict[str, Any]:
@@ -6422,6 +6401,17 @@ def run(
     if _sha256_bytes(inventory_stream_payload) != inventory_stream_digest:
         raise SaturationError("verified inventory stream changed before raw evidence publication")
     _write_bytes(output / "raw" / "inventory-stream.jsonl", inventory_stream_payload)
+    for observation in query_results:
+        validate_saturation_query_trace(observation["reference"])
+        forced = observation.get("forced")
+        if forced is not None:
+            validate_saturation_query_trace(
+                {
+                    key: value
+                    for key, value in forced.items()
+                    if key != "union_matches_reference"
+                }
+            )
     _write_jsonl(output / "raw" / "query-results.jsonl", query_results)
     process_samples = {
         "record_type": "SaturationProcessSamples",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -17,6 +18,7 @@ from jsonschema import Draft202012Validator
 
 from promin.authority import AuthorityError
 from promin.canonical import canonical_bytes, digest_value
+from promin import evidence
 from promin.projection import ProjectionError, VerifiedInventoryInput
 from promin.service import ServiceError
 from tools import promin_saturation as saturation
@@ -886,6 +888,41 @@ def test_public_query_tail_scale_is_exact_bounded_and_fail_closed(tmp_path: Path
             f"{kind}:{atom_id}"
             for kind, atom_id in untruncated_reference_atoms
         }
+
+        producer_trace = saturation._raw_page_trace(harness_trace)
+        producer_observation = {
+            "record_type": "SaturationQueryObservation",
+            "index": 0,
+            "query_class": "forced-continuation",
+            "query": query,
+            "depth": CHAIN_DEPTH_MAX,
+            "elapsed_ms": 0.0,
+            "first_page": dict(depth_twelve_first),
+            "first_page_digest": digest_value(depth_twelve_first),
+            "class_result_verified": True,
+            "reference": producer_trace,
+            "forced": None,
+        }
+        recomputed = evidence._recompute_raw_query_result(
+            producer_observation,
+            expected_index=0,
+            top_k=1,
+        )
+        assert recomputed["reference"]["pages"] == CHAIN_DEPTH_MAX + 1
+
+        forced_trace = deepcopy(producer_trace)
+        forced_trace["union_matches_reference"] = True
+        forced_trace["identity_digests"] = sorted(
+            ["0" * 64, *producer_trace["identity_digests"][1:]]
+        )
+        mutated_forced_observation = dict(producer_observation)
+        mutated_forced_observation["forced"] = forced_trace
+        with pytest.raises(evidence.EvidenceError, match="forced continuation union"):
+            evidence._recompute_raw_query_result(
+                mutated_forced_observation,
+                expected_index=0,
+                top_k=1,
+            )
 
         plan = _query_plan(artifact_ids)
         assert plan == _query_plan(artifact_ids)

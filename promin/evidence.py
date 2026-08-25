@@ -25,6 +25,7 @@ from .version import standard_version
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, parse_json_strict
 from .final_admission import FinalAdmissionError, _archive_name as _final_admission_archive_name
 from .platform_paths import filesystem_path
+from .saturation_query_trace import SaturationQueryTraceError, validate_saturation_query_trace
 
 
 class EvidenceError(ValueError):
@@ -3154,44 +3155,10 @@ def _nearest_rank(values: list[float], fraction: float) -> float:
 
 
 def _validate_raw_page_trace(value: Any) -> dict[str, Any]:
-    fields = {
-        "pages",
-        "continuation_pages",
-        "first_truncated",
-        "maximum_token_bytes",
-        "selected_closure_complete",
-        "atoms",
-        "atoms_count",
-        "atoms_digest",
-        "page_digests",
-    }
-    if not isinstance(value, Mapping) or set(value) != fields:
-        raise EvidenceError("raw query page trace shape is invalid")
-    atoms = value.get("atoms")
-    page_digests = value.get("page_digests")
-    if (
-        not isinstance(atoms, list)
-        or atoms != sorted(set(atoms))
-        or any(not isinstance(item, str) or not item for item in atoms)
-        or value.get("atoms_count") != len(atoms)
-        or value.get("atoms_digest") != canonical_digest(atoms)
-        or not isinstance(page_digests, list)
-        or not page_digests
-        or any(not _valid_digest(item) for item in page_digests)
-        or value.get("pages") != len(page_digests)
-        or not isinstance(value.get("continuation_pages"), int)
-        or isinstance(value.get("continuation_pages"), bool)
-        or value["continuation_pages"] < 0
-        or value["continuation_pages"] != value["pages"] - 1
-        or not isinstance(value.get("maximum_token_bytes"), int)
-        or isinstance(value.get("maximum_token_bytes"), bool)
-        or value["maximum_token_bytes"] < 0
-        or not isinstance(value.get("first_truncated"), bool)
-        or value.get("selected_closure_complete") is not True
-        or (value["first_truncated"] is False and value["continuation_pages"] != 0)
-    ):
-        raise EvidenceError("raw query page trace cannot be recomputed")
-    return deepcopy(dict(value))
+    try:
+        return validate_saturation_query_trace(value)
+    except SaturationQueryTraceError as exc:
+        raise EvidenceError(f"raw query page trace cannot be recomputed: {exc}") from exc
 
 
 def _first_raw_entity_id(page: Mapping[str, Any]) -> str | None:
@@ -3300,7 +3267,10 @@ def _recompute_raw_query_result(
             if key != "union_matches_reference"
         }
         forced = _validate_raw_page_trace(forced_identity)
-        union_matches = forced["atoms"] == reference["atoms"]
+        union_matches = (
+            forced["atoms"] == reference["atoms"]
+            and forced["identity_digests"] == reference["identity_digests"]
+        )
         if forced_value.get("union_matches_reference") is not union_matches or not union_matches:
             raise EvidenceError("raw forced continuation union differs from the reference")
     return {

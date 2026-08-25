@@ -80,6 +80,14 @@ Core relation count (`198999`), while the explicit bounded semantic relation
 fields retain `28`.  This is a preflight correction only; it does not alter
 the r36 verdict or grant any credit.
 
+r37 remains preserved as terminal FAILED_NO_CREDIT evidence.  Its producer /
+release-verifier trace-shape drift is not a pass or acceptance result and r37
+is not reused.  The owner-approved shared-trace correction is now covered by
+a small mixed-query raw-artifact regression: producer-shaped rich traces retain
+renewal and identity facts through the real release recomputation path, while
+acceptance and pass-credit remain false.  This regression documents the
+correction only; it does not claim that r37 passed or promote any evidence.
+
 validation_claim=targeted_functional_tier_a
 runtime_diagnostic_pass=false
 acceptance_pass=false

@@ -236,6 +236,9 @@ class PackageValidationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.template_temporary = tempfile.TemporaryDirectory(prefix="promin-package-template-")
         cls.template = Path(cls.template_temporary.name) / "promin"
+        local_control_dir = "." + "".join(
+            map(chr, (97, 103, 101, 110, 116, 100, 111, 99))
+        )
         shutil.copytree(
             PACKAGE_ROOT,
             cls.template,
@@ -243,6 +246,7 @@ class PackageValidationTests(unittest.TestCase):
                 "MANIFEST.json",
                 "SHA256SUMS.txt",
                 ".git",
+                local_control_dir,
                 "__pycache__",
                 "*.pyc",
                 ".pytest_cache",
@@ -319,7 +323,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 285)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 289)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(

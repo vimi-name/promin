@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 286
+CANONICAL_PACKAGE_FILE_COUNT = 289
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -126,6 +126,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/audit/2026-08-21-public-workflow-implementation-plan.md',
         'docs/audit/2026-08-22-continuation-renewal-wave.md',
         'docs/audit/2026-08-25-alpha4-bounded-semantic-control-wave.md',
+        'docs/audit/2026-08-25-saturation-query-trace-implementation-plan.md',
         'docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
@@ -209,6 +210,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/semantic_scope.py',
         'promin/service.py',
         'promin/skills.py',
+        'promin/saturation_query_trace.py',
         'promin/static_admission.py',
         'promin/system_check.py',
         'promin/telemetry.py',
@@ -339,6 +341,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_search_scale.py',
         'tests/test_service_cli.py',
         'tests/test_service_mutation_cache.py',
+        'tests/test_saturation_query_trace.py',
         'tests/test_verified_commit_phase.py',
         'tests/test_verified_commit_phase_activation_binding.py',
         'tests/test_verified_commit_phase_refresh_budget.py',

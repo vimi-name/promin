@@ -36,6 +36,7 @@ from promin.evidence import (
     release_evidence_invocation,
     validate_saturation_evidence,
 )
+import promin.evidence as evidence
 
 
 def _load(name: str, path: Path):
@@ -61,6 +62,611 @@ saturation = _load(
 
 
 class ScaleOrchestrationTests(unittest.TestCase):
+    def test_exact_temporary_fixture_reaches_real_release_evidence_validator(self) -> None:
+        """A canonical exact physical fixture must cross the real release boundary."""
+        verification, temporary = self._build_exact_release_fixture()
+        fixture_root = Path(temporary.name)
+        try:
+            with mock.patch(
+                "promin.evidence.validate_standard_release_candidate_binding",
+                return_value=verification["artifact_binding"]["standard_candidate_binding"],
+            ):
+                validated = validate_saturation_evidence(
+                    verification,
+                    candidate_binding={},
+                    source_path=fixture_root / "saturation-result" / "saturation-result.json",
+                    evidence_root=fixture_root / "saturation-result",
+                    require_pass=True,
+                )
+            self.assertEqual(validated["status"], "pass")
+            for field in (
+                "acceptance_pass",
+                "product_acceptance_pass",
+                "pass_credit",
+                "public_release_approved",
+            ):
+                self.assertIs(validated[field], False)
+        finally:
+            temporary.cleanup()
+
+    @staticmethod
+    def _build_exact_release_fixture(
+        query_rows: list[dict] | None = None,
+    ) -> tuple[dict, tempfile.TemporaryDirectory[str]]:
+        """Build exact raw evidence while retaining the real verifier boundary.
+
+        ``query_rows`` deliberately accepts the producer observation shape.  This
+        keeps this expensive physical fixture reusable by the rich continuation
+        trace regression without replacing any raw parser or recomputation path.
+        """
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        output = root / "saturation-result"
+        raw_dir = output / "raw"
+        raw_dir.mkdir(parents=True)
+        candidate_digest = "c" * 64
+        activation_digest = "a" * 64
+        implementation_digest = "b" * 64
+
+        inventory_digest = hashlib.sha256()
+        bucket_hashes = [hashlib.sha256() for _ in range(100)]
+        inventory_path = raw_dir / "inventory-stream.jsonl"
+        with inventory_path.open("wb") as stream:
+            for index in range(100_000):
+                bucket = index // 1_000
+                row = {
+                    "path": f"product/bucket-{bucket:03d}/record-{index:06d}.txt",
+                    "digest": "0" * 64,
+                    "size": 1,
+                    "search_text": "",
+                }
+                stream.write(canonical_bytes(row))
+                identity = canonical_bytes(
+                    {key: row[key] for key in ("path", "digest", "size")}
+                )
+                inventory_digest.update(identity)
+                bucket_hashes[bucket].update(identity)
+        inventory_identity_digest = inventory_digest.hexdigest()
+        aggregates = [
+            {
+                "bucket_id": f"bucket-{bucket:03d}",
+                "relative_prefix": f"product/bucket-{bucket:03d}/",
+                "file_count": 1_000,
+                "total_bytes": 1_000,
+                "identity_digest": bucket_hashes[bucket].hexdigest(),
+                "first_path": f"product/bucket-{bucket:03d}/record-{bucket * 1_000:06d}.txt",
+                "last_path": f"product/bucket-{bucket:03d}/record-{bucket * 1_000 + 999:06d}.txt",
+            }
+            for bucket in range(100)
+        ]
+        aggregate_digest = canonical_digest(aggregates)
+        inventory_payload = inventory_path.read_bytes()
+
+        relation_path = raw_dir / "physical-relation-evidence.jsonl"
+        with relation_path.open("wb") as stream:
+            for relation_index in range(198_999):
+                target_index = relation_index % 100_000
+                bucket = target_index // 1_000
+                target_path = f"product/bucket-{bucket:03d}/record-{target_index:06d}.txt"
+                stream.write(
+                    canonical_bytes(
+                        {
+                            "record_type": "PhysicalRelationEvidence",
+                            "relation_id": f"physical-relation:{relation_index:06d}",
+                            "kind": "READS",
+                            "source_type": "PhysicalBucket",
+                            "source_id": f"bucket-{bucket:03d}",
+                            "target_type": "PhysicalInventoryRecord",
+                            "target_id": "artifact:file:"
+                            + hashlib.sha256(target_path.encode("utf-8")).hexdigest()[:48],
+                            "target_path": target_path,
+                            "target_digest": "0" * 64,
+                            "target_size": 1,
+                            "bucket": bucket,
+                            "activation_digest": activation_digest,
+                            "candidate_digest": candidate_digest,
+                            "inventory_identity_digest": inventory_identity_digest,
+                            "physical_evidence": True,
+                            "semantic_record": False,
+                        }
+                    )
+                )
+        relation_payload = relation_path.read_bytes()
+        relation_sha256 = hashlib.sha256(relation_payload).hexdigest()
+        relation_summary = {
+            "record_type": "PhysicalRelationEvidenceSummary",
+            "evidence_class": "harness_generated_physical",
+            "product_acceptance_credit": False,
+            "relation_count": 198_999,
+            "relation_id_first": "physical-relation:000000",
+            "relation_id_last": "physical-relation:198998",
+            "physical_target_cardinality": 100_000,
+            "inventory_identity_digest": inventory_identity_digest,
+            "candidate_digest": candidate_digest,
+            "activation_digest": activation_digest,
+            "bytes": len(relation_payload),
+            "sha256": relation_sha256,
+        }
+
+        if query_rows is None:
+            trace = saturation._raw_page_trace(
+                {
+                    "atoms": {"artifact:file:needle", "task:saturation:needle"},
+                    "page_digests": ["1" * 64, "2" * 64],
+                    "page_identity_digests": ["a" * 64, "b" * 64],
+                    "pages": 2,
+                    "continuation_pages": 1,
+                    "first_truncated": True,
+                    "initial_expiry": "2026-08-25T10:01:00Z",
+                    "expiry_monotonic": True,
+                    "renewals": [
+                        {
+                            "cursor": 1,
+                            "old_expiry": "2026-08-25T10:01:00Z",
+                            "new_expiry": "2026-08-25T10:02:00Z",
+                            "renewed_at": "2026-08-25T10:00:30Z",
+                        }
+                    ],
+                    "maximum_token_bytes": 32,
+                    "identity_digests": {"a" * 64, "b" * 64},
+                    "selected_closure_complete": True,
+                }
+            )
+            first_pages = {
+                "broad": {
+                    "refinement_required": True,
+                    "refinement_hints": ["narrow"],
+                    "unselected_matches_traversable": False,
+                },
+                "content-high-cardinality": {
+                    "refinement_required": True,
+                    "selected_seed_count": 1,
+                    "unselected_matches_traversable": False,
+                    "entities": [{"id": "artifact:file:needle"}],
+                },
+                "content-probe": {"entities": [{"id": "artifact:file:needle"}]},
+                "exact-artifact": {"entities": [{"id": "query:exact-artifact"}]},
+                "exact-semantic": {"entities": [{"id": "query:exact-semantic"}]},
+                "hostile-content": {"entities": [{"id": "artifact:file:needle"}]},
+                "hostile-exact": {"entities": [{"id": "task:saturation:needle"}]},
+                "miss": {
+                    "entities": [],
+                    "relations": [],
+                    "evidence": [],
+                    "selected_seed_count": 0,
+                    "refinement_required": False,
+                    "truncated": False,
+                    "silent_truncation": False,
+                },
+                "forced-continuation": {"entities": [{"id": "artifact:file:needle"}]},
+            }
+            query_rows = []
+            query_classes = [
+                name
+                for name, count in {
+                    "broad": 60,
+                    "content-high-cardinality": 60,
+                    "content-probe": 60,
+                    "exact-artifact": 60,
+                    "exact-semantic": 60,
+                    "forced-continuation": 120,
+                    "hostile-content": 60,
+                    "hostile-exact": 60,
+                    "miss": 60,
+                }.items()
+                for _ in range(count)
+            ]
+            for index, query_class in enumerate(query_classes):
+                query = (
+                    "query:exact-artifact"
+                    if query_class == "exact-artifact"
+                    else "query:exact-semantic"
+                    if query_class == "exact-semantic"
+                    else "query:miss"
+                    if query_class == "miss"
+                    else f"query:{query_class}"
+                )
+                page = first_pages[query_class]
+                query_rows.append(
+                    {
+                        "record_type": "SaturationQueryObservation",
+                        "index": index,
+                        "query_class": query_class,
+                        "query": query,
+                        "depth": index % 12 + 1,
+                        "elapsed_ms": 1.0,
+                        "first_page": page,
+                        "first_page_digest": canonical_digest(page),
+                        "class_result_verified": True,
+                        "reference": trace,
+                        "forced": (
+                            {**trace, "union_matches_reference": True}
+                            if query_class == "forced-continuation"
+                            else None
+                        ),
+                    }
+                )
+        else:
+            query_rows = [dict(row) for row in query_rows]
+        query_rows = list(query_rows)
+        query_payload = b"".join(canonical_bytes(row) for row in query_rows)
+        query_path = raw_dir / "query-results.jsonl"
+        query_path.write_bytes(query_payload)
+        recomputed = [
+            evidence._recompute_raw_query_result(row, expected_index=index, top_k=1)
+            for index, row in enumerate(query_rows)
+        ]
+        query_mix: dict[str, int] = {}
+        depth_counts: dict[str, int] = {}
+        class_depths: dict[str, set[int]] = {}
+        class_latencies: dict[str, list[float]] = {}
+        latencies: list[float] = []
+        page_digests: list[str] = []
+        total_pages = continuation_pages = explicit_truncations = 0
+        maximum_token_bytes = selected_closure_chains = forced_chains = forced_union_matches = 0
+        forced_depths: set[int] = set()
+        class_checks: dict[str, list[bool]] = {}
+        for row in recomputed:
+            query_class = row["query_class"]
+            depth = row["depth"]
+            query_mix[query_class] = query_mix.get(query_class, 0) + 1
+            depth_counts[str(depth)] = depth_counts.get(str(depth), 0) + 1
+            class_depths.setdefault(query_class, set()).add(depth)
+            class_latencies.setdefault(query_class, []).append(row["elapsed_ms"])
+            class_checks.setdefault(query_class, []).append(row["class_verified"])
+            latencies.append(row["elapsed_ms"])
+            reference = row["reference"]
+            page_digests.extend(reference["page_digests"])
+            total_pages += reference["pages"]
+            continuation_pages += reference["continuation_pages"]
+            explicit_truncations += int(reference["first_truncated"])
+            maximum_token_bytes = max(maximum_token_bytes, reference["maximum_token_bytes"])
+            selected_closure_chains += 1
+            if row["forced"] is not None:
+                forced_chains += 1
+                forced_union_matches += 1
+                forced_depths.add(depth)
+                forced = row["forced"]
+                page_digests.extend(forced["page_digests"])
+                total_pages += forced["pages"]
+                continuation_pages += forced["continuation_pages"]
+                explicit_truncations += int(forced["first_truncated"])
+                maximum_token_bytes = max(maximum_token_bytes, forced["maximum_token_bytes"])
+                selected_closure_chains += 1
+        nearest = lambda values, quantile: sorted(values)[max(0, int(__import__("math").ceil(len(values) * quantile)) - 1)]
+        query_mix = dict(sorted(query_mix.items()))
+        depth_counts = dict(sorted(depth_counts.items(), key=lambda item: int(item[0])))
+        query_summary = {
+            "actual_runtime_queries": len(query_rows),
+            "query_mix": query_mix,
+            "depth_counts": depth_counts,
+            "depth_min": min(int(depth) for depth in depth_counts),
+            "depth_max": max(int(depth) for depth in depth_counts),
+            "query_class_depths": {
+                name: sorted(values) for name, values in sorted(class_depths.items())
+            },
+            "query_class_latency_ms": {
+                name: {
+                    "count": len(values),
+                    "p50": nearest(values, 0.50),
+                    "p95": nearest(values, 0.95),
+                    "p99": nearest(values, 0.99),
+                }
+                for name, values in sorted(class_latencies.items())
+            },
+            "p50_ms": nearest(latencies, 0.50),
+            "p95_ms": nearest(latencies, 0.95),
+            "p99_ms": nearest(latencies, 0.99),
+            "result_digest": canonical_digest(page_digests),
+            "pages_observed": total_pages,
+            "continuations_checked": continuation_pages,
+            "explicit_truncations": explicit_truncations,
+            "maximum_continuation_token_bytes": maximum_token_bytes,
+            "selected_closure_chains": selected_closure_chains,
+            "forced_continuation_chains": forced_chains,
+            "forced_union_matches": forced_union_matches,
+            "forced_depths": sorted(forced_depths),
+            "runtime_query_budget": {"top_k": 1},
+            "forced_query_budget": {"top_k": 1},
+            "continuation_state": {
+                "files": 0,
+                "maximum_bytes": 0,
+                "total_bytes": 0,
+                "preexisting_files_excluded": 0,
+            },
+            "continuation_union_completeness": 1.0,
+            "selected_closure_union_completeness": 1.0,
+            "continuation_union_complete": True,
+            "silent_truncations": 0,
+            "continuation_token_overhead_at_most_10_percent": True,
+            "broad_query_refinement_required": all(class_checks.get("broad", [])),
+            "high_cardinality_terms_verified": all(class_checks.get("content-high-cardinality", [])),
+            "content_search_verified": all(class_checks.get("content-probe", [])),
+            "miss_behavior_verified": all(class_checks.get("miss", [])),
+            "hostile_proxy_content_verified": all(class_checks.get("hostile-content", [])) and all(class_checks.get("hostile-exact", [])),
+            "exact_artifact_search_verified": all(class_checks.get("exact-artifact", [])),
+            "mixed_query_classes_complete": True,
+            "promin_service_search_calls": len(query_rows),
+            "promin_service_continuation_calls": continuation_pages,
+            "runtime_ingress": "fixture",
+            "immutable_query_phase": {
+                "operation_budget": 12_240_612,
+                "operations": 1,
+                "within_budget": True,
+                "close_elapsed_ms": 0.0,
+                "product_acceptance_credit": False,
+            },
+        }
+
+        process_samples = {
+            "record_type": "SaturationProcessSamples",
+            "sample_interval_ms": 50,
+            "lifetime_peak_rss_bytes": 2,
+            "phases": [
+                {
+                    "phase": phase,
+                    "summary": {"baseline_bytes": 1, "peak_bytes": 2, "incremental_peak_bytes": 1},
+                    "samples": [{"elapsed_ns": 0, "rss_bytes": 1}, {"elapsed_ns": 1, "rss_bytes": 2}],
+                }
+                for phase in ("inventory", "projection")
+            ],
+        }
+        process_path = raw_dir / "process-samples.json"
+        process_path.write_bytes(canonical_bytes(process_samples))
+        phase_path = raw_dir / "phase-log.jsonl"
+        phase_rows = [
+            {"order": index, "phase": phase, "elapsed_ms": 1000 if phase == "semantic-ingestion" else 0, **({"status": "pass", "process_exit_code": 0, "invocation_exit_code": 0} if phase == "result" else {})}
+            for index, phase in enumerate(("physical-generation", "inventory", "semantic-ingestion", "projection", "runtime-queries", "result"), start=1)
+        ]
+        phase_path.write_bytes(b"".join(canonical_bytes(row) for row in phase_rows))
+        continuation_path = raw_dir / "continuation-state-manifest.jsonl"
+        continuation_path.write_bytes(b"")
+
+        semantic_ingestion = {
+            "record_type": "SemanticIngestionMetrics",
+            "elapsed_seconds": 1.0,
+            "commit_count": 137,
+            "changed_records": 137,
+            "physical_payload_bytes": 274,
+            "bytes_per_changed_record": 2.0,
+            "p95_ms": 2.0,
+            "p99_ms": 2.0,
+            "checkpoint_count": 2,
+            "checkpoint_writes": 1,
+            "observations": [
+                {
+                    "sequence": sequence,
+                    "phase": "semantic-corpus"
+                    if sequence <= 132
+                    else "physical-bucket-controls",
+                    "command_id": f"fixture:commit:{sequence:03d}",
+                    "batch_digest": f"{sequence:064x}",
+                    "duration_ms": 1.0 if sequence == 1 else 2.0,
+                    "changed_records": 1,
+                    "physical_payload_bytes": 2,
+                    "bytes_per_changed_record": 2.0,
+                    "checkpoint_written": sequence == 2,
+                    "checkpoint_count": 1 if sequence == 1 else 2,
+                    "checkpoint_bytes": 1 if sequence == 2 else 0,
+                    "checkpoint_tail_batches": 0,
+                    "checkpoint_tail_bytes": 0,
+                }
+                for sequence in range(1, 138)
+            ],
+        }
+        semantic_ingestion["result_digest"] = canonical_digest(semantic_ingestion["observations"])
+        operation_resources = {
+            "inventory_stage_rss": {"baseline_bytes": 1, "peak_bytes": 2, "incremental_peak_bytes": 1},
+            "projection_stage_rss": {"baseline_bytes": 1, "peak_bytes": 2, "incremental_peak_bytes": 1},
+            "inventory_pipeline_peak_rss_bytes": 2,
+            "inventory_pipeline_incremental_peak_bytes": 1,
+            "inventory_absolute_rss_amplification": round(2 / len(inventory_payload), 9),
+            "inventory_incremental_memory_amplification": round(1 / len(inventory_payload), 9),
+            "memory_amplification_metric": {
+                "metric_id": "inventory-incremental-peak-over-stream-bytes", "numerator": "inventory_pipeline_incremental_peak_bytes",
+                "denominator": "inventory_stream_bytes", "numerator_bytes": 1, "denominator_bytes": len(inventory_payload),
+                "ratio": round(1 / len(inventory_payload), 9), "threshold_max": 32.0, "within_threshold": True,
+            },
+            "peak_rss_bytes": 2,
+        }
+        physical = {
+            "files": 100_000, "raw_files": 100_000, "raw_file_proxies": 100_000, "semantic_proxies": 0,
+            "physical_artifact_evidence": 100_000, "raw_file_proxy_ratio": 1.0, "synthetic_task_count": 0,
+            "synthetic_task_ratio": 0.0, "inventory_relations": 0, "relations": 28,
+            "physical_relation_evidence_count": 198_999, "semantic_control_records": 165,
+            "semantic_control_envelopes": 137, "semantic_control_record_limit": 256, "vcs_tree_files": 100_000,
+            "generation_elapsed_ms": 1, "reused_product": False, "synthetic_tasks": [],
+            "vcs_commit": "d" * 40, "vcs_tree_digest": "e" * 64, "vcs_provider_version": "fixture-1",
+            "physical_relation_evidence": relation_summary,
+        }
+        corpus = {
+            "record_type": "SaturationSemanticCorpus", "generation": "explicit-authorized-command-events", "harness_generated": True,
+            "product_acceptance_credit": False, "task_count": 132, "relation_count": 28, "depths": list(range(1, 13)), "high_fanout": 16,
+            "conflicting_exact_id_text": True, "query_ids": ["query:fixture", "query:continuation"], "continuation_query_ids": ["query:continuation"],
+            "search_fixture": {"task_count": 32, "relation_count": 28, "depths": list(range(1, 13)), "high_fanout": 16},
+            "physical_bucket_control": {
+                "record_type": "PhysicalBucketControlManifest", "generation": "streamed-inventory-aggregate", "candidate_digest": candidate_digest,
+                "inventory_identity_digest": inventory_identity_digest, "bucket_count": 100, "files_per_bucket": 1_000, "file_count": 100_000,
+                "aggregate_digest": aggregate_digest, "cardinality": {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
+                "semantic_control_record_count": 100, "semantic_control_envelope_count": 100, "semantic_control_record_limit": 256,
+            },
+            "reused": False, "search_fixture_reused": False, "physical_bucket_control_reused": False,
+        }
+        physical["explicit_semantic_corpus"] = corpus
+        projection = {
+            "entity_count": 137, "entity_type_counts": {"Task": 132, "Grant": 4, "Candidate": 1}, "relation_count": 28,
+            "initial_inventory_passes": 1, "initial_product_passes": 0, "rebuild_inventory_passes": 1, "rebuild_product_passes": 0,
+            "equal_semantic_digest": True, "implementation_closure_digest": implementation_digest, "database_bytes": 8192,
+            "elapsed_ms": 1.0, "inventory_integrity": True, "inventory_projection_amplification": 2.0, "projection_amplification": 2.0,
+            "semantic_digest": "f" * 64, "semantic_inflation": 3.0,
+        }
+        inventory = {"candidate_digest": candidate_digest, "elapsed_ms": 1.0, "entries": 100_000, "passes": 1, "snapshot": {"digest": "1" * 64}, "stream_bytes": len(inventory_payload)}
+        platform_identity = {
+            "system": "windows", "release": "10.0.0", "machine": "AMD64", "python_implementation": "CPython", "python_version": "3.14.0",
+            "python_executable_sha256": "sha256:" + "1" * 64, "sqlite_version": "3.45.1", "profile_key": "windows-AMD64-cpython-3.14",
+        }
+        platform_binding = {**platform_identity, "binding_digest": "sha256:" + canonical_digest(platform_identity)}
+        observed = {"p50_ms": query_summary["p50_ms"], "p95_ms": query_summary["p95_ms"], "p99_ms": query_summary["p99_ms"], "peak_rss_bytes": 2, "database_bytes": 8192, "projection_amplification": 2.0, "semantic_inflation": 3.0, "commit_p95_ms": 2.0, "commit_p99_ms": 2.0, "commit_bytes_per_changed_record": 2.0, "runtime_checkpoint_count": 2, "runtime_checkpoint_writes": 1, "semantic_ingestion_seconds": 1.0, "runtime_checkpoint_writes": 1}
+        thresholds = {"p50_ms_max": 100, "p95_ms_max": 150, "p99_ms_max": 500, "peak_rss_bytes_max": 805306368, "database_bytes_max": 402653184, "projection_amplification_max": 20, "semantic_inflation_max": 3.25, "commit_p95_ms_max": 500, "commit_p99_ms_max": 1000, "commit_bytes_per_changed_record_max": 32768, "runtime_checkpoint_count_max": 24, "semantic_ingestion_seconds_max": 600}
+        performance_predicates = {name: observed[key] <= thresholds[limit] for name, (key, limit) in {"p50_within_profile": ("p50_ms", "p50_ms_max"), "p95_within_profile": ("p95_ms", "p95_ms_max"), "p99_within_profile": ("p99_ms", "p99_ms_max"), "peak_rss_within_profile": ("peak_rss_bytes", "peak_rss_bytes_max"), "database_within_profile": ("database_bytes", "database_bytes_max"), "projection_amplification_within_profile": ("projection_amplification", "projection_amplification_max"), "semantic_inflation_within_profile": ("semantic_inflation", "semantic_inflation_max"), "commit_p95_within_profile": ("commit_p95_ms", "commit_p95_ms_max"), "commit_p99_within_profile": ("commit_p99_ms", "commit_p99_ms_max"), "commit_bytes_per_changed_record_within_profile": ("commit_bytes_per_changed_record", "commit_bytes_per_changed_record_max"), "runtime_checkpoint_count_within_profile": ("runtime_checkpoint_count", "runtime_checkpoint_count_max"), "semantic_ingestion_within_profile": ("semantic_ingestion_seconds", "semantic_ingestion_seconds_max")}.items()}
+        performance = {"profile_id": "portable-local-v1", "platform_binding": platform_binding, "compatible_platforms": ["linux", "windows"], "requires_same_runner_no_degradation": True, "observed": observed, "thresholds": thresholds, "predicates": performance_predicates, "all_within_profile": all(performance_predicates.values())}
+        contract_predicates = {"broad_query_refinement_required": True, "content_search_verified": True, "continuation_state_bytes_at_most_16384": True, "continuation_token_bytes_at_most_256": True, "continuation_token_overhead_at_most_10_percent": True, "continuation_union_complete": True, "exact_artifact_binding_unchanged": True, "exact_artifact_search_verified": True, "high_cardinality_terms_verified": True, "hostile_proxy_content_verified": True, "inventory_incremental_memory_amplification_at_most_32": True, "inventory_passes_exact": True, "miss_behavior_verified": True, "mixed_query_classes_complete": True, "physical_bucket_cardinality_exact": True, "physical_relation_evidence_count_exact": True, "physical_relation_evidence_exact": True, "raw_file_proxy_ratio_exact": True, "rebuild_digest_equal": True, "rebuild_product_passes_zero": True, "runtime_depths_1_through_12": True, "runtime_queries_exact": True, "runtime_query_budget_bounded": True, "semantic_control_envelopes_bounded": True, "semantic_control_records_bounded": True, "semantic_relation_count_bounded_exact": True, "selected_closure_union_complete": True, "semantic_commit_count_exact": True, "silent_truncations_zero": True, "synthetic_task_ratio_zero": True}
+
+        raw_specs = {
+            "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson", inventory_payload, 100_000),
+            "physical-relation-evidence": ("raw/physical-relation-evidence.jsonl", "application/x-ndjson", relation_payload, 198_999),
+            "query-results": ("raw/query-results.jsonl", "application/x-ndjson", query_payload, len(query_rows)),
+            "process-samples": ("raw/process-samples.json", "application/json", process_path.read_bytes(), 4),
+            "continuation-state-manifest": ("raw/continuation-state-manifest.jsonl", "application/x-ndjson", b"", 0),
+            "phase-log": ("raw/phase-log.jsonl", "application/x-ndjson", phase_path.read_bytes(), 6),
+        }
+        operation = {"record_type": "SaturationOperationMetrics", "evidence_class": "harness_generated", "product_acceptance_credit": False, "status": "pass", "process_exit_code": 0, "invocation_exit_code": 0, "physical": physical, "inventory": inventory, "projection": projection, "search": query_summary, "resources": operation_resources, "performance": performance, "contract_predicates": contract_predicates, "physical_relation_evidence": relation_summary, "semantic_ingestion": semantic_ingestion}
+        operation_payload = canonical_bytes(operation)
+        operation_path = raw_dir / "operation-metrics.json"
+        operation_path.write_bytes(operation_payload)
+        raw_specs["operation-metrics"] = ("raw/operation-metrics.json", "application/json", operation_payload, 1)
+        artifacts = [{"role": role, "path": relative, "media_type": media, "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload), "records": records} for role, (relative, media, payload, records) in raw_specs.items()]
+        raw_manifest_identity = {"record_type": "SaturationRawArtifactManifest", "path_scope": "saturation-result-directory", "evidence_class": "harness_generated", "product_acceptance_credit": False, "artifacts": artifacts, "artifact_count": 7, "inventory_stream_digest": hashlib.sha256(inventory_payload).hexdigest(), "inventory_identity_digest": inventory_identity_digest}
+        raw_manifest = {**raw_manifest_identity, "manifest_digest": canonical_digest(raw_manifest_identity)}
+        verification = {"record_type": "SaturationEvidence", "status": "pass", "candidate_binding_digest": candidate_digest, "artifact_binding_unchanged": True, "workspace_initialization": {"record_type": "SaturationWorkspaceInitialization", "status": "reused", "project_id": "promin-physical-saturation", "activation_digest": activation_digest, "implementation_closure_digest": implementation_digest, "product_tree_scans": 0, "init_record_count": 5, "init_records": ["activation.json", "authority.json", "project.json", "standards.json", "technologies.json"], "snapshot_provider_id": "git-filesystem-inventory", "snapshot_provider_version": "2.45.1"}, "runtime_binding": {"activation_digest": activation_digest, "implementation_closure_digest": implementation_digest, "platform_binding_digest": platform_binding["binding_digest"]}, "physical_files": 100_000, "physical_relation_evidence": relation_summary, "core_valid_relations": 198_999, "runtime_queries": len(query_rows), "silent_truncations": 0, "selected_closure_union_completeness": 1.0, "memory_amplification_at_most_32": True, "core_valid_relations_exact_198999": True, "broad_query_refinement_required": True, "high_cardinality_terms_verified": True, "content_search_verified": True, "miss_behavior_verified": True, "hostile_proxy_content_verified": True, "exact_artifact_search_verified": True, "mixed_query_classes_complete": True, "continuation_token_bytes_at_most_256": True, "continuation_state_bytes_at_most_16384": True, "continuation_token_overhead_at_most_10_percent": True, "pass_credit": False, "physical": physical, "inventory": inventory, "projection": projection, "query_authorization": {"subject_id": "fixture-reader", "grant_id": "grant:fixture-reader", "claim_digest": "1" * 64, "capability_id": "projection.read", "scope": [{"resource": "promin-physical-saturation"}], "activation_digest": activation_digest, "expires_at": "2026-08-25T11:00:00Z"}, "search": query_summary, "resources": operation_resources, "performance": performance, "contract_predicates": contract_predicates, "raw_artifact_manifest": raw_manifest, "current_release_regression": {"before": {"eligibility": False}, "after": {"eligibility": False}, "eligibility_remained_false": True, "historical_decision_preserved": True}, "claim_scope": "diagnostic exact physical saturation fixture only", "acceptance_pass": False, "product_acceptance_pass": False, "public_release_approved": False}
+
+        candidate = {"record_type": "StandardReleaseCandidateBinding", "standard_name": "promin", "version": "1.0.0-alpha.4", "archive_sha256": "d" * 64, "archive_bytes": 1, "archive_member_manifest_digest": "e" * 64, "package_manifest_digest": "f" * 64, "checksums_digest": "1" * 64, "core_bundle_digest": "2" * 64, "preset_digest": "3" * 64, "package_tool_digest": "4" * 64, "validator_digest": "5" * 64, "test_manifest_digest": "6" * 64, "portable_implementation_closure_digest": implementation_digest, "evidence_tool_digests": {path: "7" * 64 for path in ("tools/generate_human.py", "tools/promin_no_degradation.py", "tools/promin_package.py", "tools/promin_saturation.py", "tools/promin_saturation_audit.py", "tools/promin_validate.py")}}
+        # The release fixture intentionally isolates only the standard binding
+        # boundary; all downstream checks still consume this exact digest.
+        candidate["candidate_binding_digest"] = candidate_digest
+        artifact_tool_paths = {
+            "tools/promin_no_degradation.py",
+            "tools/promin_package.py",
+            "tools/promin_saturation.py",
+            "tools/promin_saturation_audit.py",
+            "tools/promin_validate.py",
+        }
+        artifact_binding = {"record_type": "ExactArtifactBinding", "protocol_version": "promin-evidence-v1", "candidate_binding_digest": candidate_digest, "archive": {"bytes": 1, "sha256": "sha256:" + candidate["archive_sha256"], "manifest_member_bytes_match": True, "member_count": 1, "name": "promin-1.0.0-alpha.4.zip"}, "checksums_sha256": "sha256:" + candidate["checksums_digest"], "core_bundle_digest": "sha256:" + candidate["core_bundle_digest"], "package_manifest_sha256": "sha256:" + candidate["package_manifest_digest"], "preset": {"path": "presets/semantic-standard.json", "sha256": "sha256:" + candidate["preset_digest"]}, "platform": platform_binding, "standard_candidate_binding": candidate, "tools": [{"path": path, "sha256": "sha256:" + candidate["evidence_tool_digests"][path], "bytes": 1, "version": "1.0.0"} for path in sorted(artifact_tool_paths)]}
+        artifact_binding["binding_digest"] = "sha256:" + canonical_digest({key: value for key, value in artifact_binding.items() if key != "binding_digest"})
+        verification["artifact_binding"] = artifact_binding
+        verification["producer"] = {"tool_path": "tools/promin_saturation.py", "tool_sha256": candidate["evidence_tool_digests"]["tools/promin_saturation.py"], "tool_version": candidate["version"]}
+        verification["invocation"] = release_evidence_invocation(invocation_id="saturation:fixture", operation="physical-saturation", arguments={"files": 100_000, "queries": len(query_rows)}, started_at="2026-08-25T10:00:00Z", completed_at="2026-08-25T10:00:01Z", exit_code=0, platform_binding=platform_binding["binding_digest"][7:])
+        verification = evidence.seal_release_evidence(verification)
+        (output / "saturation-result.json").write_bytes(canonical_bytes(verification))
+        return verification, temporary
+
+    def test_real_rich_trace_survives_raw_release_recomputation(self) -> None:
+        """Keep the release raw-query recomputation bound to producer-shaped traces."""
+        internal_chain = {
+            "atoms": {"artifact:file:needle", "task:saturation:needle"},
+            "page_digests": ["1" * 64, "2" * 64],
+            "page_identity_digests": ["a" * 64, "b" * 64],
+            "pages": 2,
+            "continuation_pages": 1,
+            "first_truncated": True,
+            "initial_expiry": "2026-08-25T10:01:00Z",
+            "expiry_monotonic": True,
+            "renewals": [
+                {
+                    "cursor": 1,
+                    "old_expiry": "2026-08-25T10:01:00Z",
+                    "new_expiry": "2026-08-25T10:02:00Z",
+                    "renewed_at": "2026-08-25T10:00:30Z",
+                }
+            ],
+            "maximum_token_bytes": 32,
+            "identity_digests": {"a" * 64, "b" * 64},
+            "selected_closure_complete": True,
+        }
+        producer_trace = saturation._raw_page_trace(internal_chain)
+        forced_trace = dict(producer_trace)
+        forced_trace["union_matches_reference"] = True
+
+        first_pages = {
+            "broad": {
+                "refinement_required": True,
+                "refinement_hints": ["narrow"],
+                "unselected_matches_traversable": False,
+            },
+            "content-high-cardinality": {
+                "refinement_required": True,
+                "selected_seed_count": 1,
+                "unselected_matches_traversable": False,
+                "entities": [{"id": "artifact:file:needle"}],
+            },
+            "content-probe": {"entities": [{"id": "artifact:file:needle"}]},
+            "exact-artifact": {"entities": [{"id": "query:exact-artifact"}]},
+            "exact-semantic": {"entities": [{"id": "query:exact-semantic"}]},
+            "hostile-content": {"entities": [{"id": "artifact:file:needle"}]},
+            "hostile-exact": {"entities": [{"id": "task:saturation:needle"}]},
+            "miss": {
+                "entities": [],
+                "relations": [],
+                "evidence": [],
+                "selected_seed_count": 0,
+                "refinement_required": False,
+                "truncated": False,
+                "silent_truncation": False,
+            },
+            "forced-continuation": {"entities": [{"id": "artifact:file:needle"}]},
+        }
+        rows = []
+        for index, query_class in enumerate(first_pages):
+            query = f"query:{query_class}"
+            page = first_pages[query_class]
+            rows.append(
+                {
+                    "record_type": "SaturationQueryObservation",
+                    "index": index,
+                    "query_class": query_class,
+                    "query": query,
+                    "depth": 1,
+                    "elapsed_ms": 1.0,
+                    "first_page": page,
+                    "first_page_digest": canonical_digest(page),
+                    "class_result_verified": True,
+                    "reference": producer_trace,
+                    "forced": forced_trace if query_class == "forced-continuation" else None,
+                }
+            )
+
+        payload = b"".join(canonical_bytes(row) for row in rows)
+        with tempfile.TemporaryDirectory() as temporary:
+            raw_path = Path(temporary) / "query-results.jsonl"
+            raw_path.write_bytes(payload)
+            parsed_rows = evidence._parse_raw_jsonl(
+                payload, "query results", max_records=100_000
+            )
+            self.assertEqual(len(parsed_rows), len(rows))
+            recomputed = [
+                evidence._recompute_raw_query_result(
+                    row, expected_index=index, top_k=1
+                )
+                for index, row in enumerate(parsed_rows)
+            ]
+            self.assertEqual(recomputed[-1]["reference"], producer_trace)
+            self.assertEqual(recomputed[-1]["forced"], producer_trace)
+            self.assertTrue(raw_path.exists())
+
+        # Exercise the real release-evidence validator's flag gate. Candidate
+        # binding is the only external boundary isolated here; raw parsing,
+        # recomputation, and shared trace validation above remain unmocked.
+        release_state, _ = self._exact_saturation_evidence_fixture()
+        with mock.patch(
+            "promin.evidence.validate_standard_release_candidate_binding",
+            return_value={"candidate_binding_digest": "c" * 64},
+        ):
+            with self.assertRaises(EvidenceError):
+                validate_saturation_evidence(
+                    release_state,
+                    candidate_binding={},
+                    source_path=Path("saturation-result.json"),
+                    evidence_root=Path("evidence"),
+                    require_pass=False,
+                )
+        for field in (
+            "acceptance_pass",
+            "product_acceptance_pass",
+            "pass_credit",
+            "public_release_approved",
+        ):
+            self.assertIs(release_state[field], False)
+
     @staticmethod
     def _exact_saturation_evidence_fixture() -> tuple[dict, dict]:
         corpus = {
