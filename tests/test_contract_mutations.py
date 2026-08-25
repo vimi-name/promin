@@ -85,6 +85,8 @@ ZERO = "0" * 64
 ONE = "1" * 64
 NOW = "2026-07-17T12:00:00Z"
 IMPLEMENTATION_CLOSURE_DIGEST = "9" * 64
+PHYSICAL_ACCEPTANCE_ID = "physical-100k-exact-bucketed-inventory"
+LEGACY_PHYSICAL_ACCEPTANCE_ID = "physical-100k-one-artifact-proxy-per-file"
 
 TOOLS = PACKAGE_ROOT / "tools"
 if str(TOOLS) not in sys.path:
@@ -514,10 +516,14 @@ def _physical_scale_result_from_core(bundle) -> dict[str, Any]:
         "physical": {
             "files": file_count,
             "raw_files": file_count,
+            # Physical files are represented by the bound raw stream, not by
+            # one semantic Artifact per file.
             "semantic_proxies": file_count
-            * inventory_contract["derived_artifact_proxies_per_raw_file"],
+            * inventory_contract["semantic_artifacts_per_raw_file"],
             "raw_file_proxies": file_count
-            * inventory_contract["derived_artifact_proxies_per_raw_file"],
+            * inventory_contract["physical_inventory_records_per_raw_file"],
+            "physical_artifact_evidence": file_count
+            * inventory_contract["physical_inventory_records_per_raw_file"],
             "raw_file_proxy_ratio": reference["raw_file_proxy_ratio"],
             "synthetic_tasks": file_count
             * inventory_contract["synthetic_tasks_per_raw_file"],
@@ -526,22 +532,56 @@ def _physical_scale_result_from_core(bundle) -> dict[str, Any]:
             "synthetic_task_ratio": reference["synthetic_task_ratio"],
             "inventory_relations": file_count
             * inventory_contract["synthetic_relations_per_raw_file"],
-            "relations": physical_relations["total_core_valid_relations"],
+            # The semantic fixture Relations remain separate from the exact
+            # physical relation evidence carried by the raw route.
+            "relations": semantic["relation_count"],
+            "physical_relation_evidence_count": physical_relations[
+                "total_core_valid_relations"
+            ],
+            "semantic_control_records": semantic["task_count"]
+            + inventory_contract["physical_bucket_count"]
+            + semantic["relation_count"]
+            + 5,
+            "semantic_control_envelopes": semantic["task_count"]
+            + inventory_contract["physical_bucket_count"]
+            + 5,
+            "semantic_control_record_limit": inventory_contract[
+                "semantic_control_record_limit"
+            ],
             "explicit_semantic_corpus": {
                 "task_count": semantic["task_count"]
-                + physical_relations["task_count"],
-                "relation_count": physical_relations[
-                    "total_core_valid_relations"
-                ],
+                + inventory_contract["physical_bucket_count"],
+                "relation_count": semantic["relation_count"],
                 "depths": depths,
                 "harness_generated": True,
                 "product_acceptance_credit": False,
-                "physical_relation_fixture": {
-                    "task_count": physical_relations["task_count"],
-                    "relation_count": physical_relations["relation_count"],
-                    "relation_kind": physical_relations["relation_kind"],
-                    "artifact_target_coverage": physical_relations[
-                        "artifact_target_coverage"
+                # This is intentionally only a bounded shape.  The physical
+                # validator must still receive and verify the actual raw
+                # stream before this shape can be considered evidence.
+                "physical_bucket_control": {
+                    "record_type": "PhysicalBucketControlManifest",
+                    "generation": "streamed-inventory-aggregate",
+                    "candidate_digest": ZERO,
+                    "inventory_identity_digest": ZERO,
+                    "bucket_count": inventory_contract["physical_bucket_count"],
+                    "files_per_bucket": inventory_contract[
+                        "physical_files_per_bucket"
+                    ],
+                    "file_count": file_count,
+                    "aggregate_digest": ZERO,
+                    "cardinality": {
+                        "minimum": 1000,
+                        "maximum": 1000,
+                        "distinct": 1,
+                    },
+                    "semantic_control_record_count": inventory_contract[
+                        "physical_bucket_count"
+                    ],
+                    "semantic_control_envelope_count": inventory_contract[
+                        "physical_bucket_count"
+                    ],
+                    "semantic_control_record_limit": inventory_contract[
+                        "semantic_control_record_limit"
                     ],
                 },
             },
@@ -549,6 +589,8 @@ def _physical_scale_result_from_core(bundle) -> dict[str, Any]:
         "inventory": {
             "passes": reference["inventory_passes"],
             "entries": file_count,
+            "stream_bytes": 1,
+            "candidate_digest": ZERO,
         },
         "projection": {
             "initial_inventory_passes": reference["inventory_passes"],
@@ -1433,6 +1475,23 @@ class ContractMutationTests(unittest.TestCase):
         conformance = self.bundle.core["conformance.json"]
         authority = self.bundle.core["authority-model.json"]
         definitions = self.bundle.schema["$defs"]
+        inventory_contract = conformance["scale_contracts"]["inventory"]
+        self.assertIn(PHYSICAL_ACCEPTANCE_ID, conformance["required_acceptance"])
+        self.assertNotIn(
+            LEGACY_PHYSICAL_ACCEPTANCE_ID, conformance["required_acceptance"]
+        )
+        conformance_text = json.dumps(conformance, sort_keys=True)
+        self.assertNotIn(LEGACY_PHYSICAL_ACCEPTANCE_ID, conformance_text)
+        self.assertNotIn("derived_artifact_proxies_per_raw_file", conformance_text)
+        self.assertIn(PHYSICAL_ACCEPTANCE_ID, ACCEPTANCE_VALIDATORS)
+        self.assertNotIn(LEGACY_PHYSICAL_ACCEPTANCE_ID, ACCEPTANCE_VALIDATORS)
+        self.assertEqual(inventory_contract["semantic_artifacts_per_raw_file"], 0)
+        self.assertEqual(inventory_contract["physical_inventory_records_per_raw_file"], 1)
+        self.assertEqual(inventory_contract["physical_bucket_count"], 100)
+        self.assertEqual(inventory_contract["physical_files_per_bucket"], 1000)
+        self.assertEqual(inventory_contract["semantic_control_record_limit"], 256)
+        self.assertNotIn("derived_artifact_proxies_per_raw_file", inventory_contract)
+        self.assertNotIn("derived_artifact_proxies_per_raw_file", conformance)
         self.assertEqual(len(semantic["persistent_entities"]), 9)
         self.assertEqual(len(semantic["relations"]), 6)
         self.assertEqual(len(policies["policies"]), 68)
@@ -1644,7 +1703,12 @@ class ContractMutationTests(unittest.TestCase):
         with patch(
             "promin.evidence.validate_saturation_evidence",
             return_value=validated,
-        ) as validate:
+        ) as validate, patch(
+            "promin.conformance._validate_physical_scale_result"
+        ) as validate_physical:
+            # This test isolates the incremental-commit hook.  The direct
+            # physical validator has its own fail-closed test below and must
+            # not treat this synthetic shape as physical evidence.
             check({}, self.bundle, context)
         validate.assert_called_once_with(
             baseline,
@@ -1652,6 +1716,7 @@ class ContractMutationTests(unittest.TestCase):
             source_path=source_path,
             evidence_root=evidence_root,
         )
+        validate_physical.assert_called_once()
 
         invalid_variants = []
         stale_predicate = deepcopy(validated)
@@ -1668,6 +1733,8 @@ class ContractMutationTests(unittest.TestCase):
             with self.subTest(case=label), patch(
                 "promin.evidence.validate_saturation_evidence",
                 return_value=invalid,
+            ), patch(
+                "promin.conformance._validate_physical_scale_result"
             ), self.assertRaises(ConformanceError):
                 check({}, self.bundle, context)
 
@@ -2002,11 +2069,16 @@ class ContractMutationTests(unittest.TestCase):
 
     def test_physical_scale_cardinalities_reject_mutated_core_owners(self) -> None:
         baseline_result = _physical_scale_result_from_core(self.bundle)
-        _validate_physical_scale_result(
-            baseline_result,
-            bundle=self.bundle,
-            check_id="scale-owner-baseline",
-        )
+        # Core-owned cardinalities are tested independently from physical raw
+        # evidence.  The raw-evidence seam is patched here deliberately; the
+        # unbound synthetic shape is rejected by the separate fail-closed test.
+        with patch("promin.conformance._validate_physical_raw_evidence"):
+            _validate_physical_scale_result(
+                baseline_result,
+                bundle=self.bundle,
+                check_id=PHYSICAL_ACCEPTANCE_ID,
+                context={"core_only_contract_probe": True},
+            )
 
         mutated_core = deepcopy(self.bundle.core)
         conformance = mutated_core["conformance.json"]
@@ -2034,24 +2106,52 @@ class ContractMutationTests(unittest.TestCase):
 
         mutated_bundle = replace(self.bundle, core=mutated_core)
         mutated_result = _physical_scale_result_from_core(mutated_bundle)
-        with self.assertRaises(ConformanceError):
+        with patch("promin.conformance._validate_physical_raw_evidence"):
+            with self.assertRaises(ConformanceError):
+                _validate_physical_scale_result(
+                    mutated_result,
+                    bundle=mutated_bundle,
+                    check_id=PHYSICAL_ACCEPTANCE_ID,
+                    context={"core_only_contract_probe": True},
+                )
+
+            with self.assertRaises(ConformanceError):
+                _validate_physical_scale_result(
+                    baseline_result,
+                    bundle=mutated_bundle,
+                    check_id=PHYSICAL_ACCEPTANCE_ID,
+                    context={"core_only_contract_probe": True},
+                )
+            with self.assertRaises(ConformanceError):
+                _validate_physical_scale_result(
+                    mutated_result,
+                    bundle=self.bundle,
+                    check_id=PHYSICAL_ACCEPTANCE_ID,
+                    context={"core_only_contract_probe": True},
+                )
+
+    def test_physical_scale_validator_rejects_unbound_synthetic_shape(self) -> None:
+        synthetic = _physical_scale_result_from_core(self.bundle)
+        with self.assertRaisesRegex(
+            ConformanceError, "raw physical evidence context"
+        ):
             _validate_physical_scale_result(
-                mutated_result,
-                bundle=mutated_bundle,
-                check_id="scale-owner-mutated",
+                synthetic,
+                bundle=self.bundle,
+                check_id=PHYSICAL_ACCEPTANCE_ID,
             )
 
-        with self.assertRaises(ConformanceError):
+        # A valid-looking bounded shape cannot become physical evidence by
+        # carrying the removed per-file derived-artifact proxy field.
+        legacy_shape = deepcopy(synthetic)
+        legacy_shape["physical"]["derived_artifact_proxies_per_raw_file"] = 1
+        with self.assertRaisesRegex(
+            ConformanceError, "raw physical evidence context"
+        ):
             _validate_physical_scale_result(
-                baseline_result,
-                bundle=mutated_bundle,
-                check_id="scale-owner-stale-result",
-            )
-        with self.assertRaises(ConformanceError):
-            _validate_physical_scale_result(
-                mutated_result,
+                legacy_shape,
                 bundle=self.bundle,
-                check_id="scale-owner-stale-core",
+                check_id=PHYSICAL_ACCEPTANCE_ID,
             )
 
     def test_profile_depth_probe_uses_the_current_core_ceiling(self) -> None:

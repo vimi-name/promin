@@ -43,6 +43,10 @@ def test_public_minimal_init_plan_is_configured_but_non_crediting(tmp_path: Path
     assert experience["authority_granted"] is False
     assert experience["pass_credit"] is False
     assert experience["acceptance_pass"] is False
+    assert experience["product_acceptance_pass"] is False
+    assert experience["release_approved"] is False
+    assert experience["model_inference_used"] is False
+    assert experience["weak_model_semantic_decisions"] is False
 
 
 def test_public_expert_init_requires_and_binds_registered_selection(tmp_path: Path, capsys) -> None:
@@ -88,6 +92,10 @@ def test_public_expert_init_requires_and_binds_registered_selection(tmp_path: Pa
     assert selected["authority_granted"] is False
     assert selected["pass_credit"] is False
     assert selected["acceptance_pass"] is False
+    assert experience["product_acceptance_pass"] is False
+    assert experience["release_approved"] is False
+    assert experience["model_inference_used"] is False
+    assert experience["weak_model_semantic_decisions"] is False
 
 
 def test_revalidation_plan_and_report_preparation_are_deterministic_and_non_crediting(

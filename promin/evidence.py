@@ -15,7 +15,7 @@ import posixpath
 import re
 import stat
 import tempfile
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 import unicodedata
 import xml.etree.ElementTree as ElementTree
 
@@ -46,6 +46,15 @@ class StableExternalBytes:
     """One bounded external binary read with stable path/file identity."""
 
     payload: bytes
+    sha256: str
+    size_bytes: int
+    file_identity: str
+
+
+@dataclass(frozen=True)
+class StableExternalStream:
+    """Bounded JSONL stream identity after one descriptor-relative pass."""
+
     sha256: str
     size_bytes: int
     file_identity: str
@@ -852,6 +861,7 @@ _SATURATION_EVIDENCE_FIELDS = frozenset(
         "workspace_initialization",
         "runtime_binding",
         "physical_files",
+        "physical_relation_evidence",
         "core_valid_relations",
         "runtime_queries",
         "silent_truncations",
@@ -889,6 +899,11 @@ _SATURATION_EVIDENCE_FIELDS = frozenset(
 _SATURATION_RAW_ARTIFACT_LAYOUT = {
     "inventory-stream": (
         "raw/inventory-stream.jsonl",
+        "application/x-ndjson",
+        False,
+    ),
+    "physical-relation-evidence": (
+        "raw/physical-relation-evidence.jsonl",
         "application/x-ndjson",
         False,
     ),
@@ -1804,6 +1819,92 @@ def read_external_bytes_stable(
         payload=payload,
         sha256=_digest_bytes(payload),
         size_bytes=len(payload),
+        file_identity=identity,
+    )
+
+
+def _stream_external_jsonl_stable(
+    path: Path | str,
+    *,
+    root: Path | str | None,
+    max_bytes: int,
+    max_records: int,
+    max_line_bytes: int,
+    on_row: Callable[[int, dict[str, Any]], None],
+) -> StableExternalStream:
+    """Parse one bounded JSONL file incrementally with stable file identity."""
+
+    if (
+        type(max_bytes) is not int
+        or max_bytes < 1
+        or type(max_records) is not int
+        or max_records < 1
+        or type(max_line_bytes) is not int
+        or max_line_bytes < 1
+    ):
+        raise EvidenceError("external JSONL stream limits are invalid")
+    try:
+        descriptor, _absolute = _open_external_file_descriptor(path, root)
+    except (OSError, EvidenceError) as exc:
+        if isinstance(exc, EvidenceError):
+            raise
+        raise EvidenceError(f"external evidence file cannot be opened safely: {path}") from exc
+    stream_hash = hashlib.sha256()
+    observed = 0
+    row_count = 0
+    line_buffer = bytearray()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise EvidenceError("external JSONL evidence must be a bounded regular file")
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - observed))
+            if not chunk:
+                break
+            stream_hash.update(chunk)
+            observed += len(chunk)
+            if observed > max_bytes:
+                raise EvidenceError(f"external evidence exceeds {max_bytes} bytes")
+            line_buffer.extend(chunk)
+            if len(line_buffer) > max_line_bytes and b"\n" not in line_buffer:
+                raise EvidenceError("external JSONL row exceeds its line bound")
+            while True:
+                newline = line_buffer.find(b"\n")
+                if newline < 0:
+                    break
+                raw_line = bytes(line_buffer[: newline + 1])
+                del line_buffer[: newline + 1]
+                if len(raw_line) > max_line_bytes or raw_line == b"\n":
+                    raise EvidenceError("external JSONL row is empty or exceeds its line bound")
+                if row_count >= max_records:
+                    raise EvidenceError("external JSONL stream exceeds its row bound")
+                try:
+                    value = parse_json_strict(raw_line)
+                except CanonicalError as exc:
+                    raise EvidenceError("external JSONL row is not canonical JSON") from exc
+                if not isinstance(value, dict) or canonical_bytes(value) != raw_line:
+                    raise EvidenceError("external JSONL row is not a canonical object")
+                _validate_external_collections(value)
+                on_row(row_count, value)
+                row_count += 1
+        if line_buffer:
+            raise EvidenceError("external JSONL stream is not newline terminated")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if _stat_identity(before) != _stat_identity(after) or observed != after.st_size:
+        raise EvidenceError("external JSONL evidence changed during its stable read")
+    identity = canonical_digest(
+        {
+            "device": after.st_dev,
+            "inode": after.st_ino,
+            "size_bytes": after.st_size,
+            "modified_ns": after.st_mtime_ns,
+        }
+    )
+    return StableExternalStream(
+        sha256=stream_hash.hexdigest(),
+        size_bytes=observed,
         file_identity=identity,
     )
 
@@ -3235,6 +3336,7 @@ def _validate_saturation_operation_metrics(
         "resources",
         "performance",
         "contract_predicates",
+        "physical_relation_evidence",
         "semantic_ingestion",
     }
     if (
@@ -3246,6 +3348,7 @@ def _validate_saturation_operation_metrics(
         or operation.get("product_acceptance_credit") is not False
     ):
         raise EvidenceError("saturation operation metrics shape is invalid")
+    _validate_saturation_relation_summary_alias(verification)
     for field in (
         "physical",
         "inventory",
@@ -3254,6 +3357,7 @@ def _validate_saturation_operation_metrics(
         "resources",
         "performance",
         "contract_predicates",
+        "physical_relation_evidence",
     ):
         if operation[field] != verification.get(field):
             raise EvidenceError(
@@ -3311,7 +3415,7 @@ def _validate_saturation_operation_metrics(
             or set(observation) != observation_fields
             or observation.get("sequence") != index
             or observation.get("phase")
-            not in {"semantic-corpus", "physical-relation-corpus"}
+            not in {"semantic-corpus", "physical-bucket-controls"}
             or not _safe_id(observation.get("command_id"))
             or not _valid_digest(observation.get("batch_digest"))
             or not isinstance(observation.get("duration_ms"), (int, float))
@@ -3427,6 +3531,14 @@ def _is_valid_saturation_raw_artifact_binding(artifact: Any) -> bool:
     layout = _SATURATION_RAW_ARTIFACT_LAYOUT.get(role)
     byte_count = artifact.get("bytes")
     record_count = artifact.get("records")
+    if role == "physical-relation-evidence":
+        records_valid = record_count == 198_999
+    elif layout is None:
+        records_valid = False
+    else:
+        records_valid = (layout[2] and byte_count == 0 and record_count == 0) or (
+            byte_count >= 1 and record_count >= 1
+        )
     return bool(
         layout is not None
         and artifact.get("path") == layout[0]
@@ -3436,10 +3548,7 @@ def _is_valid_saturation_raw_artifact_binding(artifact: Any) -> bool:
         and not isinstance(byte_count, bool)
         and isinstance(record_count, int)
         and not isinstance(record_count, bool)
-        and (
-            (layout[2] and byte_count == 0 and record_count == 0)
-            or (byte_count >= 1 and record_count >= 1)
-        )
+        and records_valid
     )
 
 
@@ -3456,7 +3565,7 @@ def _resolve_saturation_raw_artifact_binding(
         raise EvidenceError("saturation raw artifact path is outside raw/")
     maximum = (
         256 * 1024 * 1024
-        if artifact["role"] == "inventory-stream"
+        if artifact["role"] in {"inventory-stream", "physical-relation-evidence"}
         else 128 * 1024 * 1024
     )
     stable = read_external_bytes_stable(
@@ -3467,6 +3576,184 @@ def _resolve_saturation_raw_artifact_binding(
     if stable.sha256 != artifact["sha256"] or stable.size_bytes != artifact["bytes"]:
         raise EvidenceError("saturation raw artifact content binding mismatch")
     return relative, stable
+
+
+_SATURATION_PHYSICAL_RELATION_FIELDS = frozenset(
+    {
+        "record_type",
+        "relation_id",
+        "kind",
+        "source_type",
+        "source_id",
+        "target_type",
+        "target_id",
+        "target_path",
+        "target_digest",
+        "target_size",
+        "bucket",
+        "activation_digest",
+        "candidate_digest",
+        "inventory_identity_digest",
+        "physical_evidence",
+        "semantic_record",
+    }
+)
+_SATURATION_PHYSICAL_RELATION_SUMMARY_FIELDS = frozenset(
+    {
+        "record_type",
+        "evidence_class",
+        "product_acceptance_credit",
+        "relation_count",
+        "relation_id_first",
+        "relation_id_last",
+        "physical_target_cardinality",
+        "inventory_identity_digest",
+        "candidate_digest",
+        "activation_digest",
+        "bytes",
+        "sha256",
+    }
+)
+
+
+def _validate_saturation_relation_summary_alias(
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require the nested physical summary to equal the authoritative summary."""
+
+    top_relation_summary = verification.get("physical_relation_evidence")
+    physical_section = verification.get("physical")
+    nested_relation_summary = (
+        physical_section.get("physical_relation_evidence")
+        if isinstance(physical_section, Mapping)
+        else None
+    )
+    if (
+        not isinstance(top_relation_summary, Mapping)
+        or not isinstance(nested_relation_summary, Mapping)
+        or dict(nested_relation_summary) != dict(top_relation_summary)
+    ):
+        raise EvidenceError(
+            "saturation physical relation summary is absent or differs between evidence surfaces"
+        )
+    return deepcopy(dict(top_relation_summary))
+
+
+def _validate_saturation_physical_relation_evidence(
+    path: Path,
+    *,
+    evidence_root: Path,
+    artifact: Mapping[str, Any],
+    inventory_digests: list[str],
+    inventory_sizes: list[int],
+    activation_digest: str,
+    candidate_digest: str,
+    inventory_identity_digest: str,
+    summary: Any,
+) -> dict[str, Any]:
+    """Validate the raw 198999-link stream against physical inventory content."""
+
+    if (
+        artifact.get("role") != "physical-relation-evidence"
+        or artifact.get("path") != "raw/physical-relation-evidence.jsonl"
+        or artifact.get("media_type") != "application/x-ndjson"
+        or artifact.get("records") != 198_999
+    ):
+        raise EvidenceError("physical relation evidence artifact binding is not exact")
+    if len(inventory_digests) != 100_000 or len(inventory_sizes) != 100_000:
+        raise EvidenceError("physical relation evidence cardinality is not exact")
+    if (
+        not isinstance(summary, Mapping)
+        or set(summary) != _SATURATION_PHYSICAL_RELATION_SUMMARY_FIELDS
+        or summary.get("record_type") != "PhysicalRelationEvidenceSummary"
+        or summary.get("evidence_class") != "harness_generated_physical"
+        or summary.get("product_acceptance_credit") is not False
+        or summary.get("relation_count") != 198_999
+        or summary.get("relation_id_first") != "physical-relation:000000"
+        or summary.get("relation_id_last") != "physical-relation:198998"
+        or summary.get("physical_target_cardinality") != 100_000
+        or summary.get("inventory_identity_digest") != inventory_identity_digest
+        or summary.get("candidate_digest") != candidate_digest
+        or summary.get("activation_digest") != activation_digest
+    ):
+        raise EvidenceError("physical relation evidence summary or digest is invalid")
+    coverage = bytearray(100_000)
+    bucket_counts = [0] * 100
+    relation_count = 0
+
+    def validate_row(index: int, row: dict[str, Any]) -> None:
+        nonlocal relation_count
+        if set(row) != _SATURATION_PHYSICAL_RELATION_FIELDS:
+            raise EvidenceError("physical relation evidence row shape is not exact")
+        relation_id = row.get("relation_id")
+        expected_relation_id = f"physical-relation:{index:06d}"
+        if (
+            relation_id != expected_relation_id
+            or row.get("record_type") != "PhysicalRelationEvidence"
+            or row.get("kind") != "READS"
+            or row.get("source_type") != "PhysicalBucket"
+            or row.get("target_type") != "PhysicalInventoryRecord"
+            or type(row.get("bucket")) is not int
+            or not 0 <= row["bucket"] < 100
+            or not _valid_digest(row.get("target_digest"))
+            or not _valid_digest(row.get("activation_digest"))
+            or not _valid_digest(row.get("candidate_digest"))
+            or not _valid_digest(row.get("inventory_identity_digest"))
+            or type(row.get("target_size")) is not int
+            or row["target_size"] < 0
+            or row.get("activation_digest") != activation_digest
+            or row.get("candidate_digest") != candidate_digest
+            or row.get("inventory_identity_digest") != inventory_identity_digest
+            or row.get("physical_evidence") is not True
+            or row.get("semantic_record") is not False
+        ):
+            raise EvidenceError("physical relation evidence row identity or flags are invalid")
+        inventory_index = index % 100_000
+        target_path = (
+            f"product/bucket-{inventory_index // 1_000:03d}/"
+            f"record-{inventory_index:06d}.txt"
+        )
+        match = re.fullmatch(r"product/bucket-(\d{3})/record-(\d{6})\.txt", target_path)
+        if (
+            match is None
+            or row.get("target_path") != target_path
+            or row.get("target_digest") != inventory_digests[inventory_index]
+            or row.get("target_size") != inventory_sizes[inventory_index]
+            or row.get("bucket") != int(match.group(1))
+            or row.get("source_id") != f"bucket-{int(match.group(1)):03d}"
+            or row.get("target_id")
+            != "artifact:file:"
+            + hashlib.sha256(target_path.encode("utf-8")).hexdigest()[:48]
+        ):
+            raise EvidenceError("physical relation evidence target binding is invalid")
+        coverage[inventory_index] = 1
+        bucket_counts[int(match.group(1))] += 1
+        relation_count += 1
+
+    relation_stream = _stream_external_jsonl_stable(
+        path,
+        root=evidence_root,
+        max_bytes=256 * 1024 * 1024,
+        max_records=198_999,
+        max_line_bytes=16_384,
+        on_row=validate_row,
+    )
+    if (
+        relation_count != 198_999
+        or sum(coverage) != 100_000
+        or any(value < 1 for value in bucket_counts)
+        or relation_stream.size_bytes != artifact.get("bytes")
+        or relation_stream.sha256 != artifact.get("sha256")
+        or summary.get("bytes") != relation_stream.size_bytes
+        or summary.get("sha256") != relation_stream.sha256
+    ):
+        raise EvidenceError("physical relation evidence stream cardinality or digest is invalid")
+    return {
+        "relation_count": relation_count,
+        "target_cardinality": sum(coverage),
+        "sha256": relation_stream.sha256,
+        "bytes": relation_stream.size_bytes,
+    }
 
 
 def _saturation_continuation_state_within_limit(metrics: Any) -> bool:
@@ -3540,6 +3827,97 @@ def _validate_saturation_continuation_state(
     return continuation_rows
 
 
+def _stream_saturation_inventory(
+    path: Path,
+    *,
+    evidence_root: Path,
+    artifact: Mapping[str, Any],
+    expected_stream_digest: str,
+    expected_inventory_digest: str,
+) -> dict[str, Any]:
+    """Stream the 100k inventory into compact target identities and buckets."""
+
+    inventory_digest = hashlib.sha256()
+    inventory_digests: list[str] = []
+    inventory_sizes: list[int] = []
+    bucket_counts = [0] * 100
+    bucket_bytes = [0] * 100
+    bucket_hashes = [hashlib.sha256() for _ in range(100)]
+    bucket_first_paths: list[str | None] = [None] * 100
+    bucket_last_paths: list[str | None] = [None] * 100
+    previous_path: str | None = None
+
+    def validate_row(index: int, row: dict[str, Any]) -> None:
+        nonlocal previous_path
+        expected_path = f"product/bucket-{index // 1_000:03d}/record-{index:06d}.txt"
+        if (
+            set(row) != {"path", "digest", "size", "search_text"}
+            or row.get("path") != expected_path
+            or not isinstance(row.get("path"), str)
+            or not _valid_digest(row.get("digest"))
+            or type(row.get("size")) is not int
+            or row["size"] < 0
+            or not isinstance(row.get("search_text"), str)
+            or len(row["search_text"].encode("utf-8")) > 4096
+            or (previous_path is not None and row["path"] <= previous_path)
+        ):
+            raise EvidenceError("raw inventory stream row is invalid or non-canonical")
+        previous_path = row["path"]
+        identity = {key: row[key] for key in ("path", "digest", "size")}
+        identity_bytes = canonical_bytes(identity)
+        inventory_digest.update(identity_bytes)
+        bucket = index // 1_000
+        bucket_hashes[bucket].update(identity_bytes)
+        bucket_counts[bucket] += 1
+        bucket_bytes[bucket] += row["size"]
+        bucket_first_paths[bucket] = bucket_first_paths[bucket] or row["path"]
+        bucket_last_paths[bucket] = row["path"]
+        inventory_digests.append(row["digest"])
+        inventory_sizes.append(row["size"])
+
+    stream = _stream_external_jsonl_stable(
+        path,
+        root=evidence_root,
+        max_bytes=256 * 1024 * 1024,
+        max_records=100_000,
+        max_line_bytes=16_384,
+        on_row=validate_row,
+    )
+    if (
+        stream.sha256 != expected_stream_digest
+        or stream.size_bytes != artifact.get("bytes")
+        or artifact.get("records") != 100_000
+        or len(inventory_digests) != 100_000
+        or inventory_digest.hexdigest() != expected_inventory_digest
+        or any(count != 1_000 for count in bucket_counts)
+    ):
+        raise EvidenceError("raw inventory stream counts or identities cannot be recomputed")
+    aggregates = [
+        {
+            "bucket_id": f"bucket-{index:03d}",
+            "relative_prefix": f"product/bucket-{index:03d}/",
+            "file_count": bucket_counts[index],
+            "total_bytes": bucket_bytes[index],
+            "identity_digest": bucket_hashes[index].hexdigest(),
+            "first_path": bucket_first_paths[index],
+            "last_path": bucket_last_paths[index],
+        }
+        for index in range(100)
+    ]
+    return {
+        "stream": stream,
+        "digests": inventory_digests,
+        "sizes": inventory_sizes,
+        "inventory_identity_digest": inventory_digest.hexdigest(),
+        "physical_bucket_aggregate_digest": canonical_digest(aggregates),
+        "physical_bucket_cardinality": {
+            "minimum": min(bucket_counts),
+            "maximum": max(bucket_counts),
+            "distinct": len(set(bucket_counts)),
+        },
+    }
+
+
 def _validate_saturation_raw_artifacts(
     verification: Mapping[str, Any],
     *,
@@ -3588,14 +3966,24 @@ def _validate_saturation_raw_artifacts(
         raise EvidenceError("saturation raw artifacts are on another filesystem root") from exc
     if os.path.normcase(str(common)) != os.path.normcase(str(root)):
         raise EvidenceError("saturation raw artifact directory escapes the evidence root")
-    resolved: dict[str, tuple[Mapping[str, Any], StableExternalBytes]] = {}
+    resolved: dict[
+        str, tuple[Mapping[str, Any], StableExternalBytes | None]
+    ] = {}
     paths: set[str] = set()
     for artifact in artifacts:
-        relative, stable = _resolve_saturation_raw_artifact_binding(
-            artifact,
-            source_directory=source_directory,
-            evidence_root=root,
-        )
+        if artifact.get("role") in {"inventory-stream", "physical-relation-evidence"}:
+            if not _is_valid_saturation_raw_artifact_binding(artifact):
+                raise EvidenceError("saturation raw artifact binding is invalid")
+            relative = _external_relative_path(artifact.get("path"))
+            if not relative.startswith("raw/"):
+                raise EvidenceError("saturation raw artifact path is outside raw/")
+            stable = None
+        else:
+            relative, stable = _resolve_saturation_raw_artifact_binding(
+                artifact,
+                source_directory=source_directory,
+                evidence_root=root,
+            )
         role = artifact["role"]
         if role in resolved:
             raise EvidenceError("saturation raw artifact binding is invalid")
@@ -3607,42 +3995,41 @@ def _validate_saturation_raw_artifacts(
         raise EvidenceError("saturation raw artifact roles are incomplete")
 
     inventory_binding, inventory_raw = resolved["inventory-stream"]
-    inventory_rows = _parse_raw_jsonl(
-        inventory_raw.payload,
-        "inventory stream",
-        max_records=100_000,
-        max_line_bytes=16_384,
+    inventory_state = _stream_saturation_inventory(
+        source_directory.joinpath(
+            *_external_relative_path(inventory_binding.get("path")).split("/")
+        ),
+        evidence_root=root,
+        artifact=inventory_binding,
+        expected_stream_digest=manifest["inventory_stream_digest"],
+        expected_inventory_digest=manifest["inventory_identity_digest"],
     )
-    inventory_digest = hashlib.sha256()
-    previous_path: str | None = None
-    for row in inventory_rows:
-        if (
-            set(row) != {"path", "digest", "size", "search_text"}
-            or not isinstance(row.get("path"), str)
-            or not row["path"]
-            or row["path"].startswith("/")
-            or "\\" in row["path"]
-            or any(part in {"", ".", ".."} for part in row["path"].split("/"))
-            or not _valid_digest(row.get("digest"))
-            or not isinstance(row.get("size"), int)
-            or isinstance(row.get("size"), bool)
-            or row["size"] < 0
-            or not isinstance(row.get("search_text"), str)
-            or len(row["search_text"].encode("utf-8")) > 4096
-            or (previous_path is not None and row["path"] <= previous_path)
-        ):
-            raise EvidenceError("raw inventory stream row is invalid or non-canonical")
-        previous_path = row["path"]
-        inventory_digest.update(
-            canonical_bytes({key: row[key] for key in ("path", "digest", "size")})
-        )
-    if (
-        len(inventory_rows) != 100_000
-        or inventory_binding["records"] != len(inventory_rows)
-        or inventory_raw.sha256 != manifest["inventory_stream_digest"]
-        or inventory_digest.hexdigest() != manifest["inventory_identity_digest"]
-    ):
-        raise EvidenceError("raw inventory stream counts or identities cannot be recomputed")
+
+    _validate_saturation_relation_summary_alias(verification)
+
+    relation_binding, relation_raw = resolved["physical-relation-evidence"]
+    runtime_binding = verification.get("runtime_binding")
+    activation_digest = (
+        runtime_binding.get("activation_digest")
+        if isinstance(runtime_binding, Mapping)
+        else None
+    )
+    candidate_digest = verification.get("inventory", {}).get("candidate_digest")
+    if not _valid_digest(activation_digest) or not _valid_digest(candidate_digest):
+        raise EvidenceError("physical relation evidence runtime bindings are invalid")
+    physical_relation_evidence = _validate_saturation_physical_relation_evidence(
+        source_directory.joinpath(
+            *_external_relative_path(relation_binding.get("path")).split("/")
+        ),
+        evidence_root=root,
+        artifact=relation_binding,
+        inventory_digests=inventory_state["digests"],
+        inventory_sizes=inventory_state["sizes"],
+        activation_digest=activation_digest,
+        candidate_digest=candidate_digest,
+        inventory_identity_digest=inventory_state["inventory_identity_digest"],
+        summary=verification.get("physical_relation_evidence"),
+    )
 
     operation_binding, operation_raw = resolved["operation-metrics"]
     operation = _validate_saturation_operation_metrics(
@@ -3812,7 +4199,7 @@ def _validate_saturation_raw_artifacts(
     if samples_binding["records"] != sample_total:
         raise EvidenceError("raw process sample count mismatch")
     resources = operation["resources"]
-    stream_bytes = len(inventory_raw.payload)
+    stream_bytes = inventory_state["stream"].size_bytes
     incremental_peak = max(
         phase_summaries["inventory"]["incremental_peak_bytes"],
         phase_summaries["projection"]["incremental_peak_bytes"],
@@ -3876,8 +4263,14 @@ def _validate_saturation_raw_artifacts(
         raise EvidenceError("saturation status and process/invocation exits disagree")
     return {
         "operation": operation,
-        "inventory_entry_count": len(inventory_rows),
+        "inventory_entry_count": len(inventory_state["digests"]),
         "query_count": len(query_rows),
+        "inventory_identity_digest": inventory_state["inventory_identity_digest"],
+        "physical_bucket_aggregate_digest": inventory_state[
+            "physical_bucket_aggregate_digest"
+        ],
+        "physical_bucket_cardinality": inventory_state["physical_bucket_cardinality"],
+        "physical_relation_evidence": physical_relation_evidence,
         "memory_within_threshold": incremental_ratio <= 32.0,
         "process_exit_code": expected_exit,
     }
@@ -4002,19 +4395,57 @@ def _validate_saturation_runtime_bindings(
 _SATURATION_SEMANTIC_REUSE_FIELDS = (
     "reused",
     "search_fixture_reused",
-    "physical_relation_fixture_reused",
+    "physical_bucket_control_reused",
 )
-_SATURATION_PROJECTION_ENTITY_TYPE_COUNTS = {
-    "Artifact": 100_000,
-    "Task": 1_599,
-    "Grant": 4,
-    "Candidate": 1,
-}
 _SATURATION_SEMANTIC_COMMIT_ENTITY_TYPES = ("Grant", "Candidate", "Task")
+
+_SATURATION_SEMANTIC_CORPUS_FIELDS = frozenset(
+    {
+        "record_type",
+        "generation",
+        "harness_generated",
+        "product_acceptance_credit",
+        "task_count",
+        "relation_count",
+        "depths",
+        "high_fanout",
+        "conflicting_exact_id_text",
+        "query_ids",
+        "continuation_query_ids",
+        "reused",
+        "search_fixture",
+        "physical_bucket_control",
+        "search_fixture_reused",
+        "physical_bucket_control_reused",
+    }
+)
+_SATURATION_SEMANTIC_SEARCH_FIELDS = frozenset(
+    {"task_count", "relation_count", "depths", "high_fanout"}
+)
+_SATURATION_PHYSICAL_BUCKET_CONTROL_FIELDS = frozenset(
+    {
+        "record_type",
+        "generation",
+        "candidate_digest",
+        "inventory_identity_digest",
+        "bucket_count",
+        "files_per_bucket",
+        "file_count",
+        "aggregate_digest",
+        "cardinality",
+        "semantic_control_record_count",
+        "semantic_control_envelope_count",
+        "semantic_control_record_limit",
+    }
+)
 
 
 def _validate_saturation_fresh_semantic_corpus(
     value: Any,
+    *,
+    candidate_digest: str,
+    inventory_identity_digest: str,
+    aggregate_digest: str,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise EvidenceError("fresh saturation evidence requires its semantic corpus")
@@ -4026,59 +4457,97 @@ def _validate_saturation_fresh_semantic_corpus(
     ):
         raise EvidenceError("fresh saturation cannot reuse semantic corpus state")
     search_fixture = value.get("search_fixture")
-    physical_relation_fixture = value.get("physical_relation_fixture")
+    physical_bucket_control = value.get("physical_bucket_control")
     if (
-        value.get("record_type") != "SaturationSemanticCorpus"
+        set(value) != _SATURATION_SEMANTIC_CORPUS_FIELDS
+        or value.get("record_type") != "SaturationSemanticCorpus"
         or value.get("generation") != "explicit-authorized-command-events"
         or value.get("harness_generated") is not True
         or value.get("product_acceptance_credit") is not False
-        or value.get("task_count") != 1_599
-        or value.get("relation_count") != 198_999
+        or type(value.get("task_count")) is not int
+        or not 0 <= value["task_count"] <= 256
+        or type(value.get("relation_count")) is not int
+        or not 0 <= value["relation_count"] <= 256
         or value.get("depths") != list(range(1, 13))
         or value.get("high_fanout") != 16
         or value.get("conflicting_exact_id_text") is not True
+        or not isinstance(value.get("query_ids"), list)
+        or not value["query_ids"]
+        or len(value["query_ids"]) > 256
+        or any(type(query_id) is not str or not query_id for query_id in value["query_ids"])
+        or len(set(value["query_ids"])) != len(value["query_ids"])
+        or not isinstance(value.get("continuation_query_ids"), list)
+        or not value["continuation_query_ids"]
+        or len(value["continuation_query_ids"]) > 256
+        or any(
+            type(query_id) is not str or not query_id
+            for query_id in value["continuation_query_ids"]
+        )
+        or len(set(value["continuation_query_ids"]))
+        != len(value["continuation_query_ids"])
+        or not set(value["continuation_query_ids"]).issubset(value["query_ids"])
         or not isinstance(search_fixture, Mapping)
+        or set(search_fixture) != _SATURATION_SEMANTIC_SEARCH_FIELDS
         or search_fixture.get("task_count") != 32
         or search_fixture.get("relation_count") != 28
         or search_fixture.get("depths") != list(range(1, 13))
         or search_fixture.get("high_fanout") != 16
-        or not isinstance(physical_relation_fixture, Mapping)
-        or physical_relation_fixture.get("task_count") != 1_567
-        or physical_relation_fixture.get("relation_count") != 198_971
-        or physical_relation_fixture.get("relation_kind") != "READS"
-        or physical_relation_fixture.get("target_type") != "Artifact"
-        or physical_relation_fixture.get("artifact_target_count") != 100_000
-        or physical_relation_fixture.get("artifact_target_coverage") != 1.0
-        or physical_relation_fixture.get("relations_per_atomic_batch_max") != 127
+        or value.get("task_count") != search_fixture["task_count"] + 100
+        or value.get("relation_count") != search_fixture["relation_count"]
+        or not isinstance(physical_bucket_control, Mapping)
+        or set(physical_bucket_control) != _SATURATION_PHYSICAL_BUCKET_CONTROL_FIELDS
+        or physical_bucket_control.get("record_type")
+        != "PhysicalBucketControlManifest"
+        or physical_bucket_control.get("generation")
+        != "streamed-inventory-aggregate"
+        or physical_bucket_control.get("candidate_digest") != candidate_digest
+        or physical_bucket_control.get("inventory_identity_digest")
+        != inventory_identity_digest
+        or physical_bucket_control.get("aggregate_digest") != aggregate_digest
+        or physical_bucket_control.get("bucket_count") != 100
+        or physical_bucket_control.get("files_per_bucket") != 1_000
+        or physical_bucket_control.get("file_count") != 100_000
+        or physical_bucket_control.get("cardinality")
+        != {"minimum": 1_000, "maximum": 1_000, "distinct": 1}
+        or physical_bucket_control.get("semantic_control_record_count") != 100
+        or physical_bucket_control.get("semantic_control_envelope_count") != 100
+        or physical_bucket_control.get("semantic_control_record_limit") != 256
     ):
         raise EvidenceError(
-            "fresh saturation semantic corpus shape or exact counts are invalid"
+            "fresh saturation bounded semantic corpus shape or exact controls are invalid"
         )
     return deepcopy(dict(value))
 
 
 def _validate_saturation_projection_entity_contour(
     projection: Any,
+    *,
+    semantic_corpus: Mapping[str, Any],
 ) -> dict[str, int]:
     if not isinstance(projection, Mapping):
         raise EvidenceError("saturation projection entity contour is missing")
     entity_type_counts = projection.get("entity_type_counts")
-    expected_counts = _SATURATION_PROJECTION_ENTITY_TYPE_COUNTS
     if (
         not isinstance(entity_type_counts, Mapping)
-        or set(entity_type_counts) != set(expected_counts)
-        or any(type(count) is not int for count in entity_type_counts.values())
+        or set(entity_type_counts) != {"Candidate", "Grant", "Task"}
+        or any(type(count) is not int or count < 0 for count in entity_type_counts.values())
     ):
-        raise EvidenceError("saturation projection entity contour shape is invalid")
+        raise EvidenceError("saturation bounded semantic entity contour shape is invalid")
     counts = dict(entity_type_counts)
+    expected_counts = {
+        "Candidate": 1,
+        "Grant": 4,
+        "Task": semantic_corpus["task_count"],
+    }
     expected_entity_count = sum(expected_counts.values())
     if (
         counts != expected_counts
         or type(projection.get("entity_count")) is not int
         or projection["entity_count"] != expected_entity_count
         or projection["entity_count"] != sum(counts.values())
+        or projection["entity_count"] > 256
     ):
-        raise EvidenceError("saturation projection entity contour is not exact")
+        raise EvidenceError("saturation bounded semantic entity contour is not exact")
     return counts
 
 
@@ -4146,27 +4615,55 @@ def validate_saturation_evidence(
         resources=resources,
         performance=performance,
     )
+    inventory_candidate_digest = inventory.get("candidate_digest")
+    if not _valid_digest(inventory_candidate_digest):
+        raise EvidenceError("saturation inventory Candidate digest is invalid")
     corpus = _validate_saturation_fresh_semantic_corpus(
-        physical.get("explicit_semantic_corpus")
+        physical.get("explicit_semantic_corpus"),
+        candidate_digest=inventory_candidate_digest,
+        inventory_identity_digest=raw["inventory_identity_digest"],
+        aggregate_digest=raw["physical_bucket_aggregate_digest"],
     )
-    entity_type_counts = _validate_saturation_projection_entity_contour(projection)
+    entity_type_counts = _validate_saturation_projection_entity_contour(
+        projection,
+        semantic_corpus=corpus,
+    )
     expected_semantic_commit_count = sum(
         entity_type_counts[entity_type]
         for entity_type in _SATURATION_SEMANTIC_COMMIT_ENTITY_TYPES
     )
+    expected_semantic_control_records = (
+        entity_type_counts["Task"]
+        + corpus["relation_count"]
+        + entity_type_counts["Grant"]
+        + entity_type_counts["Candidate"]
+    )
+    if (
+        physical.get("inventory_relations") != 0
+        or physical.get("semantic_control_records")
+        != expected_semantic_control_records
+        or physical.get("semantic_control_envelopes")
+        != expected_semantic_commit_count
+        or physical.get("semantic_control_record_limit") != 256
+        or expected_semantic_control_records > 256
+        or expected_semantic_commit_count > 256
+    ):
+        raise EvidenceError("saturation semantic control bounds or counts are invalid")
     if (
         physical.get("files") != 100_000
         or physical.get("raw_files") != 100_000
         or physical.get("raw_file_proxies") != 100_000
-        or physical.get("semantic_proxies") != 100_000
+        or physical.get("physical_artifact_evidence") != 100_000
+        or physical.get("semantic_proxies") != 0
         or physical.get("raw_file_proxy_ratio") != 1.0
         or physical.get("synthetic_task_count") != 0
         or physical.get("synthetic_task_ratio") != 0.0
-        or physical.get("relations") != 198_999
+        or physical.get("relations") != corpus["relation_count"]
+        or physical.get("physical_relation_evidence_count") != 198_999
         or physical.get("vcs_tree_files") != 100_000
         or inventory.get("entries") != 100_000
         or inventory.get("passes") != 1
-        or projection.get("relation_count") != 198_999
+        or projection.get("relation_count") != corpus["relation_count"]
         or projection.get("initial_inventory_passes") != 1
         or projection.get("initial_product_passes") != 0
         or projection.get("rebuild_inventory_passes") != 1
@@ -4295,12 +4792,13 @@ def validate_saturation_evidence(
     )
     required_top = {
         "physical_files": 100_000,
-        "core_valid_relations": projection["relation_count"],
+        "core_valid_relations": physical["physical_relation_evidence_count"],
         "runtime_queries": search["actual_runtime_queries"],
         "silent_truncations": 0,
         "selected_closure_union_completeness": search["selected_closure_union_completeness"],
         "memory_amplification_at_most_32": memory_within_threshold,
-        "core_valid_relations_exact_198999": projection["relation_count"] == 198_999,
+        "core_valid_relations_exact_198999": physical["physical_relation_evidence_count"]
+        == 198_999,
         "broad_query_refinement_required": search["broad_query_refinement_required"],
         "high_cardinality_terms_verified": search["high_cardinality_terms_verified"],
         "content_search_verified": search["content_search_verified"],
@@ -4317,7 +4815,6 @@ def validate_saturation_evidence(
     }
     if any(verification.get(key) != value for key, value in required_top.items()):
         raise EvidenceError("saturation summary fields disagree with recomputed metrics")
-    relation_fixture = corpus.get("physical_relation_fixture") if isinstance(corpus, Mapping) else None
     expected_contract_predicates = {
         "broad_query_refinement_required": search.get("broad_query_refinement_required") is True,
         "content_search_verified": search.get("content_search_verified") is True,
@@ -4329,7 +4826,8 @@ def validate_saturation_evidence(
         is True,
         "continuation_union_complete": search.get("forced_union_matches")
         == search.get("forced_continuation_chains"),
-        "core_valid_relations_exact": projection.get("relation_count") == 198_999,
+        "core_valid_relations_exact": physical.get("physical_relation_evidence_count")
+        == 198_999,
         "exact_artifact_binding_unchanged": verification.get("artifact_binding_unchanged") is True,
         "exact_artifact_search_verified": search.get("exact_artifact_search_verified") is True,
         "high_cardinality_terms_verified": search.get("high_cardinality_terms_verified") is True,
@@ -4338,10 +4836,8 @@ def validate_saturation_evidence(
         "inventory_passes_exact": inventory.get("passes") == 1,
         "miss_behavior_verified": search.get("miss_behavior_verified") is True,
         "mixed_query_classes_complete": mixed_complete,
-        "physical_relation_artifact_coverage_complete": isinstance(relation_fixture, Mapping)
-        and relation_fixture.get("artifact_target_count") == 100_000
-        and relation_fixture.get("artifact_target_coverage") == 1.0,
-        "raw_file_proxy_ratio_exact": physical.get("raw_file_proxy_ratio") == 1.0,
+        "physical_bucket_cardinality_exact": raw["physical_bucket_cardinality"]
+        == {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
         "rebuild_digest_equal": projection.get("equal_semantic_digest") is True,
         "rebuild_product_passes_zero": projection.get("rebuild_product_passes") == 0,
         "runtime_depths_1_through_12": {int(key) for key in depth_counts} == set(range(1, 13)),
@@ -4350,6 +4846,23 @@ def validate_saturation_evidence(
         "selected_closure_union_complete": search.get("selected_closure_union_completeness") == 1.0,
         "semantic_commit_count_exact": semantic_ingestion.get("commit_count")
         == expected_semantic_commit_count,
+        "physical_relation_evidence_count_exact": physical.get(
+            "physical_relation_evidence_count"
+        )
+        == 198_999,
+        "physical_relation_evidence_exact": raw["physical_relation_evidence"][
+            "relation_count"
+        ]
+        == 198_999
+        and raw["physical_relation_evidence"]["target_cardinality"] == 100_000,
+        "semantic_control_records_bounded": physical.get("semantic_control_records", 257)
+        <= 256,
+        "semantic_control_envelopes_bounded": physical.get(
+            "semantic_control_envelopes", 257
+        )
+        <= 256,
+        "semantic_relation_count_bounded_exact": corpus.get("relation_count")
+        == 28,
         "silent_truncations_zero": search.get("silent_truncations") == 0,
         "synthetic_task_ratio_zero": physical.get("synthetic_task_ratio") == 0.0,
     }

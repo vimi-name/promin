@@ -127,7 +127,16 @@ def _claims() -> dict[str, bool]:
 
 def plan_clean_recovery(request: CleanRecoveryCliRequest, *, project_root: Path) -> dict[str, object]:
     preparation = prepare_clean_reinitialization(request.package_root, project_identity=request.project_identity)
-    return {"record_type": "CleanRecoveryPlan", "preparation": preparation.to_record(), "claims": _claims(), **_claims()}
+    return {
+        "record_type": "CleanRecoveryPlan",
+        "preparation": preparation.to_record(),
+        "recovery_status": "PLAN_ONLY_NO_MUTATION",
+        "diagnostic_only": True,
+        "no_pass_credit": True,
+        "owner_confirmation_required": True,
+        "claims": _claims(),
+        **_claims(),
+    }
 
 
 def apply_clean_recovery(request: CleanRecoveryCliRequest, *, project_root: Path) -> dict[str, object]:
@@ -136,7 +145,10 @@ def apply_clean_recovery(request: CleanRecoveryCliRequest, *, project_root: Path
     preparation = prepare_clean_reinitialization(request.package_root, project_identity=request.project_identity)
     if request.owner_confirmation.intent_digest != preparation.intent.intent_digest:
         raise PublicRecoveryError("owner_confirmation does not match preparation intent")
-    base = Path.cwd()  # replaced by request path parent through resolved input values below
+    # ``load_clean_recovery_request`` has already canonicalized every init
+    # path.  Keep a stable base for the defensive second check; absolute
+    # values remain independent of the caller's current directory.
+    base = Path.cwd()
     values = request.init_input
     def initializer(init_request: StandardInitializationRequest) -> StandardInitializationPublication:
         kwargs = {key: _path(values[key], base=base, label=f"init_input.{key}") for key in _INIT_KEYS - {"activation_proofs"}}
@@ -161,4 +173,10 @@ def apply_clean_recovery(request: CleanRecoveryCliRequest, *, project_root: Path
             )
         return StandardInitializationPublication(published, verify)
     result = clean_reinitialize_project(project_root, request.package_root, project_identity=request.project_identity, owner_confirmation=request.owner_confirmation, standard_initializer=initializer)
-    return {**result.to_record(), "claims": _claims()}
+    return {
+        **result.to_record(),
+        "recovery_status": "PUBLISHED_CANDIDATE",
+        "diagnostic_only": True,
+        "no_pass_credit": True,
+        "claims": _claims(),
+    }

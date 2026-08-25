@@ -26,6 +26,23 @@ DEFAULT_INITIAL_WORK_MAX_BYTES = 8 * 1024 * 1024
 MAX_INITIAL_WORK_FILES = 100_000
 MAX_INITIAL_WORK_BYTES = 64 * 1024 * 1024
 
+# Planning defaults are deliberately conservative.  They describe the plan
+# handed to a caller-owned worker; this module never starts an agent or uses
+# the values to infer work.  Expert callers may replace them explicitly.
+DEFAULT_INITIAL_WORK_AGENT_DEPTH = 0
+DEFAULT_INITIAL_WORK_CONCURRENCY = 1
+DEFAULT_INITIAL_WORK_CONTEXT_BYTES = 16 * 1024
+DEFAULT_INITIAL_WORK_TIME_SECONDS = 30
+DEFAULT_INITIAL_WORK_RESOURCE_UNITS = 1
+MAX_INITIAL_WORK_AGENT_DEPTH = 8
+MAX_INITIAL_WORK_CONCURRENCY = 16
+MAX_INITIAL_WORK_CONTEXT_BYTES = 4 * 1024 * 1024
+MAX_INITIAL_WORK_TIME_SECONDS = 24 * 60 * 60
+MAX_INITIAL_WORK_RESOURCE_UNITS = 1_000
+_PLANNING_BUDGET_FIELDS = frozenset(
+    {"agent_depth", "concurrency", "context_bytes", "time_seconds", "resource_units"}
+)
+
 _MAX_DEPTH = 64
 _MAX_SAMPLES = 64
 _IGNORED_DIRECTORIES = frozenset(
@@ -73,6 +90,57 @@ def _validate_limits(max_files: int, max_bytes: int) -> None:
         )
 
 
+def _planning_limits(
+    profile: str, supplied: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Resolve a small deterministic worker budget without model inference."""
+
+    if not isinstance(profile, str) or profile not in {"minimal", "expert"}:
+        raise InitialProjectWorkError("planning_profile must be 'minimal' or 'expert'")
+    values = {
+        "agent_depth": DEFAULT_INITIAL_WORK_AGENT_DEPTH,
+        "concurrency": DEFAULT_INITIAL_WORK_CONCURRENCY,
+        "context_bytes": DEFAULT_INITIAL_WORK_CONTEXT_BYTES,
+        "time_seconds": DEFAULT_INITIAL_WORK_TIME_SECONDS,
+        "resource_units": DEFAULT_INITIAL_WORK_RESOURCE_UNITS,
+    }
+    if supplied is not None:
+        try:
+            supplied_fields = set(supplied) if isinstance(supplied, Mapping) else None
+        except (TypeError, ValueError) as exc:
+            raise InitialProjectWorkError("planning_budgets must be a mapping") from exc
+        if supplied_fields != _PLANNING_BUDGET_FIELDS:
+            raise InitialProjectWorkError(
+                "planning_budgets must contain exactly agent_depth, concurrency, "
+                "context_bytes, time_seconds, resource_units"
+            )
+        values.update(dict(supplied))
+    ceilings = {
+        "agent_depth": MAX_INITIAL_WORK_AGENT_DEPTH,
+        "concurrency": MAX_INITIAL_WORK_CONCURRENCY,
+        "context_bytes": MAX_INITIAL_WORK_CONTEXT_BYTES,
+        "time_seconds": MAX_INITIAL_WORK_TIME_SECONDS,
+        "resource_units": MAX_INITIAL_WORK_RESOURCE_UNITS,
+    }
+    for field, value in values.items():
+        minimum = 0 if field == "agent_depth" else 1
+        if type(value) is not int or value < minimum or value > ceilings[field]:
+            raise InitialProjectWorkError(
+                f"planning budget {field} is outside its bounded range"
+            )
+    if values["concurrency"] < 1 or values["context_bytes"] < 1:
+        raise InitialProjectWorkError("planning concurrency and context_bytes must be positive")
+    if profile == "minimal" and supplied is not None and values != {
+        "agent_depth": DEFAULT_INITIAL_WORK_AGENT_DEPTH,
+        "concurrency": DEFAULT_INITIAL_WORK_CONCURRENCY,
+        "context_bytes": DEFAULT_INITIAL_WORK_CONTEXT_BYTES,
+        "time_seconds": DEFAULT_INITIAL_WORK_TIME_SECONDS,
+        "resource_units": DEFAULT_INITIAL_WORK_RESOURCE_UNITS,
+    }:
+        raise InitialProjectWorkError(
+            "custom planning_budgets require planning_profile='expert'"
+        )
+    return {"profile": profile, **values, "model_required": False}
 def _validated_plan(root: Path, value: Mapping[str, Any]) -> dict[str, Any]:
     if not root.is_dir():
         raise InitialProjectWorkError("project root must be an existing directory")
@@ -139,7 +207,8 @@ def _operation_ids(plan: Mapping[str, Any]) -> list[str]:
 
 
 def _workflow_plan(
-    plan: Mapping[str, Any], operations: list[str], max_files: int, max_bytes: int
+    plan: Mapping[str, Any], operations: list[str], max_files: int, max_bytes: int,
+    planning: Mapping[str, Any],
 ) -> dict[str, Any]:
     identity = {
         "schema": INITIAL_PROJECT_WORK_SCHEMA,
@@ -161,6 +230,18 @@ def _workflow_plan(
         "project_mutation_allowed": False,
         **_claims(),
     }
+    # Keep the original v1 identity byte-for-byte stable for ordinary users.
+    # Explicit expert planning is an additive, versioned identity extension.
+    if planning["profile"] != "minimal" or dict(planning) != {
+        "profile": "minimal",
+        "agent_depth": DEFAULT_INITIAL_WORK_AGENT_DEPTH,
+        "concurrency": DEFAULT_INITIAL_WORK_CONCURRENCY,
+        "context_bytes": DEFAULT_INITIAL_WORK_CONTEXT_BYTES,
+        "time_seconds": DEFAULT_INITIAL_WORK_TIME_SECONDS,
+        "resource_units": DEFAULT_INITIAL_WORK_RESOURCE_UNITS,
+        "model_required": False,
+    }:
+        identity["planning_limits_v1"] = dict(planning)
     workflow_digest = digest_value(identity)
     evidence_directory = f".promin-host/initial-work/{workflow_digest}"
     record = {
@@ -173,6 +254,14 @@ def _workflow_plan(
         "execution_performed": False,
     }
     return {**record, "work_plan_digest": digest_value(record)}
+
+
+def _planning_projection(
+    record: Mapping[str, Any], planning: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Expose effective limits to callers without changing persisted payloads."""
+
+    return {**record, "planning_limits": dict(planning)}
 
 
 def _sorted_entries(directory: Path, limit: int) -> tuple[list[os.DirEntry[str]], bool]:
@@ -434,18 +523,21 @@ def prepare_initial_project_work(
     execute: bool = False,
     max_files: int = DEFAULT_INITIAL_WORK_MAX_FILES,
     max_bytes: int = DEFAULT_INITIAL_WORK_MAX_BYTES,
+    planning_profile: str = "minimal",
+    planning_budgets: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan or explicitly execute the bounded, read-only initial work route."""
 
     if type(execute) is not bool:
         raise InitialProjectWorkError("execute must be boolean")
     _validate_limits(max_files, max_bytes)
+    planning = _planning_limits(planning_profile, planning_budgets)
     root = Path(project_root).absolute()
     plan = _validated_plan(root, resolved_plan)
     operations = _operation_ids(plan)
-    workflow = _workflow_plan(plan, operations, max_files, max_bytes)
+    workflow = _workflow_plan(plan, operations, max_files, max_bytes, planning)
     if not execute:
-        return workflow
+        return _planning_projection(workflow, planning)
 
     inventory = _inventory(root, plan, max_files, max_bytes)
     semantic = _semantic_summary(plan, inventory)
@@ -496,7 +588,7 @@ def prepare_initial_project_work(
         result = {**identity, "result_digest": digest_value(identity)}
         payloads["result.json"] = canonical_bytes(result)
     _publish(root, str(workflow["workflow_digest"]), payloads)
-    return result
+    return _planning_projection(result, planning)
 
 
 def preview_initial_project_work(
@@ -505,6 +597,8 @@ def preview_initial_project_work(
     *,
     max_files: int = DEFAULT_INITIAL_WORK_MAX_FILES,
     max_bytes: int = DEFAULT_INITIAL_WORK_MAX_BYTES,
+    planning_profile: str = "minimal",
+    planning_budgets: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce the deterministic first-work plan before initialization.
 
@@ -514,17 +608,18 @@ def preview_initial_project_work(
     """
 
     _validate_limits(max_files, max_bytes)
+    planning = _planning_limits(planning_profile, planning_budgets)
     root = Path(project_root).absolute()
     plan = _validated_preview_plan(root, resolved_plan)
     operations = _operation_ids(plan)
-    workflow = _workflow_plan(plan, operations, max_files, max_bytes)
+    workflow = _workflow_plan(plan, operations, max_files, max_bytes, planning)
     workflow["record_type"] = "InitialProjectWorkPreview"
     workflow["activation_status"] = "PENDING_INITIALIZATION"
     workflow["activation_digest"] = None
     workflow["work_plan_digest"] = digest_value(
         {key: item for key, item in workflow.items() if key != "work_plan_digest"}
     )
-    return workflow
+    return _planning_projection(workflow, planning)
 
 
 __all__ = [
@@ -534,6 +629,11 @@ __all__ = [
     "InitialProjectWorkError",
     "MAX_INITIAL_WORK_BYTES",
     "MAX_INITIAL_WORK_FILES",
+    "DEFAULT_INITIAL_WORK_AGENT_DEPTH",
+    "DEFAULT_INITIAL_WORK_CONCURRENCY",
+    "DEFAULT_INITIAL_WORK_CONTEXT_BYTES",
+    "DEFAULT_INITIAL_WORK_TIME_SECONDS",
+    "DEFAULT_INITIAL_WORK_RESOURCE_UNITS",
     "prepare_initial_project_work",
     "preview_initial_project_work",
 ]

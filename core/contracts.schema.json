@@ -3065,7 +3065,7 @@
             "offline-installed-no-degradation": "signed-role-platform-evidence",
             "offline-release-online-compatibility": "signed-role-platform-evidence",
             "one-command-one-atomic-batch": "local-runtime-reexecute",
-            "physical-100k-one-artifact-proxy-per-file": "signed-role-platform-evidence",
+            "physical-100k-exact-bucketed-inventory": "signed-role-platform-evidence",
             "policy-owned-task-and-lease-state-machines": "local-runtime-reexecute",
             "preset-outside-core-digest": "direct-semantic",
             "product-public-approval-separation": "human-decision",
@@ -3469,13 +3469,15 @@
               }
             },
             "physical_relation_corpus": {
-              "artifact_target_coverage": 1,
+              "bucket_count": 100,
               "expected_counts_source": "fixture-manifest",
-              "generation": "explicit-authorized-command-events",
+              "files_per_bucket": 1000,
+              "generation": "streamed-inventory-aggregate",
+              "physical_evidence_mode": "bucketed-stream",
               "relation_count": 198971,
               "relation_kind": "READS",
               "separate_from_raw_inventory": true,
-              "task_count": 1567,
+              "task_count": 100,
               "total_core_valid_relations": 198999
             },
             "query_count": 600,
@@ -3538,7 +3540,7 @@
             "zero-unowned-normative-facts",
             "zero-core-provider-lock-in",
             "zero-compiled-cache-files",
-            "physical-100k-one-artifact-proxy-per-file",
+            "physical-100k-exact-bucketed-inventory",
             "external-standard-release-decision-exact-binding",
             "root-bootstrap-command-limited",
             "deterministic-activation-identity",
@@ -3643,7 +3645,7 @@
               "zero-unowned-normative-facts",
               "zero-core-provider-lock-in",
               "zero-compiled-cache-files",
-              "physical-100k-one-artifact-proxy-per-file",
+              "physical-100k-exact-bucketed-inventory",
               "external-standard-release-decision-exact-binding",
               "root-bootstrap-command-limited",
               "deterministic-activation-identity",
@@ -3736,12 +3738,16 @@
               "creditable_consistency_modes": [
                 "immutable-vcs-tree"
               ],
-              "derived_artifact_proxies_per_raw_file": 1,
               "manifest_verified_jsonl": true,
               "memory_amplification_max": 32,
               "observational_mode_pass_credit": false,
+              "physical_bucket_count": 100,
+              "physical_files_per_bucket": 1000,
+              "physical_inventory_records_per_raw_file": 1,
               "project_tree_passes_max": 1,
               "search_text_bytes_max": 4096,
+              "semantic_artifacts_per_raw_file": 0,
+              "semantic_control_record_limit": 256,
               "synthetic_relations_per_raw_file": 0,
               "synthetic_tasks_per_raw_file": 0
             },
@@ -18403,9 +18409,6 @@
             "continuation_token_bytes_at_most_256": {},
             "continuation_token_overhead_at_most_10_percent": {},
             "continuation_union_complete": {},
-            "core_valid_relations_exact": {
-              "const": true
-            },
             "exact_artifact_binding_unchanged": {},
             "exact_artifact_search_verified": {},
             "high_cardinality_terms_verified": {},
@@ -18414,8 +18417,12 @@
             "inventory_passes_exact": {},
             "miss_behavior_verified": {},
             "mixed_query_classes_complete": {},
-            "physical_relation_artifact_coverage_complete": {},
-            "raw_file_proxy_ratio_exact": {},
+            "physical_bucket_cardinality_exact": {
+              "const": true
+            },
+            "physical_relation_evidence_count_exact": {
+              "const": true
+            },
             "rebuild_digest_equal": {},
             "rebuild_product_passes_zero": {},
             "runtime_depths_1_through_12": {},
@@ -18425,6 +18432,15 @@
             "runtime_query_budget_bounded": {},
             "selected_closure_union_complete": {},
             "semantic_commit_count_exact": {},
+            "semantic_control_envelopes_bounded": {
+              "const": true
+            },
+            "semantic_control_records_bounded": {
+              "const": true
+            },
+            "semantic_relation_count_bounded_exact": {
+              "const": true
+            },
             "silent_truncations_zero": {},
             "synthetic_task_ratio_zero": {}
           },
@@ -18435,7 +18451,6 @@
             "continuation_token_bytes_at_most_256",
             "continuation_token_overhead_at_most_10_percent",
             "continuation_union_complete",
-            "core_valid_relations_exact",
             "exact_artifact_binding_unchanged",
             "exact_artifact_search_verified",
             "high_cardinality_terms_verified",
@@ -18444,13 +18459,16 @@
             "inventory_passes_exact",
             "miss_behavior_verified",
             "mixed_query_classes_complete",
-            "physical_relation_artifact_coverage_complete",
-            "raw_file_proxy_ratio_exact",
+            "physical_bucket_cardinality_exact",
+            "physical_relation_evidence_count_exact",
             "rebuild_digest_equal",
             "rebuild_product_passes_zero",
             "runtime_depths_1_through_12",
             "runtime_queries_exact",
             "runtime_query_budget_bounded",
+            "semantic_control_envelopes_bounded",
+            "semantic_control_records_bounded",
+            "semantic_relation_count_bounded_exact",
             "selected_closure_union_complete",
             "semantic_commit_count_exact",
             "silent_truncations_zero",
@@ -18675,34 +18693,91 @@
                 "conflicting_exact_id_text": {},
                 "continuation_query_ids": {},
                 "depths": {},
-                "generation": {},
+                "generation": {
+                  "const": "explicit-authorized-command-events"
+                },
                 "harness_generated": {
                   "const": true
                 },
                 "high_fanout": {},
-                "physical_relation_fixture": {
+                "physical_bucket_control": {
                   "additionalProperties": false,
                   "properties": {
-                    "artifact_target_count": {},
-                    "artifact_target_coverage": {},
-                    "relation_count": {},
-                    "relation_kind": {},
-                    "relations_per_atomic_batch_max": {},
-                    "target_type": {},
-                    "task_count": {}
+                    "aggregate_digest": {
+                      "$ref": "#/$defs/Digest"
+                    },
+                    "bucket_count": {
+                      "const": 100
+                    },
+                    "candidate_digest": {
+                      "$ref": "#/$defs/Digest"
+                    },
+                    "cardinality": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "distinct": {
+                          "const": 1
+                        },
+                        "maximum": {
+                          "const": 1000
+                        },
+                        "minimum": {
+                          "const": 1000
+                        }
+                      },
+                      "required": [
+                        "minimum",
+                        "maximum",
+                        "distinct"
+                      ],
+                      "type": "object"
+                    },
+                    "file_count": {
+                      "const": 100000
+                    },
+                    "files_per_bucket": {
+                      "const": 1000
+                    },
+                    "generation": {
+                      "const": "streamed-inventory-aggregate"
+                    },
+                    "inventory_identity_digest": {
+                      "$ref": "#/$defs/Digest"
+                    },
+                    "record_type": {
+                      "const": "PhysicalBucketControlManifest"
+                    },
+                    "semantic_control_envelope_count": {
+                      "maximum": 256,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "semantic_control_record_count": {
+                      "maximum": 256,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "semantic_control_record_limit": {
+                      "const": 256
+                    }
                   },
                   "required": [
-                    "task_count",
-                    "relation_count",
-                    "relation_kind",
-                    "target_type",
-                    "artifact_target_count",
-                    "artifact_target_coverage",
-                    "relations_per_atomic_batch_max"
+                    "record_type",
+                    "generation",
+                    "candidate_digest",
+                    "inventory_identity_digest",
+                    "bucket_count",
+                    "files_per_bucket",
+                    "file_count",
+                    "aggregate_digest",
+                    "cardinality",
+                    "semantic_control_record_count",
+                    "semantic_control_envelope_count",
+                    "semantic_control_record_limit"
                   ],
                   "type": "object"
                 },
-                "physical_relation_fixture_reused": {
+                "physical_bucket_control_reused": {
                   "const": false
                 },
                 "product_acceptance_credit": {
@@ -18712,7 +18787,11 @@
                 "record_type": {
                   "const": "SaturationSemanticCorpus"
                 },
-                "relation_count": {},
+                "relation_count": {
+                  "maximum": 256,
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "reused": {
                   "const": false
                 },
@@ -18721,8 +18800,16 @@
                   "properties": {
                     "depths": {},
                     "high_fanout": {},
-                    "relation_count": {},
-                    "task_count": {}
+                    "relation_count": {
+                      "maximum": 256,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "task_count": {
+                      "maximum": 256,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
                   },
                   "required": [
                     "task_count",
@@ -18735,7 +18822,11 @@
                 "search_fixture_reused": {
                   "const": false
                 },
-                "task_count": {}
+                "task_count": {
+                  "maximum": 256,
+                  "minimum": 0,
+                  "type": "integer"
+                }
               },
               "required": [
                 "record_type",
@@ -18751,20 +18842,105 @@
                 "continuation_query_ids",
                 "reused",
                 "search_fixture",
-                "physical_relation_fixture",
+                "physical_bucket_control",
                 "search_fixture_reused",
-                "physical_relation_fixture_reused"
+                "physical_bucket_control_reused"
               ],
               "type": "object"
             },
-            "files": {},
+            "files": {
+              "const": 100000
+            },
             "generation_elapsed_ms": {},
             "inventory_relations": {},
+            "physical_artifact_evidence": {
+              "const": 100000,
+              "type": "integer"
+            },
+            "physical_relation_evidence": {
+              "additionalProperties": false,
+              "properties": {
+                "activation_digest": {
+                  "$ref": "#/$defs/Digest"
+                },
+                "bytes": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "candidate_digest": {
+                  "$ref": "#/$defs/Digest"
+                },
+                "evidence_class": {
+                  "const": "harness_generated_physical"
+                },
+                "inventory_identity_digest": {
+                  "$ref": "#/$defs/Digest"
+                },
+                "physical_target_cardinality": {
+                  "const": 100000
+                },
+                "product_acceptance_credit": {
+                  "const": false
+                },
+                "record_type": {
+                  "const": "PhysicalRelationEvidenceSummary"
+                },
+                "relation_count": {
+                  "const": 198999
+                },
+                "relation_id_first": {
+                  "const": "physical-relation:000000"
+                },
+                "relation_id_last": {
+                  "const": "physical-relation:198998"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/Digest"
+                }
+              },
+              "required": [
+                "record_type",
+                "evidence_class",
+                "product_acceptance_credit",
+                "relation_count",
+                "relation_id_first",
+                "relation_id_last",
+                "physical_target_cardinality",
+                "inventory_identity_digest",
+                "candidate_digest",
+                "activation_digest",
+                "bytes",
+                "sha256"
+              ],
+              "type": "object"
+            },
+            "physical_relation_evidence_count": {
+              "const": 198999
+            },
             "raw_file_proxies": {},
             "raw_file_proxy_ratio": {},
-            "raw_files": {},
-            "relations": {},
+            "raw_files": {
+              "const": 100000
+            },
+            "relations": {
+              "maximum": 256,
+              "minimum": 0,
+              "type": "integer"
+            },
             "reused_product": {},
+            "semantic_control_envelopes": {
+              "maximum": 256,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "semantic_control_record_limit": {
+              "const": 256
+            },
+            "semantic_control_records": {
+              "maximum": 256,
+              "minimum": 0,
+              "type": "integer"
+            },
             "semantic_proxies": {},
             "synthetic_task_count": {},
             "synthetic_task_ratio": {},
@@ -18772,18 +18948,26 @@
             "vcs_commit": {},
             "vcs_provider_version": {},
             "vcs_tree_digest": {},
-            "vcs_tree_files": {}
+            "vcs_tree_files": {
+              "const": 100000
+            }
           },
           "required": [
             "explicit_semantic_corpus",
             "files",
             "generation_elapsed_ms",
             "inventory_relations",
+            "physical_artifact_evidence",
+            "physical_relation_evidence",
+            "physical_relation_evidence_count",
             "raw_file_proxies",
             "raw_file_proxy_ratio",
             "raw_files",
             "relations",
             "reused_product",
+            "semantic_control_records",
+            "semantic_control_envelopes",
+            "semantic_control_record_limit",
             "semantic_proxies",
             "synthetic_task_count",
             "synthetic_task_ratio",
@@ -18797,6 +18981,63 @@
         },
         "physical_files": {
           "const": 100000
+        },
+        "physical_relation_evidence": {
+          "additionalProperties": false,
+          "properties": {
+            "activation_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "candidate_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "evidence_class": {
+              "const": "harness_generated_physical"
+            },
+            "inventory_identity_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "physical_target_cardinality": {
+              "const": 100000
+            },
+            "product_acceptance_credit": {
+              "const": false
+            },
+            "record_type": {
+              "const": "PhysicalRelationEvidenceSummary"
+            },
+            "relation_count": {
+              "const": 198999
+            },
+            "relation_id_first": {
+              "const": "physical-relation:000000"
+            },
+            "relation_id_last": {
+              "const": "physical-relation:198998"
+            },
+            "sha256": {
+              "$ref": "#/$defs/Digest"
+            }
+          },
+          "required": [
+            "record_type",
+            "evidence_class",
+            "product_acceptance_credit",
+            "relation_count",
+            "relation_id_first",
+            "relation_id_last",
+            "physical_target_cardinality",
+            "inventory_identity_digest",
+            "candidate_digest",
+            "activation_digest",
+            "bytes",
+            "sha256"
+          ],
+          "type": "object"
         },
         "producer": {
           "$ref": "#/$defs/ReleaseEvidenceProducer"
@@ -18813,26 +19054,30 @@
             "database_bytes": {},
             "elapsed_ms": {},
             "entity_count": {
-              "const": 101604
+              "maximum": 256,
+              "minimum": 0,
+              "type": "integer"
             },
             "entity_type_counts": {
               "additionalProperties": false,
               "properties": {
-                "Artifact": {
-                  "const": 100000
-                },
                 "Candidate": {
-                  "const": 1
+                  "maximum": 256,
+                  "minimum": 0,
+                  "type": "integer"
                 },
                 "Grant": {
-                  "const": 4
+                  "maximum": 256,
+                  "minimum": 0,
+                  "type": "integer"
                 },
                 "Task": {
-                  "const": 1599
+                  "maximum": 256,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
-                "Artifact",
                 "Candidate",
                 "Grant",
                 "Task"
@@ -18851,7 +19096,9 @@
             "rebuild_inventory_passes": {},
             "rebuild_product_passes": {},
             "relation_count": {
-              "const": 198999
+              "maximum": 256,
+              "minimum": 0,
+              "type": "integer"
             },
             "semantic_digest": {},
             "semantic_inflation": {}
@@ -18924,9 +19171,109 @@
           "additionalProperties": false,
           "properties": {
             "artifact_count": {
-              "const": 6
+              "const": 7
             },
             "artifacts": {
+              "allOf": [
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "inventory-stream"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "physical-relation-evidence"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "query-results"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "process-samples"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "continuation-state-manifest"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "phase-log"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                },
+                {
+                  "contains": {
+                    "properties": {
+                      "role": {
+                        "const": "operation-metrics"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ]
+                  },
+                  "maxContains": 1,
+                  "minContains": 1
+                }
+              ],
               "items": {
                 "additionalProperties": false,
                 "oneOf": [
@@ -18946,6 +19293,32 @@
                       },
                       "role": {
                         "const": "inventory-stream"
+                      }
+                    },
+                    "required": [
+                      "role",
+                      "path",
+                      "media_type",
+                      "bytes",
+                      "records"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "bytes": {
+                        "minimum": 1
+                      },
+                      "media_type": {
+                        "const": "application/x-ndjson"
+                      },
+                      "path": {
+                        "const": "raw/physical-relation-evidence.jsonl"
+                      },
+                      "records": {
+                        "const": 198999
+                      },
+                      "role": {
+                        "const": "physical-relation-evidence"
                       }
                     },
                     "required": [
@@ -19126,13 +19499,14 @@
                     "type": "string"
                   },
                   "records": {
-                    "maximum": 100000,
+                    "maximum": 198999,
                     "minimum": 0,
                     "type": "integer"
                   },
                   "role": {
                     "enum": [
                       "inventory-stream",
+                      "physical-relation-evidence",
                       "query-results",
                       "process-samples",
                       "continuation-state-manifest",
@@ -19154,8 +19528,8 @@
                 ],
                 "type": "object"
               },
-              "maxItems": 6,
-              "minItems": 6,
+              "maxItems": 7,
+              "minItems": 7,
               "type": "array"
             },
             "evidence_class": {
@@ -19272,6 +19646,38 @@
             "forced_union_matches": {},
             "high_cardinality_terms_verified": {},
             "hostile_proxy_content_verified": {},
+            "immutable_query_phase": {
+              "additionalProperties": false,
+              "properties": {
+                "close_elapsed_ms": {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "operation_budget": {
+                  "const": 12240612,
+                  "type": "integer"
+                },
+                "operations": {
+                  "maximum": 12240612,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "product_acceptance_credit": {
+                  "const": false
+                },
+                "within_budget": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "operation_budget",
+                "operations",
+                "within_budget",
+                "close_elapsed_ms",
+                "product_acceptance_credit"
+              ],
+              "type": "object"
+            },
             "maximum_continuation_token_bytes": {},
             "miss_behavior_verified": {},
             "mixed_query_classes_complete": {},
@@ -19328,7 +19734,8 @@
             "runtime_query_budget",
             "selected_closure_chains",
             "selected_closure_union_completeness",
-            "silent_truncations"
+            "silent_truncations",
+            "immutable_query_phase"
           ],
           "type": "object"
         },
@@ -19414,6 +19821,7 @@
         "workspace_initialization",
         "runtime_binding",
         "physical_files",
+        "physical_relation_evidence",
         "core_valid_relations",
         "runtime_queries",
         "silent_truncations",

@@ -5478,6 +5478,11 @@ def _compile_projection(
 
     saturation_raw_layout = {
         "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson", False),
+        "physical-relation-evidence": (
+            "raw/physical-relation-evidence.jsonl",
+            "application/x-ndjson",
+            False,
+        ),
         "query-results": ("raw/query-results.jsonl", "application/x-ndjson", False),
         "process-samples": ("raw/process-samples.json", "application/json", False),
         "continuation-state-manifest": (
@@ -5496,7 +5501,7 @@ def _compile_projection(
             "media_type": {"enum": ["application/json", "application/x-ndjson"]},
             "sha256": {"$ref": "#/$defs/Digest"},
             "bytes": {"minimum": 0, "maximum": 268435456, "type": "integer"},
-            "records": {"minimum": 0, "maximum": 100000, "type": "integer"},
+            "records": {"minimum": 0, "maximum": 198999, "type": "integer"},
         },
     )
     saturation_raw_artifact["oneOf"] = []
@@ -5527,7 +5532,30 @@ def _compile_projection(
         else:
             role_shape["properties"].update(positive_cardinality["properties"])
             role_shape["required"].extend(positive_cardinality["required"])
+        if role == "physical-relation-evidence":
+            role_shape["properties"]["records"] = {"const": 198999}
         saturation_raw_artifact["oneOf"].append(role_shape)
+    saturation_raw_artifacts = {
+        "items": saturation_raw_artifact,
+        "maxItems": 7,
+        "minItems": 7,
+        "type": "array",
+    }
+    # Seven items alone does not establish the seven-role closure: a valid
+    # item branch can be repeated while another role is omitted.  Draft
+    # 2020-12 contains bounds make every role appear exactly once at the
+    # schema boundary, independently of production-validator checks.
+    saturation_raw_artifacts["allOf"] = [
+        {
+            "contains": {
+                "properties": {"role": {"const": role}},
+                "required": ["role"],
+            },
+            "maxContains": 1,
+            "minContains": 1,
+        }
+        for role in saturation_raw_layout
+    ]
     saturation_raw_manifest = exact_keys(
         (
             "record_type",
@@ -5545,13 +5573,8 @@ def _compile_projection(
             "path_scope": {"const": "saturation-result-directory"},
             "evidence_class": {"const": "harness_generated"},
             "product_acceptance_credit": {"const": False},
-            "artifacts": {
-                "items": saturation_raw_artifact,
-                "maxItems": 6,
-                "minItems": 6,
-                "type": "array",
-            },
-            "artifact_count": {"const": 6},
+            "artifacts": saturation_raw_artifacts,
+            "artifact_count": {"const": 7},
             "inventory_stream_digest": {"$ref": "#/$defs/Digest"},
             "inventory_identity_digest": {"$ref": "#/$defs/Digest"},
             "manifest_digest": {"$ref": "#/$defs/Digest"},
@@ -5635,15 +5658,53 @@ def _compile_projection(
             for name in threshold_names
         },
     )
+    # The semantic lane is deliberately bounded.  The physical workload is
+    # proven by content-bound streams and bucket commitments; it must not be
+    # projected into one semantic Artifact or Relation per physical row.
+    semantic_control_count_max = 256
+    physical_bucket_count = 100
+    physical_files_per_bucket = 1_000
+    bounded_semantic_count = {
+        "minimum": 0,
+        "maximum": semantic_control_count_max,
+        "type": "integer",
+    }
     saturation_search_fixture = exact_keys(
-        ("task_count", "relation_count", "depths", "high_fanout")
+        ("task_count", "relation_count", "depths", "high_fanout"),
+        {
+            "task_count": bounded_semantic_count,
+            "relation_count": bounded_semantic_count,
+        },
     )
-    saturation_physical_relation_fixture = exact_keys(
+    saturation_physical_bucket_control = exact_keys(
         (
-            "task_count", "relation_count", "relation_kind", "target_type",
-            "artifact_target_count", "artifact_target_coverage",
-            "relations_per_atomic_batch_max",
-        )
+            "record_type", "generation", "candidate_digest",
+            "inventory_identity_digest", "bucket_count", "files_per_bucket",
+            "file_count", "aggregate_digest", "cardinality",
+            "semantic_control_record_count", "semantic_control_envelope_count",
+            "semantic_control_record_limit",
+        ),
+        {
+            "record_type": {"const": "PhysicalBucketControlManifest"},
+            "generation": {"const": "streamed-inventory-aggregate"},
+            "candidate_digest": {"$ref": "#/$defs/Digest"},
+            "inventory_identity_digest": {"$ref": "#/$defs/Digest"},
+            "bucket_count": {"const": physical_bucket_count},
+            "files_per_bucket": {"const": physical_files_per_bucket},
+            "file_count": {"const": 100_000},
+            "aggregate_digest": {"$ref": "#/$defs/Digest"},
+            "cardinality": exact_keys(
+                ("minimum", "maximum", "distinct"),
+                {
+                    "minimum": {"const": physical_files_per_bucket},
+                    "maximum": {"const": physical_files_per_bucket},
+                    "distinct": {"const": 1},
+                },
+            ),
+            "semantic_control_record_count": bounded_semantic_count,
+            "semantic_control_envelope_count": bounded_semantic_count,
+            "semantic_control_record_limit": {"const": semantic_control_count_max},
+        },
     )
     saturation_semantic_corpus = exact_keys(
         (
@@ -5651,28 +5712,86 @@ def _compile_projection(
             "product_acceptance_credit", "task_count", "relation_count",
             "depths", "high_fanout", "conflicting_exact_id_text", "query_ids",
             "continuation_query_ids", "reused", "search_fixture",
-            "physical_relation_fixture", "search_fixture_reused",
-            "physical_relation_fixture_reused",
+            "physical_bucket_control", "search_fixture_reused",
+            "physical_bucket_control_reused",
         ),
         {
             "record_type": {"const": "SaturationSemanticCorpus"},
+            "generation": {"const": "explicit-authorized-command-events"},
             "harness_generated": {"const": True},
             "product_acceptance_credit": {"const": False},
+            "task_count": bounded_semantic_count,
+            "relation_count": bounded_semantic_count,
             "reused": {"const": saturation_control["semantic_state_reused"]},
             "search_fixture": saturation_search_fixture,
-            "physical_relation_fixture": saturation_physical_relation_fixture,
+            "physical_bucket_control": saturation_physical_bucket_control,
             "search_fixture_reused": {
                 "const": saturation_control["semantic_state_reused"]
             },
-            "physical_relation_fixture_reused": {
+            "physical_bucket_control_reused": {
                 "const": saturation_control["semantic_state_reused"]
             },
+        },
+    )
+    saturation_physical_relation_evidence = exact_keys(
+        (
+            "record_type",
+            "evidence_class",
+            "product_acceptance_credit",
+            "relation_count",
+            "relation_id_first",
+            "relation_id_last",
+            "physical_target_cardinality",
+            "inventory_identity_digest",
+            "candidate_digest",
+            "activation_digest",
+            "bytes",
+            "sha256",
+        ),
+        {
+            "record_type": {"const": "PhysicalRelationEvidenceSummary"},
+            "evidence_class": {"const": "harness_generated_physical"},
+            "product_acceptance_credit": {"const": False},
+            "relation_count": {"const": 198_999},
+            "relation_id_first": {"const": "physical-relation:000000"},
+            "relation_id_last": {"const": "physical-relation:198998"},
+            "physical_target_cardinality": {"const": 100_000},
+            "inventory_identity_digest": {"$ref": "#/$defs/Digest"},
+            "candidate_digest": {"$ref": "#/$defs/Digest"},
+            "activation_digest": {"$ref": "#/$defs/Digest"},
+            "bytes": {"minimum": 1, "type": "integer"},
+            "sha256": {"$ref": "#/$defs/Digest"},
+        },
+    )
+    # The saturation producer admits exactly one immutable query phase for
+    # the fixed 600-query contract.  Keep the phase receipt closed and bind
+    # its operation ceiling to the producer-derived budget so an operations
+    # count can never exceed the declared budget at the schema boundary.
+    immutable_query_phase = exact_keys(
+        (
+            "operation_budget",
+            "operations",
+            "within_budget",
+            "close_elapsed_ms",
+            "product_acceptance_credit",
+        ),
+        {
+            "operation_budget": {"const": 12_240_612, "type": "integer"},
+            "operations": {
+                "maximum": 12_240_612,
+                "minimum": 0,
+                "type": "integer",
+            },
+            "within_budget": {"type": "boolean"},
+            "close_elapsed_ms": {"minimum": 0, "type": "number"},
+            "product_acceptance_credit": {"const": False},
         },
     )
     saturation_names = (
         "record_type", "status", "candidate_binding_digest", "artifact_binding",
         "artifact_binding_unchanged", "workspace_initialization", "runtime_binding",
-        "physical_files", "core_valid_relations", "runtime_queries", "silent_truncations",
+        "physical_files", "physical_relation_evidence", "core_valid_relations",
+        "runtime_queries", "silent_truncations",
         "selected_closure_union_completeness", "memory_amplification_at_most_32",
         "core_valid_relations_exact_198999", "broad_query_refinement_required",
         "high_cardinality_terms_verified", "content_search_verified", "miss_behavior_verified",
@@ -5728,6 +5847,7 @@ def _compile_projection(
             },
         ),
         "physical_files": {"const": 100000},
+        "physical_relation_evidence": saturation_physical_relation_evidence,
         "core_valid_relations": {"const": 198999},
         "runtime_queries": {"const": 600},
         "silent_truncations": {"const": 0},
@@ -5748,12 +5868,27 @@ def _compile_projection(
         "physical": exact_keys(
             (
                 "explicit_semantic_corpus", "files", "generation_elapsed_ms", "inventory_relations",
+                "physical_artifact_evidence", "physical_relation_evidence",
+                "physical_relation_evidence_count",
                 "raw_file_proxies", "raw_file_proxy_ratio", "raw_files", "relations",
-                "reused_product", "semantic_proxies", "synthetic_task_count", "synthetic_task_ratio",
-                "synthetic_tasks", "vcs_commit", "vcs_provider_version", "vcs_tree_digest",
-                "vcs_tree_files",
+                "reused_product", "semantic_control_records", "semantic_control_envelopes",
+                "semantic_control_record_limit", "semantic_proxies", "synthetic_task_count",
+                "synthetic_task_ratio", "synthetic_tasks", "vcs_commit", "vcs_provider_version",
+                "vcs_tree_digest", "vcs_tree_files",
             ),
-            {"explicit_semantic_corpus": saturation_semantic_corpus},
+            {
+                "explicit_semantic_corpus": saturation_semantic_corpus,
+                "files": {"const": 100_000},
+                "physical_artifact_evidence": {"const": 100_000, "type": "integer"},
+                "physical_relation_evidence": saturation_physical_relation_evidence,
+                "physical_relation_evidence_count": {"const": 198_999},
+                "raw_files": {"const": 100_000},
+                "relations": bounded_semantic_count,
+                "semantic_control_records": bounded_semantic_count,
+                "semantic_control_envelopes": bounded_semantic_count,
+                "semantic_control_record_limit": {"const": semantic_control_count_max},
+                "vcs_tree_files": {"const": 100_000},
+            },
         ),
         "inventory": exact_keys(
             ("candidate_digest", "elapsed_ms", "entries", "passes", "snapshot", "stream_bytes")
@@ -5768,18 +5903,17 @@ def _compile_projection(
                 "semantic_digest", "semantic_inflation",
             ),
             {
-                "entity_count": {"const": 101604},
+                "entity_count": bounded_semantic_count,
                 "entity_type_counts": exact_keys(
-                    ("Artifact", "Candidate", "Grant", "Task"),
+                    ("Candidate", "Grant", "Task"),
                     {
-                        "Artifact": {"const": 100000},
-                        "Candidate": {"const": 1},
-                        "Grant": {"const": 4},
-                        "Task": {"const": 1599},
+                        "Candidate": bounded_semantic_count,
+                        "Grant": bounded_semantic_count,
+                        "Task": bounded_semantic_count,
                     },
                 ),
                 "implementation_closure_digest": {"$ref": "#/$defs/Digest"},
-                "relation_count": {"const": 198999},
+                "relation_count": bounded_semantic_count,
             },
         ),
         "query_authorization": exact_keys(
@@ -5808,7 +5942,8 @@ def _compile_projection(
                 "promin_service_search_calls", "query_class_depths", "query_class_latency_ms",
                 "query_mix", "result_digest", "runtime_ingress", "runtime_query_budget",
                 "selected_closure_chains", "selected_closure_union_completeness", "silent_truncations",
-            )
+            ),
+            {"immutable_query_phase": immutable_query_phase},
         ),
         "resources": exact_keys(
             (
@@ -5842,20 +5977,26 @@ def _compile_projection(
                 "broad_query_refinement_required", "content_search_verified",
                 "continuation_state_bytes_at_most_16384", "continuation_token_bytes_at_most_256",
                 "continuation_token_overhead_at_most_10_percent", "continuation_union_complete",
-                "core_valid_relations_exact", "exact_artifact_binding_unchanged",
+                "exact_artifact_binding_unchanged",
                 "exact_artifact_search_verified", "high_cardinality_terms_verified",
                 "hostile_proxy_content_verified",
                 "inventory_incremental_memory_amplification_at_most_32",
                 "inventory_passes_exact", "miss_behavior_verified", "mixed_query_classes_complete",
-                "physical_relation_artifact_coverage_complete", "raw_file_proxy_ratio_exact",
+                "physical_bucket_cardinality_exact", "physical_relation_evidence_count_exact",
                 "rebuild_digest_equal", "rebuild_product_passes_zero", "runtime_depths_1_through_12",
                  "runtime_queries_exact", "runtime_query_budget_bounded",
+                "semantic_control_envelopes_bounded", "semantic_control_records_bounded",
+                "semantic_relation_count_bounded_exact",
                  "selected_closure_union_complete", "semantic_commit_count_exact",
                  "silent_truncations_zero", "synthetic_task_ratio_zero",
             ),
             {
-                "core_valid_relations_exact": {"const": True},
+                "physical_bucket_cardinality_exact": {"const": True},
+                "physical_relation_evidence_count_exact": {"const": True},
                 "runtime_queries_exact": {"const": True},
+                "semantic_control_envelopes_bounded": {"const": True},
+                "semantic_control_records_bounded": {"const": True},
+                "semantic_relation_count_bounded_exact": {"const": True},
             },
         ),
         "current_release_regression": exact_keys(
@@ -6784,7 +6925,7 @@ def _compile_projection(
         "continuation-secret-subject-grant-binding",
         "implementation-closure-bound-and-current",
         "verified-inventory-result-provenance",
-        "physical-100k-one-artifact-proxy-per-file",
+        "physical-100k-exact-bucketed-inventory",
         "profile-bound-physical-100k-performance",
         "external-standard-release-decision-exact-binding",
         "standard-distribution-separate-from-product-acceptance",
@@ -6798,7 +6939,6 @@ def _compile_projection(
     if (
         benchmarks["file_count"] != 100000
         or benchmarks["core_valid_relation_count"] != 198999
-        or benchmarks["raw_file_proxy_ratio"] != 1
         or benchmarks["synthetic_task_ratio"] != 0
         or benchmarks["inventory_passes"] != 1
         or benchmarks["rebuild_product_passes"] != 0
@@ -6810,13 +6950,26 @@ def _compile_projection(
     if (
         not isinstance(physical_relations, dict)
         or physical_relations.get("relation_count") != 198971
-        or physical_relations.get("task_count") != 1567
+        or physical_relations.get("bucket_count") != 100
+        or physical_relations.get("files_per_bucket") != 1000
+        or physical_relations.get("generation") != "streamed-inventory-aggregate"
+        or physical_relations.get("physical_evidence_mode") != "bucketed-stream"
+        or physical_relations.get("task_count") != 100
         or physical_relations.get("total_core_valid_relations") != 198999
-        or physical_relations.get("artifact_target_coverage") != 1
         or physical_relations.get("relation_kind") != "READS"
         or physical_relations.get("separate_from_raw_inventory") is not True
     ):
         raise CompileError("physical Relation corpus contract is incomplete")
+    inventory_contract = conformance.get("scale_contracts", {}).get("inventory")
+    if (
+        not isinstance(inventory_contract, dict)
+        or inventory_contract.get("physical_bucket_count") != 100
+        or inventory_contract.get("physical_files_per_bucket") != 1000
+        or inventory_contract.get("physical_inventory_records_per_raw_file") != 1
+        or inventory_contract.get("semantic_artifacts_per_raw_file") != 0
+        or inventory_contract.get("semantic_control_record_limit") != 256
+    ):
+        raise CompileError("bounded physical inventory scale contract is incomplete")
     portable_profile = benchmarks.get("performance_profiles", {}).get(
         "portable-local-v1"
     )

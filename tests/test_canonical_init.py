@@ -199,6 +199,64 @@ def test_direct_expert_plan_ingress_cannot_bypass_global_source_budget(
     assert not destination.exists()
 
 
+def test_provider_dependency_receipt_is_repeatable_and_complete(tmp_path: Path) -> None:
+    provider_source = _provider_executable()
+    provider = tmp_path / provider_source.name
+    shutil.copy2(provider_source, provider)
+    if os.name != "nt":
+        os.chmod(provider, provider.stat().st_mode | stat.S_IXUSR)
+    binding = {
+        "capability_id": "configured-provider",
+        "provider_id": "configured-provider-v1",
+        "version": "1.0.0",
+        "invocation": {"kind": "executable", "value": str(provider)},
+        "purpose": "Configured provider receipt test",
+        "required": False,
+        "identity": {
+            "kind": "file-digest",
+            "digest": digest_file(provider),
+            "source": str(provider),
+        },
+        "healthcheck": {
+            "argv": [str(provider), "--version"],
+            "timeout_ms": 1000,
+            "expected_exit": 0,
+        },
+        "license": {
+            "expression": "MIT",
+            "source_uris": ["https://spdx.org/licenses/MIT.html"],
+            "review_state": "source-verified",
+        },
+    }
+
+    first = init_runtime.build_provider_dependency_receipt(binding, tmp_path)
+    second = init_runtime.build_provider_dependency_receipt(binding, tmp_path)
+
+    assert first == second
+    assert first["complete"] is True
+    assert first["provider_owned_scope"] == (
+        "configured-provider-root-and-runtime-components"
+    )
+    assert first["os_substrate_excluded"] is True
+    assert [item["component_id"] for item in first["components"]] == [
+        "provider-executable"
+    ]
+    component = first["components"][0]
+    assert component["component_kind"] == "provider-file"
+    assert component["source"] == str(provider)
+    assert component["version"] == "1.0.0"
+    # Recompute identity from the materialized provider bytes, independently
+    # of the receipt's declared digest and size fields.
+    assert component["digest"] == digest_file(provider)
+    assert component["size_bytes"] == provider.stat(follow_symlinks=False).st_size
+    assert all(item["component_kind"] != "os-substrate" for item in first["components"])
+    unsigned = {
+        key: value for key, value in first.items() if key != "aggregate_digest"
+    }
+    assert first["aggregate_digest"] == digest_value(unsigned)
+    assert len(first["aggregate_digest"]) == 64
+
+
 def _plans(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     project = tmp_path / "product"
     project.mkdir()

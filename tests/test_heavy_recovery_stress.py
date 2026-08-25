@@ -659,3 +659,50 @@ def test_restart_report_is_byte_deterministic_across_independent_real_roots(
         records.append(report.to_record())
 
     assert records[0] == records[1]
+
+
+def test_recovery_outputs_revalidate_rebuilt_root_and_report_no_credit(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _old_control(project)
+    admission, intent, _source = _admission(tmp_path)
+    def repair(transaction, _ordinal: int) -> PublishedCleanReinitialization:
+        assert transaction.phase is CleanReinitializationPhase.QUARANTINED
+        _fresh_control(project)
+        return _published_result(intent)
+
+    def revalidate(result: PublishedCleanReinitialization) -> bool:
+        activation = project / ".promin" / "init" / "activation.json"
+        return (
+            result.activation_digest == _digest("fresh-activation")
+            and activation.read_bytes() == b"fresh activation only\n"
+            and not (project / ".promin" / "state").exists()
+            and not (project / ".promin" / "receipts").exists()
+        )
+
+    report = run_bounded_clean_reinitialization(
+        project,
+        admission,
+        _permitted_liveness(),
+        max_attempts=1,
+        existing=None,
+        verifier=revalidate,
+        attempt=repair,
+    )
+    record = report.to_record()
+
+    assert report.terminal_outcome is CleanReinitializationRestartOutcome.PUBLISHED
+    assert report.attempts[0].transaction_phase is CleanReinitializationPhase.PUBLISHED
+    assert (project / ".promin" / "init" / "activation.json").read_bytes() == (
+        b"fresh activation only\n"
+    )
+    assert not (project / ".promin" / "state").exists()
+    assert not (project / ".promin" / "receipts").exists()
+    assert (
+        project / ".promin-host" / "recovery" / intent.intent_digest / "state" / "old-progress.json"
+    ).read_bytes() == b"old progress must never replay\n"
+    assert record["published"] is True
+    assert record["acceptance_pass"] is False
+    assert record["pass_credit"] is False

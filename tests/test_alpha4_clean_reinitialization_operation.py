@@ -224,3 +224,67 @@ def test_successful_initializer_receives_exact_docs_and_copies_no_old_progress(
     assert record["acceptance_pass"] is False
     assert record["pass_credit"] is False
     assert record["product_credit"] is False
+
+
+def test_prepare_then_owner_confirmed_operation_reports_the_full_black_box_lifecycle(
+    tmp_path: Path,
+) -> None:
+    project, old_progress = _old_project(tmp_path)
+    package = _make_package(tmp_path, docs_payload=b"lifecycle docs\n")
+    preparation = prepare_clean_reinitialization(
+        package,
+        project_identity=_digest("project"),
+    )
+    assert project.joinpath(".promin", "state", "progress.json").read_bytes() == old_progress
+    assert not (project / ".promin-host").exists()
+
+    confirmation = OwnerConfirmation(
+        owner_id="owner:local",
+        confirmation_id="confirmation:lifecycle",
+        intent_digest=preparation.intent.intent_digest,
+        confirmed_at_ns=1,
+    )
+
+    def initializer(request):
+        active_docs = request.project_root / ".promin" / "docs"
+        active_docs.mkdir(parents=True)
+        (active_docs / "CLEAN.md").write_bytes(
+            (request.docs_shell / "docs" / "CLEAN.md").read_bytes()
+        )
+        return StandardInitializationPublication(
+            result=PublishedCleanReinitialization(
+                intent_digest=request.intent.intent_digest,
+                package_digest=request.intent.package_digest,
+                extension_admission_digest=request.intent.extension_admission_digest,
+                activation_digest=_digest("lifecycle-activation"),
+            ),
+            verifier=lambda result: (
+                result.activation_digest == _digest("lifecycle-activation")
+                and (project / ".promin" / "docs" / "CLEAN.md").read_bytes()
+                == b"lifecycle docs\n"
+                and not (project / ".promin" / "state").exists()
+                and (project / ".promin-host" / "recovery" / result.intent_digest
+                     / "state" / "progress.json").read_bytes() == old_progress
+            ),
+        )
+
+    result = clean_reinitialize_project(
+        project,
+        package,
+        project_identity=_digest("project"),
+        owner_confirmation=confirmation,
+        standard_initializer=initializer,
+    )
+    record = result.to_record()
+
+    assert result.state is CleanReinitializationState.PUBLISHED
+    assert (project / ".promin" / "docs" / "CLEAN.md").read_bytes() == b"lifecycle docs\n"
+    assert not (project / ".promin" / "state").exists()
+    assert (
+        result.quarantine_root is not None
+        and (result.quarantine_root / "state" / "progress.json").read_bytes() == old_progress
+    )
+    assert record["quarantine_performed"] is True
+    assert record["published_result_present"] is True
+    assert record["acceptance_pass"] is False
+    assert record["pass_credit"] is False

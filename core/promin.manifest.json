@@ -2,7 +2,7 @@
   "acceptance_predicate_count": 102,
   "action_capability_count": 16,
   "aliases": [],
-  "bundle_digest": "3be8f82ca2eeadc4b51738b3647c272c6dd30460efe9ef6bf96d7f4ece859ba1",
+  "bundle_digest": "263366f633e37dedccbeb8203d5fd3ec00c2a0fcfc071a60c0598a1f17b905a3",
   "canonical_name": "promin",
   "canonical_name_only": true,
   "core_artifact_count": 6,
@@ -21,11 +21,11 @@
     },
     {
       "path": "contracts.schema.json",
-      "sha256": "2aa404ec0cc08b0537f7e4755400468627ea2d6cbef71fcd8486c740788d0b02"
+      "sha256": "1d81eb87701822be8f3ae9b9809f370505ab3a2009a32d136b88e340642b7180"
     },
     {
       "path": "conformance.json",
-      "sha256": "3925dbac85b3cb99c7192a915bdacffb8d6b10c19e98b3c8d0711669cf3a065a"
+      "sha256": "cf3723049cd70a97d78dc703ac3eacb567ef9aadabd2b1b02fc999408cf68a54"
     }
   ],
   "function": "Own Core bundle identity and exact digest binding for the five other Core artifacts.",

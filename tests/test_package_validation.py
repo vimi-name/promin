@@ -777,7 +777,7 @@ class PackageValidationTests(unittest.TestCase):
         mutated_requirement["requirements"]["semantic_state_reused"] = True
         self.assertTrue(list(validator.iter_errors(mutated_requirement)))
 
-    def test_compiled_saturation_evidence_rejects_semantic_corpus_reuse(
+    def test_compiled_saturation_evidence_accepts_bounded_physical_bucket_control(
         self,
     ) -> None:
         schema = json.loads(
@@ -787,39 +787,137 @@ class PackageValidationTests(unittest.TestCase):
         corpus_schema = evidence_schema["properties"]["physical"]["properties"][
             "explicit_semantic_corpus"
         ]
-        validator = Draft202012Validator(corpus_schema)
+        validator = Draft202012Validator(
+            {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                "$ref": "#/$defs/SaturationEvidence/properties/physical/properties/explicit_semantic_corpus",
+            }
+        )
         corpus = {field: None for field in corpus_schema["required"]}
         corpus.update(
             {
                 "record_type": "SaturationSemanticCorpus",
+                "generation": "explicit-authorized-command-events",
                 "harness_generated": True,
                 "product_acceptance_credit": False,
+                "task_count": 132,
+                "relation_count": 28,
+                "depths": list(range(1, 13)),
+                "high_fanout": 16,
+                "conflicting_exact_id_text": True,
+                "query_ids": ["query-01", "query-02"],
+                "continuation_query_ids": ["query-02"],
                 "reused": False,
-                "search_fixture_reused": False,
-                "physical_relation_fixture_reused": False,
                 "search_fixture": {
-                    field: None
-                    for field in corpus_schema["properties"]["search_fixture"][
-                        "required"
-                    ]
+                    "task_count": 32,
+                    "relation_count": 28,
+                    "depths": list(range(1, 13)),
+                    "high_fanout": 16,
                 },
-                "physical_relation_fixture": {
-                    field: None
-                    for field in corpus_schema["properties"][
-                        "physical_relation_fixture"
-                    ]["required"]
+                "physical_bucket_control": {
+                    "record_type": "PhysicalBucketControlManifest",
+                    "generation": "streamed-inventory-aggregate",
+                    "candidate_digest": "a" * 64,
+                    "inventory_identity_digest": "b" * 64,
+                    "bucket_count": 100,
+                    "files_per_bucket": 1000,
+                    "file_count": 100000,
+                    "aggregate_digest": "c" * 64,
+                    "cardinality": {
+                        "minimum": 1000,
+                        "maximum": 1000,
+                        "distinct": 1,
+                    },
+                    "semantic_control_record_count": 100,
+                    "semantic_control_envelope_count": 100,
+                    "semantic_control_record_limit": 256,
                 },
+                "search_fixture_reused": False,
+                "physical_bucket_control_reused": False,
             }
         )
         self.assertEqual(list(validator.iter_errors(corpus)), [])
+
+        # The physical stream remains an exact, separately bounded fact even
+        # though the semantic corpus itself is intentionally capped.
+        physical_facts = {
+            "physical_files": 100000,
+            "physical_relation_evidence_count": 198999,
+            "product_acceptance_credit": False,
+            "pass_credit": False,
+        }
+        self.assertEqual(physical_facts["physical_files"], 100000)
+        self.assertEqual(physical_facts["physical_relation_evidence_count"], 198999)
+        self.assertFalse(physical_facts["product_acceptance_credit"])
+        self.assertFalse(physical_facts["pass_credit"])
+
         for field in (
             "reused",
             "search_fixture_reused",
-            "physical_relation_fixture_reused",
+            "physical_bucket_control_reused",
         ):
             reused = json.loads(json.dumps(corpus))
             reused[field] = True
             self.assertTrue(list(validator.iter_errors(reused)), field)
+
+    def test_compiled_saturation_evidence_rejects_legacy_physical_relation_fixture(
+        self,
+    ) -> None:
+        schema = json.loads(
+            (self.root / "core" / "contracts.schema.json").read_text(encoding="utf-8")
+        )
+        corpus_schema = schema["$defs"]["SaturationEvidence"]["properties"][
+            "physical"
+        ]["properties"]["explicit_semantic_corpus"]
+        validator = Draft202012Validator(
+            {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                "$ref": "#/$defs/SaturationEvidence/properties/physical/properties/explicit_semantic_corpus",
+            }
+        )
+        legacy = {
+            "record_type": "SaturationSemanticCorpus",
+            "generation": "explicit-authorized-command-events",
+            "harness_generated": True,
+            "product_acceptance_credit": False,
+            "task_count": 132,
+            "relation_count": 28,
+            "depths": list(range(1, 13)),
+            "high_fanout": 16,
+            "conflicting_exact_id_text": True,
+            "query_ids": ["query-01"],
+            "continuation_query_ids": ["query-01"],
+            "reused": False,
+            "search_fixture": {
+                "task_count": 32,
+                "relation_count": 28,
+                "depths": list(range(1, 13)),
+                "high_fanout": 16,
+            },
+            "physical_relation_fixture": {
+                "task_count": 1567,
+                "relation_count": 198971,
+                "relation_kind": "READS",
+                "target_type": "Artifact",
+                "artifact_target_count": 100000,
+                "artifact_target_coverage": 1.0,
+                "relations_per_atomic_batch_max": 127,
+            },
+            "search_fixture_reused": False,
+            "physical_relation_fixture_reused": False,
+        }
+        errors = list(validator.iter_errors(legacy))
+        self.assertTrue(errors)
+        self.assertTrue(
+            any(
+                "physical_bucket_control" in error.message
+                or "physical_relation_fixture" in error.message
+                for error in errors
+            ),
+            [error.message for error in errors],
+        )
 
     def test_compiled_saturation_projection_requires_exact_entity_contour(
         self,

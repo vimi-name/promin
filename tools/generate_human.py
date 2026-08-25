@@ -1206,9 +1206,9 @@ def main_story(data: dict[str, dict[str, Any]], language: str, st: dict[str, Par
         st,
     )
     inventory_text = (
-        "Inventory reads the product tree once and writes an immutable manifest-verified JSONL stream. Each row is normalized and folded into rolling identity and stream digests, byte and row counts; publication uses atomic replacement. Projection rebuild verifies that descriptor while consuming the stream once and does not materialize the corpus in memory. One accepted raw file produces exactly one derived Artifact proxy with data_class=untrusted-source. Inventory never synthesizes Task, READS, or PRODUCES facts."
+        "Inventory reads the product tree once and writes an immutable manifest-verified JSONL stream of physical inventory records. Each row is normalized and folded into rolling identity and stream digests, byte and row counts; publication uses atomic replacement. Physical evidence is bucketed into the declared bucket contour, while projection rebuild verifies that descriptor while consuming the stream once and does not materialize the corpus in memory. Inventory creates no semantic Artifact, Task, READS, or PRODUCES facts; bounded semantic control records remain separately capped."
         if language == "en"
-        else "Інвентаризація читає дерево продукту один раз і записує незмінний JSONL stream, перевірений manifest. Кожний рядок нормалізується та входить до rolling digests ідентичності й stream, кількості bytes і рядків; публікація використовує atomic replace. Перебудова проєкції перевіряє descriptor і споживає stream один раз без матеріалізації corpus у пам'яті. Один прийнятий сирий файл створює рівно один похідний Artifact proxy з data_class=untrusted-source. Інвентаризація не синтезує Task, READS або PRODUCES."
+        else "Інвентаризація читає дерево продукту один раз і записує незмінний JSONL stream фізичних inventory records, перевірений manifest. Кожний рядок нормалізується та входить до rolling digests ідентичності й stream, кількості bytes і рядків; публікація використовує atomic replace. Фізичне evidence розподіляється за оголошеним bucket-контуром, а перебудова проєкції перевіряє descriptor і споживає stream один раз без матеріалізації corpus у пам'яті. Інвентаризація не створює semantic Artifact, Task, READS або PRODUCES; bounded semantic control records мають окрему граничну кількість."
     )
     story.append(para(inventory_text, st["body"]))
     inventory_row = defs["InventoryProjectionRow"]
@@ -1231,7 +1231,13 @@ def main_story(data: dict[str, dict[str, Any]], language: str, st: dict[str, Par
                 ("manifest_verified_jsonl", inventory_contract["manifest_verified_jsonl"]),
                 ("project_tree_passes_max", inventory_contract["project_tree_passes_max"]),
                 ("memory_amplification_max", inventory_contract["memory_amplification_max"]),
-                ("derived_artifact_proxies_per_raw_file", inventory_contract["derived_artifact_proxies_per_raw_file"]),
+                ("physical_inventory_records_per_raw_file", inventory_contract["physical_inventory_records_per_raw_file"]),
+                ("physical_bucket_count", inventory_contract["physical_bucket_count"]),
+                ("physical_files_per_bucket", inventory_contract["physical_files_per_bucket"]),
+                ("semantic_artifacts_per_raw_file", inventory_contract["semantic_artifacts_per_raw_file"]),
+                ("semantic_control_record_limit", inventory_contract["semantic_control_record_limit"]),
+                ("synthetic_relations_per_raw_file", inventory_contract["synthetic_relations_per_raw_file"]),
+                ("synthetic_tasks_per_raw_file", inventory_contract["synthetic_tasks_per_raw_file"]),
                 ("search_text_bytes_max", inventory_contract["search_text_bytes_max"]),
             ),
             [76 * mm, 93 * mm],
@@ -1995,9 +2001,9 @@ def appendix_story(data: dict[str, dict[str, Any]], language: str, st: dict[str,
 
     add_heading(story, "Conformance budgets and scale" if language == "en" else "Бюджети відповідності й масштабування", 1, "conformance-budgets", st)
     scale_summary = (
-        "The physical lane uses 100,000 raw files and exactly one derived Artifact proxy per file. Raw inventory creates no Task or Relation semantics. An explicit authorized harness corpus brings the projection to at least 198,999 Core-valid typed Relations. At least 600 actual runtime queries mix exact identities, content-only and high-cardinality terms, broad bounded refinement, misses, hostile identity text, and forced continuation across depths 1-12. This bounded physical proof is not a full 1000 by 1000 execution and must not be replaced by one."
+        "The physical lane uses 100,000 raw files represented by one physical inventory record per file, with bucketed evidence across 100 buckets of 1,000 files. Raw inventory creates no semantic Artifact, Task, or Relation records; semantic control state is separately bounded at 256 records. An explicit authorized harness corpus brings the projection to at least 198,999 Core-valid typed Relations as physical evidence, not per-file semantic materialization. At least 600 actual runtime queries mix exact identities, content-only and high-cardinality terms, broad bounded refinement, misses, hostile identity text, and forced continuation across depths 1-12. This bounded physical proof is not a full 1000 by 1000 execution and must not be replaced by one."
         if language == "en"
-        else "Фізична перевірка використовує 100 000 raw-файлів і рівно один похідний Artifact proxy на файл. Raw inventory не створює Task або Relation семантики. Окремий авторизований harness corpus доводить проєкцію щонайменше до 198 999 Core-valid типізованих Relations. Щонайменше 600 фактичних runtime-запитів поєднують exact identities, content-only і high-cardinality terms, broad bounded refinement, misses, hostile identity text та forced continuation на глибинах 1-12. Цей bounded physical proof не є повним виконанням 1000 на 1000 і не повинен ним замінюватися."
+        else "Фізична перевірка використовує 100 000 raw-файлів, представлених одним physical inventory record на файл, із bucketed evidence у 100 buckets по 1 000 файлів. Raw inventory не створює semantic Artifact, Task або Relation records; semantic control state окремо обмежено 256 records. Окремий авторизований harness corpus доводить щонайменше 198 999 Core-valid типізованих Relations як фізичне evidence, а не per-file semantic materialization. Щонайменше 600 фактичних runtime-запитів поєднують exact identities, content-only і high-cardinality terms, broad bounded refinement, misses, hostile identity text та forced continuation на глибинах 1-12. Цей bounded physical proof не є повним виконанням 1000 на 1000 і не повинен ним замінюватися."
     )
     story.append(para(scale_summary, st["body"]))
     story.append(make_table(["Structural budget", "Value", "Owner", "Validator"], ((name, value, OWNER["conformance"], name) for name, value in conf["structural_budgets"].items()), [54 * mm, 28 * mm, 50 * mm, 37 * mm], st))

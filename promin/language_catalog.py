@@ -122,6 +122,60 @@ _CLAIM_KEYS: Final = frozenset(
     {"acceptancePass", "passCredit", "productAcceptancePass", "releaseApproved"}
 )
 
+# Source-owned, bounded metadata for the five supported language families.
+# These are deliberately descriptive: availability is established only by a
+# LanguageToolReceipt produced after executable invocation.
+_TOOLING_CONTRACTS: Final[dict[str, Mapping[str, object]]] = {
+    "c-family-semantic": {
+        "tools": ("clang-tidy", "clangd", "clang-check", "include-what-you-use", "cppcheck", "clang-doc", "doxygen-html-xml"),
+        "discovery": ("PATH executable lookup", "canonical regular-file resolution"),
+        "preflight": ("regular project root", "compilation database/configuration when required", "bounded argv"),
+        "evidenceLabels": ("executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"),
+        "maxTimeoutSeconds": 30,
+        "maxOutputBytes": 65536,
+    },
+    "csharp-semantic": {
+        "tools": ("dotnet-compiler", "roslyn-analyzers", "docfx"),
+        "discovery": ("PATH executable lookup", "canonical regular-file resolution"),
+        "preflight": ("regular project root", "project/configuration presence when required", "bounded argv"),
+        "evidenceLabels": ("executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"),
+        "maxTimeoutSeconds": 30,
+        "maxOutputBytes": 65536,
+    },
+    "jvm-semantic": {
+        "tools": ("javac", "javadoc", "checkstyle", "spotbugs"),
+        "discovery": ("PATH executable lookup", "canonical regular-file resolution"),
+        "preflight": ("regular project root", "declared build/configuration presence when required", "bounded argv"),
+        "evidenceLabels": ("executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"),
+        "maxTimeoutSeconds": 30,
+        "maxOutputBytes": 65536,
+    },
+    "javascript-typescript-semantic": {
+        "tools": ("eslint", "typescript-compiler", "typedoc"),
+        "discovery": ("PATH executable lookup", "canonical regular-file resolution"),
+        "preflight": ("regular project root", "eslint/tsconfig/typedoc configuration when required", "bounded argv"),
+        "evidenceLabels": ("executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"),
+        "maxTimeoutSeconds": 30,
+        "maxOutputBytes": 65536,
+    },
+    "python-semantic": {
+        "tools": ("python-syntax-check", "ruff", "mypy", "sphinx"),
+        "discovery": ("PATH executable lookup", "canonical regular-file resolution"),
+        "preflight": ("regular project root", "pyproject/docs configuration when required", "bounded argv"),
+        "evidenceLabels": ("executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"),
+        "maxTimeoutSeconds": 30,
+        "maxOutputBytes": 65536,
+    },
+}
+
+
+def language_tooling_contract(profile_id: str) -> Mapping[str, object]:
+    """Return immutable-ish declarative tool metadata for one known profile."""
+
+    if not isinstance(profile_id, str) or profile_id not in _TOOLING_CONTRACTS:
+        raise LanguageCatalogError(f"no tooling contract for profile: {profile_id}")
+    return MappingProxyType(dict(_TOOLING_CONTRACTS[profile_id]))
+
 
 @dataclass(frozen=True)
 class LanguageCapabilityProfile:
@@ -1147,6 +1201,7 @@ __all__ = [
     "LanguageCatalog",
     "LanguageCatalogError",
     "PROFILE_SCHEMA",
+    "language_tooling_contract",
     "compose_language_capabilities",
     "compose_language_catalog",
     "languages_for_detected_technologies",

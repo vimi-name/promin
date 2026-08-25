@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 285
+CANONICAL_PACKAGE_FILE_COUNT = 286
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -125,6 +125,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/audit/2026-08-21-public-workflow-and-tooling-design.md',
         'docs/audit/2026-08-21-public-workflow-implementation-plan.md',
         'docs/audit/2026-08-22-continuation-renewal-wave.md',
+        'docs/audit/2026-08-25-alpha4-bounded-semantic-control-wave.md',
         'docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',

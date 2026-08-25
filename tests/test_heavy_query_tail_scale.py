@@ -13,6 +13,7 @@ import time
 from typing import Any, Mapping
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from promin.authority import AuthorityError
 from promin.canonical import canonical_bytes, digest_value
@@ -573,6 +574,74 @@ def test_query_phase_budget_is_derived_from_plan_and_forced_depths() -> None:
     ) == 28
     with pytest.raises(saturation.SaturationError, match="positive integer"):
         saturation._query_phase_operation_budget([{"depth": 0}], 0)
+
+
+@pytest.mark.parametrize("operations", [0, 12_240_612])
+def test_compiled_immutable_query_phase_accepts_bounded_operations(
+    operations: int,
+) -> None:
+    schema = json.loads(
+        (PACKAGE_ROOT / "core" / "contracts.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(
+        {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            "$ref": (
+                "#/$defs/SaturationEvidence/properties/search/properties/"
+                "immutable_query_phase"
+            ),
+        }
+    )
+    phase = {
+        "operation_budget": 12_240_612,
+        "operations": operations,
+        "within_budget": operations <= 12_240_612,
+        "close_elapsed_ms": 0.0,
+        "product_acceptance_credit": False,
+    }
+    assert list(validator.iter_errors(phase)) == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [
+        (lambda phase: phase.pop("operations"), "missing required field"),
+        (lambda phase: phase.__setitem__("unexpected", 1), "unexpected field"),
+        (lambda phase: phase.__setitem__("operations", 12_240_613), "overflow"),
+        (lambda phase: phase.__setitem__("product_acceptance_credit", True), "credit"),
+    ],
+)
+def test_compiled_immutable_query_phase_rejects_schema_mutations(
+    mutation: Any,
+    label: str,
+) -> None:
+    schema = json.loads(
+        (PACKAGE_ROOT / "core" / "contracts.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = Draft202012Validator(
+        {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            "$ref": (
+                "#/$defs/SaturationEvidence/properties/search/properties/"
+                "immutable_query_phase"
+            ),
+        }
+    )
+    phase = {
+        "operation_budget": 12_240_612,
+        "operations": 12_240_612,
+        "within_budget": True,
+        "close_elapsed_ms": 0.0,
+        "product_acceptance_credit": False,
+    }
+    mutation(phase)
+    assert list(validator.iter_errors(phase)), label
 
 
 def test_depth_one_multi_page_phase_budget_does_not_exhaust() -> None:

@@ -19,7 +19,7 @@ import threading
 from typing import Final, Mapping
 
 from .canonical import digest_bytes, digest_file, digest_value
-from .language_catalog import LanguageCatalog, LanguageCapabilityProfile
+from .language_catalog import LanguageCatalog, LanguageCapabilityProfile, language_tooling_contract
 
 
 class LanguageToolingError(ValueError):
@@ -38,6 +38,8 @@ _MAX_OUTPUT_FILES: Final = 4096
 _MAX_OUTPUT_BYTES: Final = 64 * 1024 * 1024
 _MAX_BOUNDARY_FILES: Final = 4096
 _MAX_BOUNDARY_BYTES: Final = 64 * 1024 * 1024
+_DECLARED_MAX_TIMEOUT_SECONDS: Final = 30
+_DECLARED_MAX_OUTPUT_BYTES: Final = 65_536
 
 _PYTHON_SYNTAX_CHECK_PROGRAM: Final = (
     "from pathlib import Path\n"
@@ -118,6 +120,94 @@ _REQUIRED_CONFIGURATION_PATHS: Final[dict[str, tuple[str, ...]]] = {
     "mypy": ("pyproject.toml",),
     "sphinx": ("docs/conf.py",),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageToolDeclaration:
+    """One real open-source tool declaration; never an availability claim."""
+
+    tool_id: str
+    executable: str
+    purpose: str
+    discovery: tuple[str, ...]
+    preflight: tuple[str, ...]
+    evidence_labels: tuple[str, ...]
+    max_timeout_seconds: int = 30
+    max_output_bytes: int = 65_536
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "tool_id": self.tool_id,
+            "executable": self.executable,
+            "purpose": self.purpose,
+            "discovery": list(self.discovery),
+            "preflight": list(self.preflight),
+            "evidence_labels": list(self.evidence_labels),
+            "max_timeout_seconds": self.max_timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+            "diagnostic_output_required": True,
+            "claims": dict(_FALSE_CLAIMS),
+        }
+
+
+def _declarations_for(profile: LanguageCapabilityProfile) -> tuple[LanguageToolDeclaration, ...]:
+    contract = language_tooling_contract(profile.profile_id)
+    tools = tuple(str(item) for item in contract["tools"])
+    discovery = tuple(str(item) for item in contract["discovery"])
+    preflight = tuple(str(item) for item in contract["preflight"])
+    labels = tuple(str(item) for item in contract["evidenceLabels"])
+    purpose = {
+        "documentation": "open-source API documentation",
+        "static-analysis": "open-source static analysis",
+    }
+    result = []
+    for tool_id in tools:
+        executable = next(
+            (value for family in _DECLARATION_EXECUTABLES.values() for key, value in family.items() if key == tool_id),
+            tool_id,
+        )
+        result.append(LanguageToolDeclaration(
+            tool_id, executable, purpose["documentation"] if tool_id in {"clang-doc", "doxygen-html-xml", "docfx", "javadoc", "typedoc", "sphinx"} else purpose["static-analysis"],
+            discovery, preflight, labels, int(contract["maxTimeoutSeconds"]), int(contract["maxOutputBytes"]),
+        ))
+    return tuple(result)
+
+
+def language_tool_declarations(catalog: LanguageCatalog, language_id: str) -> tuple[LanguageToolDeclaration, ...]:
+    """List deterministic declarations; no host probing and no diagnostics."""
+
+    profile, _ = _profile_for_language(catalog, language_id)
+    return _declarations_for(profile)
+
+
+def preflight_language_tool(plan: LanguageToolPlan) -> dict[str, object]:
+    """Check bounded prerequisites without invoking the executable."""
+
+    if not isinstance(plan, LanguageToolPlan):
+        raise LanguageToolingError("plan must be a LanguageToolPlan")
+    executable = _resolve_executable(plan)
+    root = Path(plan.working_directory)
+    configuration_error = None
+    if executable is not None and root.is_dir():
+        try:
+            validated = _validated_configuration_paths(root.resolve(strict=True), plan.tool_id)
+            if validated != plan.required_configuration_paths:
+                configuration_error = "planned configuration identity changed"
+        except LanguageToolingError as exc:
+            configuration_error = str(exc)
+    available = executable is not None and root.is_dir() and configuration_error is None
+    return {
+        "status": "AVAILABLE" if available else "UNAVAILABLE",
+        "tool_id": plan.tool_id,
+        "discovered_executable": str(executable) if executable is not None else None,
+        "required_configuration_paths": list(plan.required_configuration_paths),
+        "reason": configuration_error,
+        "max_timeout_seconds": _DECLARED_MAX_TIMEOUT_SECONDS,
+        "max_output_bytes": _DECLARED_MAX_OUTPUT_BYTES,
+        "evidence_labels": ["discovery-status", "configuration-status"],
+        "diagnostic_output_collected": False,
+        "claims": dict(_FALSE_CLAIMS),
+    }
 
 
 def _profile_for_language(
@@ -306,6 +396,18 @@ def _resolve_executable(plan: LanguageToolPlan) -> Path | None:
         return None
 
 
+def _configuration_identity(plan: LanguageToolPlan, root: Path) -> tuple[tuple[str, int, str], ...]:
+    """Bind required config paths to regular-file size and digest."""
+
+    _validated_configuration_paths(root, plan.tool_id)
+    records: list[tuple[str, int, str]] = []
+    for relative in plan.required_configuration_paths:
+        candidate = root / relative
+        state = candidate.stat(follow_symlinks=False)
+        records.append((relative, int(state.st_size), digest_file(candidate)))
+    return tuple(records)
+
+
 class _BoundedStreamDrainer:
     def __init__(self, stream: object, limit: int) -> None:
         self._stream = stream
@@ -342,10 +444,10 @@ def probe_language_tool(
 
     if not isinstance(plan, LanguageToolPlan):
         raise LanguageToolingError("plan must be a LanguageToolPlan")
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
-        raise LanguageToolingError("timeout_seconds must be a positive integer")
-    if not isinstance(output_limit_bytes, int) or isinstance(output_limit_bytes, bool) or output_limit_bytes <= 0:
-        raise LanguageToolingError("output_limit_bytes must be a positive integer")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= _DECLARED_MAX_TIMEOUT_SECONDS:
+        raise LanguageToolingError("timeout_seconds exceeds the declared tool bound")
+    if not isinstance(output_limit_bytes, int) or isinstance(output_limit_bytes, bool) or not 0 < output_limit_bytes <= _DECLARED_MAX_OUTPUT_BYTES:
+        raise LanguageToolingError("output_limit_bytes exceeds the declared tool bound")
     plan_digest = digest_value(plan.to_record())
     empty_digest = digest_bytes(b"")
     executable = _resolve_executable(plan)
@@ -385,6 +487,10 @@ def probe_language_tool(
         working_directory = Path(plan.working_directory).resolve(strict=True)
         if not working_directory.is_dir():
             return LanguageToolReceipt(status="FAILED", **base)
+        try:
+            configuration_before = _configuration_identity(plan, working_directory)
+        except (OSError, LanguageToolingError):
+            return LanguageToolReceipt(status="UNAVAILABLE", **base)
     except OSError:
         return LanguageToolReceipt(status="UNAVAILABLE", **base)
     base["executable_sha256"] = before
@@ -466,6 +572,13 @@ def probe_language_tool(
             after = None
         if after != before:
             status = "FAILED"
+        try:
+            configuration_after = _configuration_identity(plan, working_directory)
+        except (OSError, LanguageToolingError):
+            status = "FAILED"
+        else:
+            if configuration_after != configuration_before:
+                status = "FAILED"
         base["completed_at"] = _timestamp()
     return LanguageToolReceipt(status=status, **base)
 
@@ -677,10 +790,10 @@ def run_language_tool(
 
     if not isinstance(plan, LanguageToolPlan):
         raise LanguageToolingError("plan must be a LanguageToolPlan")
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
-        raise LanguageToolingError("timeout_seconds must be a positive integer")
-    if not isinstance(output_limit_bytes, int) or isinstance(output_limit_bytes, bool) or output_limit_bytes <= 0:
-        raise LanguageToolingError("output_limit_bytes must be a positive integer")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= _DECLARED_MAX_TIMEOUT_SECONDS:
+        raise LanguageToolingError("timeout_seconds exceeds the declared tool bound")
+    if not isinstance(output_limit_bytes, int) or isinstance(output_limit_bytes, bool) or not 0 < output_limit_bytes <= _DECLARED_MAX_OUTPUT_BYTES:
+        raise LanguageToolingError("output_limit_bytes exceeds the declared tool bound")
     roots = _validated_output_roots(plan)
     project_root = Path(plan.working_directory).resolve(strict=True)
     before_boundary = _snapshot_project_boundary(project_root, roots)
@@ -780,7 +893,8 @@ def plan_language_tool(
 
 
 __all__ = [
-    "LanguageToolPlan", "LanguageToolReceipt", "LanguageToolingError",
+    "LanguageToolDeclaration", "LanguageToolPlan", "LanguageToolReceipt", "LanguageToolingError",
+    "language_tool_declarations", "preflight_language_tool",
     "plan_language_tool", "probe_language_tool",
     "run_language_tool",
 ]

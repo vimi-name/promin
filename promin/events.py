@@ -1695,6 +1695,119 @@ def _read_bytes(path: Path) -> bytes:
         return stream.read()
 
 
+def _read_bytes_limited(path: Path, max_bytes: int) -> bytes:
+    if (
+        not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1
+    ):
+        raise ValueError("bounded read ceiling is invalid")
+    payload = bytearray()
+    with open(_native_os_path(path), "rb") as stream:
+        while len(payload) < max_bytes:
+            chunk = stream.read(min(1024 * 1024, max_bytes - len(payload)))
+            if not chunk:
+                return bytes(payload)
+            payload.extend(chunk)
+        if stream.read(1):
+            raise ValueError("durable payload exceeds its policy ceiling")
+    return bytes(payload)
+
+
+def _sha256_file(path: Path, max_bytes: int | None = None) -> str:
+    if (
+        max_bytes is not None
+        and (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or max_bytes < 1
+        )
+    ):
+        raise ValueError("bounded digest ceiling is invalid")
+    digest = hashlib.sha256()
+    with open(_native_os_path(path), "rb") as stream:
+        total = 0
+        while max_bytes is None or total < max_bytes:
+            chunk = stream.read(
+                1024 * 1024
+                if max_bytes is None
+                else min(1024 * 1024, max_bytes - total)
+            )
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+            total += len(chunk)
+        if stream.read(1):
+            raise ValueError("durable payload exceeds its policy ceiling")
+    return digest.hexdigest()
+
+
+def _new_journal_binding_hasher() -> Any:
+    return hashlib.sha256(b"promin:verified-envelope-snapshot:v2\x00")
+
+
+def _extend_journal_binding(
+    digest: Any,
+    journal_file: str,
+    payload_digest: str,
+) -> None:
+    name = journal_file.encode("utf-8")
+    digest.update(len(name).to_bytes(4, "big"))
+    digest.update(name)
+    digest.update(bytes.fromhex(payload_digest))
+
+
+def _finish_journal_binding(digest: Any, file_count: int) -> str:
+    digest.update(b"\x00end\x00")
+    digest.update(file_count.to_bytes(8, "big"))
+    return digest.hexdigest()
+
+
+def _validate_journal_file_names(directory: Path, expected_count: int) -> None:
+    with os.scandir(_native_os_path(directory)) as entries:
+        for entry in entries:
+            if not fnmatch.fnmatchcase(entry.name, "*.json"):
+                continue
+            prefix = entry.name[:20]
+            if len(prefix) != 20 or not prefix.isdigit():
+                raise JournalCorruption(
+                    f"journal file name is not sequence-addressable: {entry.name}"
+                )
+            sequence = int(prefix)
+            if not 1 <= sequence <= expected_count:
+                raise JournalCorruption(
+                    f"journal file sequence is outside authority: {entry.name}"
+                )
+
+
+def _journal_binding_digest(
+    directory: Path,
+    expected_count: int,
+    max_bytes: int,
+) -> str:
+    if (
+        not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count < 0
+    ):
+        raise JournalCorruption("journal binding sequence count is invalid")
+    _validate_journal_file_names(directory, expected_count)
+    digest = _new_journal_binding_hasher()
+    for sequence in range(1, expected_count + 1):
+        matches = _matching_paths(directory, f"{sequence:020d}-*.json")
+        if len(matches) != 1:
+            raise JournalCorruption(
+                f"journal sequence {sequence} is missing or ambiguous"
+            )
+        path = matches[0]
+        _extend_journal_binding(
+            digest,
+            path.name,
+            _sha256_file(path, max_bytes),
+        )
+    return _finish_journal_binding(digest, expected_count)
+
+
 def _unlink(path: Path, *, missing_ok: bool = False) -> None:
     try:
         os.unlink(_native_os_path(path))
@@ -1843,19 +1956,13 @@ class _WriterLock:
             self.local.release()
 
 
-@dataclass(frozen=True)
-class _VerifiedEnvelopeRecord:
-    journal_file: str
-    payload: bytes
-    payload_digest: str
-
-
 class VerifiedEnvelopeSnapshot:
     """One authority-bound, schema-free read of pre-validated envelopes.
 
     Admission performs the same full envelope validation as public replay and
-    retains the exact canonical journal bytes.  Iteration only parses those
-    already-bound bytes; it never invokes the command/event/schema validators.
+    retains only one bounded journal binding digest.  Iteration streams one
+    already-bound file at a time; it never invokes the command/event/schema
+    validators.
     The writer lock is held for admission and each binding check, not for the
     potentially long consumer pass.  Any durable byte drift poisons the view.
     """
@@ -1865,7 +1972,6 @@ class VerifiedEnvelopeSnapshot:
         self._closed = False
         self._iterated = False
         self._poison: BaseException | None = None
-        self._records: tuple[_VerifiedEnvelopeRecord, ...]
         self._binding: tuple[Any, ...]
         self._lock = _WriterLock(store.lock_path, store.lock_timeout)
         self._lock.__enter__()
@@ -1876,13 +1982,23 @@ class VerifiedEnvelopeSnapshot:
             # journal-owned authority prefix before this snapshot is admitted.
             store._strict_refresh_from_disk_locked()
             control_binding = store._verified_envelope_control_binding_locked()
-            records: list[_VerifiedEnvelopeRecord] = []
+            journal_binding = _new_journal_binding_hasher()
             previous_digest: str | None = None
             sequence = 1
+            expected_sequence_count = store._head["sequence"]
             event_count = 0
             semantic_digest = store.policy.genesis_event_semantic_digest
-            paths = sorted(_matching_paths(store.journal, "*.json"))
-            for path in paths:
+            _validate_journal_file_names(store.journal, expected_sequence_count)
+            for sequence in range(1, expected_sequence_count + 1):
+                matches = _matching_paths(
+                    store.journal,
+                    f"{sequence:020d}-*.json",
+                )
+                if len(matches) != 1:
+                    raise JournalCorruption(
+                        f"journal sequence {sequence} is missing or ambiguous"
+                    )
+                path = matches[0]
                 envelope = store._read_envelope(path)
                 batch_digest = store._validate_envelope(
                     envelope,
@@ -1908,22 +2024,23 @@ class VerifiedEnvelopeSnapshot:
                     envelope,
                     limits=ParseLimits(max_bytes=store.policy.max_envelope_bytes),
                 )
-                records.append(
-                    _VerifiedEnvelopeRecord(
-                        journal_file=path.name,
-                        payload=payload,
-                        payload_digest=hashlib.sha256(payload).hexdigest(),
-                    )
+                _extend_journal_binding(
+                    journal_binding,
+                    path.name,
+                    hashlib.sha256(payload).hexdigest(),
                 )
                 previous_digest = batch_digest
-                sequence += 1
+            journal_binding_digest = _finish_journal_binding(
+                journal_binding,
+                expected_sequence_count,
+            )
             expected_head = (
                 store._empty_head()
-                if not records
+                if expected_sequence_count == 0
                 else {
-                    "sequence": sequence - 1,
+                    "sequence": expected_sequence_count,
                     "batch_id": store._read_envelope(
-                        store._journal_path_for_sequence(sequence - 1)
+                        store._journal_path_for_sequence(expected_sequence_count)
                     )["batch"]["batch_id"],
                     "batch_digest": previous_digest,
                 }
@@ -1936,13 +2053,9 @@ class VerifiedEnvelopeSnapshot:
                 raise JournalCorruption(
                     "verified envelope snapshot does not terminate at authority"
                 )
-            self._records = tuple(records)
             self._binding = (
                 control_binding,
-                tuple(
-                    (record.journal_file, record.payload)
-                    for record in self._records
-                ),
+                journal_binding_digest,
             )
             if store._verified_envelope_binding_locked(self._binding) is not True:
                 raise EventStoreError("verified envelope snapshot binding changed during admission")
@@ -1997,17 +2110,35 @@ class VerifiedEnvelopeSnapshot:
         try:
             self._assert_binding()
             limits = ParseLimits(max_bytes=self._store.policy.max_envelope_bytes)
-            for record in self._records:
+            expected_sequence_count = self._store._head["sequence"]
+            _validate_journal_file_names(
+                self._store.journal,
+                expected_sequence_count,
+            )
+            for sequence in range(1, expected_sequence_count + 1):
+                matches = _matching_paths(
+                    self._store.journal,
+                    f"{sequence:020d}-*.json",
+                )
+                if len(matches) != 1:
+                    raise EventStoreError(
+                        f"verified envelope snapshot journal sequence {sequence} changed"
+                    )
+                path = matches[0]
                 # A consumer may suspend this generator between records and
                 # close the owning snapshot before resuming it.  Re-check the
                 # lease state immediately before every emission so a closed
                 # or poisoned view can never yield another envelope.
                 self._ensure_open()
-                value = parse_json_strict(record.payload, limits=limits)
+                value = self._read_verified_record(path, limits)
                 if not isinstance(value, dict):
                     raise EventStoreError(
                         "verified envelope snapshot record is not an object"
                     )
+                # Without retaining per-file metadata, prove the streamed
+                # record still belongs to the admitted durable set before it
+                # becomes observable to the consumer.
+                self._assert_binding()
                 self._ensure_open()
                 yield copy.deepcopy(value)
             self._assert_binding()
@@ -2046,6 +2177,21 @@ class VerifiedEnvelopeSnapshot:
             if isinstance(error, EventStoreError):
                 raise error
             raise EventStoreError("verified envelope snapshot close failed") from error
+
+    def _read_verified_record(
+        self,
+        path: Path,
+        limits: ParseLimits,
+    ) -> Any:
+        """Read one bound record without retaining the whole journal snapshot."""
+
+        try:
+            payload = _read_bytes_limited(path, limits.max_bytes)
+        except (OSError, ValueError) as exc:
+            raise EventStoreError(
+                "verified envelope snapshot journal record is unreadable"
+            ) from exc
+        return parse_json_strict(payload, limits=limits)
 
     def __enter__(self) -> "VerifiedEnvelopeSnapshot":
         self._ensure_open()
@@ -2550,15 +2696,24 @@ class EventStore:
     ) -> bool:
         try:
             control = self._verified_envelope_control_binding_locked()
-            current_records = tuple(
-                (path.name, _read_bytes(path))
-                for path in sorted(_matching_paths(self.journal, "*.json"))
+            current_binding = _journal_binding_digest(
+                self.journal,
+                self._head["sequence"],
+                self.policy.max_envelope_bytes,
             )
         except OSError as exc:
             raise EventStoreError(
                 "verified envelope snapshot journal binding is unreadable"
             ) from exc
-        return (control, current_records) == expected
+        except ValueError as exc:
+            raise EventStoreError(
+                "verified envelope snapshot journal binding changed"
+            ) from exc
+        except JournalCorruption as exc:
+            raise EventStoreError(
+                "verified envelope snapshot journal binding changed"
+            ) from exc
+        return (control, current_binding) == expected
 
     def _verified_commit_binding_locked(self) -> tuple[Any, ...]:
         """Read the bounded durable binding used between phase operations."""
@@ -8539,11 +8694,11 @@ class EventStore:
             return result
 
     def _read_envelope(self, path: Path) -> dict[str, Any]:
+        limits = ParseLimits(max_bytes=self.policy.max_envelope_bytes)
         try:
-            raw = _read_bytes(path)
-            limits = ParseLimits(max_bytes=self.policy.max_envelope_bytes)
+            raw = _read_bytes_limited(path, limits.max_bytes)
             value = parse_json_strict(raw, limits=limits)
-        except (OSError, CanonicalError) as exc:
+        except (OSError, CanonicalError, ValueError) as exc:
             raise JournalCorruption(f"journal envelope is unreadable: {path.name}") from exc
         if canonical_bytes(value, limits=limits) != raw:
             raise JournalCorruption(f"journal envelope is not canonical: {path.name}")

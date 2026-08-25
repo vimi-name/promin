@@ -31,6 +31,7 @@ from promin.evidence import (
     _validate_saturation_audit_fresh_requirements,
     _validate_saturation_fresh_semantic_corpus,
     _validate_saturation_operation_metrics,
+    _validate_saturation_raw_artifacts,
     _validate_saturation_runtime_bindings,
     release_evidence_invocation,
     validate_saturation_evidence,
@@ -67,8 +68,8 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "generation": "explicit-authorized-command-events",
             "harness_generated": True,
             "product_acceptance_credit": False,
-            "task_count": 1_599,
-            "relation_count": 198_999,
+            "task_count": 132,
+            "relation_count": 28,
             "depths": list(range(1, 13)),
             "high_fanout": 16,
             "conflicting_exact_id_text": True,
@@ -78,21 +79,28 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 "depths": list(range(1, 13)),
                 "high_fanout": 16,
             },
-            "physical_relation_fixture": {
-                "task_count": 1_567,
-                "relation_count": 198_971,
-                "relation_kind": "READS",
-                "target_type": "Artifact",
-                "artifact_target_count": 100_000,
-                "artifact_target_coverage": 1.0,
-                "relations_per_atomic_batch_max": 127,
+            "query_ids": ["query:fixture", "query:continuation"],
+            "continuation_query_ids": ["query:continuation"],
+            "physical_bucket_control": {
+                "record_type": "PhysicalBucketControlManifest",
+                "generation": "streamed-inventory-aggregate",
+                "candidate_digest": "c" * 64,
+                "inventory_identity_digest": "e" * 64,
+                "bucket_count": 100,
+                "files_per_bucket": 1_000,
+                "file_count": 100_000,
+                "aggregate_digest": "f" * 64,
+                "cardinality": {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
+                "semantic_control_record_count": 100,
+                "semantic_control_envelope_count": 100,
+                "semantic_control_record_limit": 256,
             },
             "reused": False,
             "search_fixture_reused": False,
-            "physical_relation_fixture_reused": False,
+            "physical_bucket_control_reused": False,
         }
         semantic_ingestion = {
-            "commit_count": 1_604,
+            "commit_count": 137,
             "p95_ms": 2.0,
             "p99_ms": 3.0,
             "bytes_per_changed_record": 4.0,
@@ -197,8 +205,12 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "inventory_passes_exact": True,
             "miss_behavior_verified": True,
             "mixed_query_classes_complete": True,
-            "physical_relation_artifact_coverage_complete": True,
-            "raw_file_proxy_ratio_exact": True,
+            "physical_bucket_cardinality_exact": True,
+            "physical_relation_evidence_count_exact": True,
+            "physical_relation_evidence_exact": True,
+            "semantic_control_records_bounded": True,
+            "semantic_control_envelopes_bounded": True,
+            "semantic_relation_count_bounded_exact": True,
             "rebuild_digest_equal": True,
             "rebuild_product_passes_zero": True,
             "runtime_depths_1_through_12": True,
@@ -220,6 +232,11 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 },
                 "invocation": {"platform_binding_digest": "a" * 64},
                 "artifact_binding_unchanged": True,
+                "inventory": {
+                    "candidate_digest": "c" * 64,
+                    "entries": 100_000,
+                    "passes": 1,
+                },
                 "physical_files": 100_000,
                 "core_valid_relations": 198_999,
                 "runtime_queries": 600,
@@ -245,24 +262,28 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "files": 100_000,
                     "raw_files": 100_000,
                     "raw_file_proxies": 100_000,
-                    "semantic_proxies": 100_000,
+                    "semantic_proxies": 0,
+                    "physical_artifact_evidence": 100_000,
                     "raw_file_proxy_ratio": 1.0,
                     "synthetic_task_count": 0,
                     "synthetic_task_ratio": 0.0,
-                    "relations": 198_999,
+                    "inventory_relations": 0,
+                    "relations": 28,
+                    "physical_relation_evidence_count": 198_999,
+                    "semantic_control_records": 165,
+                    "semantic_control_envelopes": 137,
+                    "semantic_control_record_limit": 256,
                     "vcs_tree_files": 100_000,
                     "explicit_semantic_corpus": corpus,
                 },
-                "inventory": {"entries": 100_000, "passes": 1},
                 "projection": {
-                    "entity_count": 101_604,
+                    "entity_count": 137,
                     "entity_type_counts": {
-                        "Artifact": 100_000,
-                        "Task": 1_599,
+                        "Task": 132,
                         "Grant": 4,
                         "Candidate": 1,
                     },
-                    "relation_count": 198_999,
+                    "relation_count": 28,
                     "initial_inventory_passes": 1,
                     "initial_product_passes": 0,
                     "rebuild_inventory_passes": 1,
@@ -282,6 +303,17 @@ class ScaleOrchestrationTests(unittest.TestCase):
         )
         raw = {
             "operation": {"semantic_ingestion": semantic_ingestion},
+            "inventory_identity_digest": "e" * 64,
+            "physical_bucket_aggregate_digest": "f" * 64,
+            "physical_bucket_cardinality": {
+                "minimum": 1_000,
+                "maximum": 1_000,
+                "distinct": 1,
+            },
+            "physical_relation_evidence": {
+                "relation_count": 198_999,
+                "target_cardinality": 100_000,
+            },
             "memory_within_threshold": True,
         }
         return verification, raw
@@ -429,7 +461,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
         }
         second_observation = {
             "sequence": 2,
-            "phase": "physical-relation-corpus",
+            "phase": "physical-bucket-controls",
             "command_id": "command:semantic:2",
             "batch_digest": "b" * 64,
             "duration_ms": 5.0,
@@ -444,7 +476,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
         }
         third_observation = {
             "sequence": 3,
-            "phase": "physical-relation-corpus",
+            "phase": "physical-bucket-controls",
             "command_id": "command:semantic:3",
             "batch_digest": "c" * 64,
             "duration_ms": 3.0,
@@ -474,13 +506,14 @@ class ScaleOrchestrationTests(unittest.TestCase):
         }
         verification = {
             "status": "pass",
-            "physical": {},
+            "physical": {"physical_relation_evidence": {}},
             "inventory": {},
             "projection": {},
             "search": {},
             "resources": {},
             "performance": {},
             "contract_predicates": {},
+            "physical_relation_evidence": {},
         }
         operation = {
             "record_type": "SaturationOperationMetrics",
@@ -489,13 +522,14 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "status": "pass",
             "process_exit_code": 0,
             "invocation_exit_code": 0,
-            "physical": {},
+            "physical": {"physical_relation_evidence": {}},
             "inventory": {},
             "projection": {},
             "search": {},
             "resources": {},
             "performance": {},
             "contract_predicates": {},
+            "physical_relation_evidence": {},
             "semantic_ingestion": semantic_ingestion,
         }
 
@@ -549,37 +583,649 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 verification=verification,
             )
 
+    def test_raw_artifacts_recount_exact_physical_bucket_stream(self) -> None:
+        """Exercise the real raw validator over a deterministic 100k-row stream."""
+        raw_roles = {
+            "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson"),
+            "physical-relation-evidence": (
+                "raw/physical-relation-evidence.jsonl",
+                "application/x-ndjson",
+            ),
+            "query-results": ("raw/query-results.jsonl", "application/x-ndjson"),
+            "process-samples": ("raw/process-samples.json", "application/json"),
+            "continuation-state-manifest": (
+                "raw/continuation-state-manifest.jsonl",
+                "application/x-ndjson",
+            ),
+            "phase-log": ("raw/phase-log.jsonl", "application/x-ndjson"),
+            "operation-metrics": ("raw/operation-metrics.json", "application/json"),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence_root = Path(temporary)
+            output = evidence_root / "result"
+            (output / "raw").mkdir(parents=True)
+
+            inventory_lines: list[bytes] = []
+            inventory_digest = hashlib.sha256()
+            bucket_hashes = [hashlib.sha256() for _ in range(100)]
+            bucket_bytes = [0] * 100
+            for index in range(100_000):
+                bucket = index // 1_000
+                row = {
+                    "path": f"product/bucket-{bucket:03d}/record-{index:06d}.txt",
+                    "digest": "0" * 64,
+                    "size": 1,
+                    "search_text": "",
+                }
+                payload = canonical_bytes(row)
+                identity = canonical_bytes(
+                    {key: row[key] for key in ("path", "digest", "size")}
+                )
+                inventory_lines.append(payload)
+                inventory_digest.update(identity)
+                bucket_hashes[bucket].update(identity)
+                bucket_bytes[bucket] += row["size"]
+            inventory_payload = b"".join(inventory_lines)
+            aggregates = [
+                {
+                    "bucket_id": f"bucket-{index:03d}",
+                    "relative_prefix": f"product/bucket-{index:03d}/",
+                    "file_count": 1_000,
+                    "total_bytes": bucket_bytes[index],
+                    "identity_digest": bucket_hashes[index].hexdigest(),
+                    "first_path": f"product/bucket-{index:03d}/record-{index * 1_000:06d}.txt",
+                    "last_path": f"product/bucket-{index:03d}/record-{index * 1_000 + 999:06d}.txt",
+                }
+                for index in range(100)
+            ]
+            inventory_identity_digest = inventory_digest.hexdigest()
+            aggregate_digest = canonical_digest(aggregates)
+            relation_lines: list[bytes] = []
+            for relation_index in range(198_999):
+                target_index = relation_index % 100_000
+                bucket = target_index // 1_000
+                target_path = f"product/bucket-{bucket:03d}/record-{target_index:06d}.txt"
+                relation_lines.append(
+                    canonical_bytes(
+                        {
+                            "record_type": "PhysicalRelationEvidence",
+                            "relation_id": f"physical-relation:{relation_index:06d}",
+                            "kind": "READS",
+                            "source_type": "PhysicalBucket",
+                            "source_id": f"bucket-{bucket:03d}",
+                            "target_type": "PhysicalInventoryRecord",
+                            "target_id": "artifact:file:" + hashlib.sha256(
+                                target_path.encode("utf-8")
+                            ).hexdigest()[:48],
+                            "target_path": target_path,
+                            "target_digest": "0" * 64,
+                            "target_size": 1,
+                            "bucket": bucket,
+                            "activation_digest": "a" * 64,
+                            "candidate_digest": "c" * 64,
+                            "inventory_identity_digest": inventory_identity_digest,
+                            "physical_evidence": True,
+                            "semantic_record": False,
+                        }
+                    )
+                )
+            relation_payload = b"".join(relation_lines)
+            relation_summary = {
+                "record_type": "PhysicalRelationEvidenceSummary",
+                "evidence_class": "harness_generated_physical",
+                "product_acceptance_credit": False,
+                "relation_count": 198_999,
+                "relation_id_first": "physical-relation:000000",
+                "relation_id_last": "physical-relation:198998",
+                "physical_target_cardinality": 100_000,
+                "inventory_identity_digest": inventory_identity_digest,
+                "candidate_digest": "c" * 64,
+                "activation_digest": "a" * 64,
+                "bytes": len(relation_payload),
+                "sha256": hashlib.sha256(relation_payload).hexdigest(),
+            }
+
+            query_mix = {
+                "broad": 60,
+                "content-high-cardinality": 60,
+                "content-probe": 60,
+                "exact-artifact": 60,
+                "exact-semantic": 60,
+                "forced-continuation": 120,
+                "hostile-content": 60,
+                "hostile-exact": 60,
+                "miss": 60,
+            }
+            query_rows: list[bytes] = []
+            query_classes = [name for name, count in query_mix.items() for _ in range(count)]
+            for index, query_class in enumerate(query_classes):
+                query_rows.append(
+                    canonical_bytes(
+                        {
+                            "record_type": "SaturationQueryObservation",
+                            "index": index,
+                            "query_class": query_class,
+                            "query": f"query:{index}",
+                            "depth": index % 12 + 1,
+                            "elapsed_ms": 1.0,
+                            "first_page": {},
+                            "first_page_digest": "0" * 64,
+                            "class_result_verified": True,
+                            "reference": {},
+                            "forced": None,
+                        }
+                    )
+                )
+            query_payload = b"".join(query_rows)
+            query_depths = {str(depth): 50 for depth in range(1, 13)}
+            query_summary = {
+                "actual_runtime_queries": 600,
+                "query_mix": query_mix,
+                "depth_counts": query_depths,
+                "query_class_depths": {
+                    name: list(range(1, 13)) for name in query_mix
+                },
+                "query_class_latency_ms": {
+                    name: {"count": count, "p50": 1, "p95": 1, "p99": 1}
+                    for name, count in query_mix.items()
+                },
+                "p50_ms": 1,
+                "p95_ms": 1,
+                "p99_ms": 1,
+                "result_digest": canonical_digest(["a" * 64] * 600),
+                "pages_observed": 600,
+                "continuations_checked": 0,
+                "explicit_truncations": 0,
+                "maximum_continuation_token_bytes": 0,
+                "selected_closure_chains": 600,
+                "forced_continuation_chains": 0,
+                "forced_union_matches": 0,
+                "forced_depths": [],
+                "runtime_query_budget": {"top_k": 1},
+                "continuation_state": {
+                    "files": 0,
+                    "maximum_bytes": 0,
+                    "total_bytes": 0,
+                    "preexisting_files_excluded": 0,
+                },
+                "broad_query_refinement_required": True,
+                "high_cardinality_terms_verified": True,
+                "content_search_verified": True,
+                "miss_behavior_verified": True,
+                "hostile_proxy_content_verified": True,
+                "exact_artifact_search_verified": True,
+            }
+            operation = {
+                "semantic_ingestion": {"elapsed_seconds": 1.0},
+                "search": query_summary,
+                "resources": {
+                    "inventory_stage_rss": {
+                        "baseline_bytes": 1,
+                        "peak_bytes": 2,
+                        "incremental_peak_bytes": 1,
+                    },
+                    "projection_stage_rss": {
+                        "baseline_bytes": 1,
+                        "peak_bytes": 2,
+                        "incremental_peak_bytes": 1,
+                    },
+                    "inventory_pipeline_peak_rss_bytes": 2,
+                    "inventory_pipeline_incremental_peak_bytes": 1,
+                    "inventory_absolute_rss_amplification": round(2 / len(inventory_payload), 9),
+                    "inventory_incremental_memory_amplification": round(1 / len(inventory_payload), 9),
+                    "memory_amplification_metric": {
+                        "metric_id": "inventory-incremental-peak-over-stream-bytes",
+                        "numerator": "inventory_pipeline_incremental_peak_bytes",
+                        "denominator": "inventory_stream_bytes",
+                        "numerator_bytes": 1,
+                        "denominator_bytes": len(inventory_payload),
+                        "ratio": round(1 / len(inventory_payload), 9),
+                        "threshold_max": 32.0,
+                        "within_threshold": True,
+                    },
+                    "peak_rss_bytes": 2,
+                },
+            }
+            operation.update(
+                {
+                    "status": "pass",
+                    "process_exit_code": 0,
+                    "invocation_exit_code": 0,
+                }
+            )
+            process_samples = {
+                "record_type": "SaturationProcessSamples",
+                "sample_interval_ms": 50,
+                "lifetime_peak_rss_bytes": 2,
+                "phases": [
+                    {
+                        "phase": phase,
+                        "summary": {
+                            "baseline_bytes": 1,
+                            "peak_bytes": 2,
+                            "incremental_peak_bytes": 1,
+                        },
+                        "samples": [
+                            {"elapsed_ns": 0, "rss_bytes": 1},
+                            {"elapsed_ns": 1, "rss_bytes": 2},
+                        ],
+                    }
+                    for phase in ("inventory", "projection")
+                ],
+            }
+            phase_payload = b"".join(
+                canonical_bytes(
+                    {
+                        "order": index,
+                        "phase": phase,
+                        "elapsed_ms": 1000 if phase == "semantic-ingestion" else 0,
+                        **(
+                            {
+                                "status": "pass",
+                                "process_exit_code": 0,
+                                "invocation_exit_code": 0,
+                            }
+                            if phase == "result"
+                            else {}
+                        ),
+                    }
+                )
+                for index, phase in enumerate(
+                    (
+                        "physical-generation",
+                        "inventory",
+                        "semantic-ingestion",
+                        "projection",
+                        "runtime-queries",
+                        "result",
+                    ),
+                    start=1,
+                )
+            )
+            payloads = {
+                "inventory-stream": inventory_payload,
+                "physical-relation-evidence": relation_payload,
+                "query-results": query_payload,
+                "process-samples": canonical_bytes(process_samples),
+                "continuation-state-manifest": b"",
+                "phase-log": phase_payload,
+                "operation-metrics": b"{}",
+            }
+            artifacts = []
+            for role, (relative, media_type) in raw_roles.items():
+                path = output / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payloads[role])
+                artifacts.append(
+                    {
+                        "role": role,
+                        "path": relative,
+                        "media_type": media_type,
+                        "sha256": hashlib.sha256(payloads[role]).hexdigest(),
+                        "bytes": len(payloads[role]),
+                        "records": 0 if role == "continuation-state-manifest" else (
+                            100_000 if role == "inventory-stream" else 198_999 if role == "physical-relation-evidence" else 600 if role == "query-results" else 4 if role == "process-samples" else 6 if role == "phase-log" else 1
+                        ),
+                    }
+                )
+            manifest_identity = {
+                "record_type": "SaturationRawArtifactManifest",
+                "path_scope": "saturation-result-directory",
+                "evidence_class": "harness_generated",
+                "product_acceptance_credit": False,
+                "artifacts": artifacts,
+                "artifact_count": 7,
+                "inventory_stream_digest": hashlib.sha256(inventory_payload).hexdigest(),
+                "inventory_identity_digest": inventory_identity_digest,
+            }
+            verification = {
+                "status": "pass",
+                "invocation": {"exit_code": 0},
+                "runtime_binding": {"activation_digest": "a" * 64},
+                "inventory": {"candidate_digest": "c" * 64},
+                "physical": {"physical_relation_evidence": relation_summary},
+                "physical_relation_evidence": relation_summary,
+                "search": query_summary,
+                "resources": operation["resources"],
+                "raw_artifact_manifest": {
+                    **manifest_identity,
+                    "manifest_digest": canonical_digest(manifest_identity),
+                },
+            }
+            reference = {
+                "atoms": ["atom"],
+                "atoms_count": 1,
+                "atoms_digest": canonical_digest(["atom"]),
+                "page_digests": ["a" * 64],
+                "pages": 1,
+                "continuation_pages": 0,
+                "maximum_token_bytes": 0,
+                "first_truncated": False,
+                "selected_closure_complete": True,
+            }
+            with (
+                mock.patch(
+                    "promin.evidence._validate_saturation_operation_metrics",
+                    return_value=operation,
+                ),
+                mock.patch(
+                    "promin.evidence._recompute_raw_query_result",
+                    side_effect=lambda row, expected_index, top_k: {
+                        "query_class": row["query_class"],
+                        "depth": row["depth"],
+                        "elapsed_ms": 1.0,
+                        "class_verified": True,
+                        "reference": reference,
+                        "forced": None,
+                    },
+                ),
+            ):
+                raw = _validate_saturation_raw_artifacts(
+                    verification,
+                    source_path=output / "saturation-result.json",
+                    evidence_root=evidence_root,
+                )
+            self.assertEqual(raw["inventory_entry_count"], 100_000)
+            self.assertEqual(raw["inventory_identity_digest"], inventory_identity_digest)
+            self.assertEqual(raw["physical_bucket_cardinality"], {"minimum": 1_000, "maximum": 1_000, "distinct": 1})
+            self.assertEqual(raw["physical_bucket_aggregate_digest"], aggregate_digest)
+
+    def test_physical_relation_evidence_stream_is_canonical_exact_and_bound(self) -> None:
+        """Count the independently published 198999-link stream, not a scalar."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "result"
+            raw_dir = root / "raw"
+            raw_dir.mkdir(parents=True)
+            inventory_path = raw_dir / "inventory-stream.jsonl"
+            with inventory_path.open("wb") as stream:
+                for index in range(100_000):
+                    bucket = index // 1_000
+                    stream.write(
+                        canonical_bytes(
+                            {
+                                "path": f"product/bucket-{bucket:03d}/record-{index:06d}.txt",
+                                "digest": "0" * 64,
+                                "size": 1,
+                                "search_text": "",
+                            }
+                        )
+                    )
+            inventory_payload = inventory_path.read_bytes()
+            relation_path = raw_dir / "physical-relation-evidence.jsonl"
+            activation_digest = "a" * 64
+            candidate_digest = "c" * 64
+            inventory_identity = hashlib.sha256()
+            bucket_hashes = [hashlib.sha256() for _ in range(100)]
+            inventory_rows: dict[str, tuple[str, int, int]] = {}
+            for index in range(100_000):
+                bucket = index // 1_000
+                target_path = f"product/bucket-{bucket:03d}/record-{index:06d}.txt"
+                identity_bytes = canonical_bytes(
+                    {"path": target_path, "digest": "0" * 64, "size": 1}
+                )
+                inventory_identity.update(identity_bytes)
+                bucket_hashes[bucket].update(identity_bytes)
+                inventory_rows[target_path] = ("0" * 64, 1, bucket)
+            inventory_identity_digest = inventory_identity.hexdigest()
+            bucket_aggregates = [
+                {
+                    "bucket_id": f"bucket-{bucket:03d}",
+                    "relative_prefix": f"product/bucket-{bucket:03d}/",
+                    "file_count": 1_000,
+                    "total_bytes": 1_000,
+                    "identity_digest": bucket_hashes[bucket].hexdigest(),
+                    "first_path": f"product/bucket-{bucket:03d}/record-{bucket * 1_000:06d}.txt",
+                    "last_path": f"product/bucket-{bucket:03d}/record-{bucket * 1_000 + 999:06d}.txt",
+                }
+                for bucket in range(100)
+            ]
+            bucket_control = {
+                "candidate_digest": candidate_digest,
+                "inventory_identity_digest": inventory_identity_digest,
+                "bucket_count": 100,
+                "files_per_bucket": 1_000,
+                "file_count": 100_000,
+                "aggregate_digest": hashlib.sha256(
+                    canonical_bytes(bucket_aggregates)
+                ).hexdigest(),
+                "cardinality": {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
+            }
+            with relation_path.open("wb") as stream:
+                for index in range(198_999):
+                    target_index = index % 100_000
+                    bucket = target_index // 1_000
+                    target_path = (
+                        f"product/bucket-{bucket:03d}/record-{target_index:06d}.txt"
+                    )
+                    target_id = "artifact:file:" + hashlib.sha256(
+                        target_path.encode("utf-8")
+                    ).hexdigest()[:48]
+                    stream.write(
+                        canonical_bytes(
+                            {
+                                "record_type": "PhysicalRelationEvidence",
+                                "relation_id": f"physical-relation:{index:06d}",
+                                "kind": "READS",
+                                "source_type": "PhysicalBucket",
+                                "source_id": f"bucket-{bucket:03d}",
+                                "target_type": "PhysicalInventoryRecord",
+                                "target_id": target_id,
+                                "target_path": target_path,
+                                "target_digest": "0" * 64,
+                                "target_size": 1,
+                                "bucket": bucket,
+                                "activation_digest": activation_digest,
+                                "candidate_digest": candidate_digest,
+                                "inventory_identity_digest": inventory_identity_digest,
+                                "physical_evidence": True,
+                                "semantic_record": False,
+                            }
+                        )
+                    )
+            payload = relation_path.read_bytes()
+            loaded = {
+                "runtime_binding": {"activation_digest": activation_digest},
+                "inventory": {
+                    "candidate_digest": candidate_digest,
+                    "stream_bytes": len(inventory_payload),
+                },
+                "physical": {
+                    "physical_relation_evidence_count": 198_999,
+                    "candidate_digest": candidate_digest,
+                    "inventory_identity_digest": inventory_identity_digest,
+                    "activation_digest": activation_digest,
+                    "explicit_semantic_corpus": {
+                        "physical_bucket_control": bucket_control,
+                    },
+                },
+                "raw_artifact_manifest": {
+                    "artifacts": [
+                        {
+                            "role": "inventory-stream",
+                            "path": "raw/inventory-stream.jsonl",
+                            "records": 100_000,
+                            "bytes": len(inventory_payload),
+                            "sha256": hashlib.sha256(inventory_payload).hexdigest(),
+                        },
+                        {
+                            "role": "physical-relation-evidence",
+                            "path": "raw/physical-relation-evidence.jsonl",
+                            "records": 198_999,
+                            "bytes": len(payload),
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }
+                    ],
+                    "inventory_stream_digest": hashlib.sha256(inventory_payload).hexdigest(),
+                    "inventory_identity_digest": inventory_identity_digest,
+                },
+            }
+            raw_inventory = saturation_audit._validate_raw_inventory_stream(
+                loaded,
+                record_path=root / "saturation-result.json",
+                files=100_000,
+            )
+            inventory_rows = raw_inventory["rows"]
+            inventory_identity_digest = raw_inventory["inventory_identity_digest"]
+            summary = {
+                "record_type": "PhysicalRelationEvidenceSummary",
+                "evidence_class": "harness_generated_physical",
+                "product_acceptance_credit": False,
+                "relation_count": 198_999,
+                "relation_id_first": "physical-relation:000000",
+                "relation_id_last": "physical-relation:198998",
+                "physical_target_cardinality": 100_000,
+                "inventory_identity_digest": inventory_identity_digest,
+                "candidate_digest": candidate_digest,
+                "activation_digest": activation_digest,
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            loaded["physical_relation_evidence"] = summary
+            loaded["physical"]["physical_relation_evidence"] = summary
+            result = saturation_audit._validate_raw_physical_relation_evidence(
+                loaded,
+                record_path=root / "saturation-result.json",
+                inventory_rows=inventory_rows,
+                inventory_identity_digest=inventory_identity_digest,
+            )
+            self.assertEqual(result["records"], 198_999)
+            self.assertEqual(result["sha256"], hashlib.sha256(payload).hexdigest())
+            self.assertEqual(result["evidence_digest"], hashlib.sha256(payload).hexdigest())
+
+            artifact_binding = {
+                "candidate_binding_digest": candidate_digest,
+                "binding_digest": "b" * 64,
+                "archive": {"sha256": "d" * 64},
+                "platform": {"binding_digest": "p" * 64},
+            }
+            assembled = {
+                **loaded,
+                "status": "fail",
+                "pass_credit": False,
+                "acceptance_pass": False,
+                "product_acceptance_pass": False,
+                "public_release_approved": False,
+                "candidate_binding_digest": candidate_digest,
+                "artifact_binding": artifact_binding,
+                "invocation": {
+                    "exit_code": 1,
+                    "arguments": {"archive_sha256": "d" * 64},
+                },
+                "physical_files": 100_000,
+                "core_valid_relations": 28,
+                "core_valid_relations_exact_198999": True,
+                "runtime_queries": 600,
+                "silent_truncations": 0,
+                "selected_closure_union_completeness": 1.0,
+                "memory_amplification_at_most_32": True,
+                "broad_query_refinement_required": True,
+                "high_cardinality_terms_verified": True,
+                "content_search_verified": True,
+                "miss_behavior_verified": True,
+                "hostile_proxy_content_verified": True,
+                "exact_artifact_search_verified": True,
+                "mixed_query_classes_complete": True,
+                "continuation_token_bytes_at_most_256": True,
+                "continuation_state_bytes_at_most_16384": True,
+                "continuation_token_overhead_at_most_10_percent": True,
+                "runtime_binding": {
+                    "activation_digest": activation_digest,
+                    "implementation_closure_digest": "e" * 64,
+                    "platform_binding_digest": "p" * 64,
+                },
+                "workspace_initialization": {
+                    "status": "reused",
+                    "product_tree_scans": 0,
+                    "init_record_count": 5,
+                    "activation_digest": activation_digest,
+                    "implementation_closure_digest": "e" * 64,
+                },
+                "projection": {},
+                "search": {},
+                "performance": {},
+                "contract_predicates": {},
+                "resources": {},
+            }
+            with mock.patch.object(
+                saturation_audit,
+                "_validate_raw_physical_relation_evidence",
+                wraps=saturation_audit._validate_raw_physical_relation_evidence,
+            ) as relation_validator:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "physical result violates the bounded stream/bucket semantic contour",
+                ):
+                    saturation_audit._validate_physical_result(
+                        assembled,
+                        record_path=root / "saturation-result.json",
+                        artifact_binding=artifact_binding,
+                        files=100_000,
+                        queries=600,
+                        performance_profile="portable-local-v1",
+                    )
+            relation_validator.assert_called_once()
+
+            duplicate = payload.replace(
+                b"physical-relation:000001",
+                b"physical-relation:000000",
+                1,
+            )
+            relation_path.write_bytes(duplicate)
+            loaded["raw_artifact_manifest"]["artifacts"][1].update(
+                {
+                    "bytes": len(duplicate),
+                    "sha256": hashlib.sha256(duplicate).hexdigest(),
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "raw physical relation evidence row"):
+                saturation_audit._validate_raw_physical_relation_evidence(
+                    loaded,
+                    record_path=root / "saturation-result.json",
+                    inventory_rows=inventory_rows,
+                    inventory_identity_digest=inventory_identity_digest,
+                )
+
+            missing_root = root.parent / "missing-relation-result"
+            (missing_root / "raw").mkdir(parents=True)
+            missing_loaded = json.loads(json.dumps(loaded))
+            with self.assertRaisesRegex(ValueError, "raw physical relation evidence cannot be read safely"):
+                saturation_audit._validate_raw_physical_relation_evidence(
+                    missing_loaded,
+                    record_path=missing_root / "saturation-result.json",
+                    inventory_rows=inventory_rows,
+                    inventory_identity_digest=inventory_identity_digest,
+                )
+
     def test_saturation_evidence_requires_exact_candidate_in_projection_contour(
         self,
     ) -> None:
         verification, raw = self._exact_saturation_evidence_fixture()
         validated = self._validate_exact_saturation_fixture(verification, raw)
-        self.assertEqual(validated["projection"]["entity_count"], 101_604)
+        self.assertEqual(validated["projection"]["entity_count"], 137)
         self.assertEqual(
             validated["projection"]["entity_type_counts"],
             {
-                "Artifact": 100_000,
-                "Task": 1_599,
+                "Task": 132,
                 "Grant": 4,
                 "Candidate": 1,
             },
         )
-        self.assertEqual(raw["operation"]["semantic_ingestion"]["commit_count"], 1_604)
+        self.assertEqual(raw["operation"]["semantic_ingestion"]["commit_count"], 137)
 
         missing_candidate = json.loads(json.dumps(verification))
         del missing_candidate["projection"]["entity_type_counts"]["Candidate"]
-        missing_candidate["projection"]["entity_count"] = 101_603
+        missing_candidate["projection"]["entity_count"] = 136
         with self.assertRaisesRegex(EvidenceError, "entity contour shape is invalid"):
             self._validate_exact_saturation_fixture(missing_candidate, raw)
 
         tampered_candidate = json.loads(json.dumps(verification))
         tampered_candidate["projection"]["entity_type_counts"]["Candidate"] = 0
-        tampered_candidate["projection"]["entity_count"] = 101_603
+        tampered_candidate["projection"]["entity_count"] = 136
         with self.assertRaisesRegex(EvidenceError, "entity contour is not exact"):
             self._validate_exact_saturation_fixture(tampered_candidate, raw)
 
         stale_commit_count = json.loads(json.dumps(raw))
-        stale_commit_count["operation"]["semantic_ingestion"]["commit_count"] = 1_603
+        stale_commit_count["operation"]["semantic_ingestion"]["commit_count"] = 136
         with self.assertRaisesRegex(
             EvidenceError,
             "contract predicates cannot be recomputed",
@@ -740,8 +1386,8 @@ class ScaleOrchestrationTests(unittest.TestCase):
             "generation": "explicit-authorized-command-events",
             "harness_generated": True,
             "product_acceptance_credit": False,
-            "task_count": 1_599,
-            "relation_count": 198_999,
+            "task_count": 132,
+            "relation_count": 28,
             "depths": list(range(1, 13)),
             "high_fanout": 16,
             "conflicting_exact_id_text": True,
@@ -751,27 +1397,39 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 "depths": list(range(1, 13)),
                 "high_fanout": 16,
             },
-            "physical_relation_fixture": {
-                "task_count": 1_567,
-                "relation_count": 198_971,
-                "relation_kind": "READS",
-                "target_type": "Artifact",
-                "artifact_target_count": 100_000,
-                "artifact_target_coverage": 1.0,
-                "relations_per_atomic_batch_max": 127,
+            "query_ids": ["query:fixture", "query:continuation"],
+            "continuation_query_ids": ["query:continuation"],
+            "physical_bucket_control": {
+                "record_type": "PhysicalBucketControlManifest",
+                "generation": "streamed-inventory-aggregate",
+                "candidate_digest": "c" * 64,
+                "inventory_identity_digest": "e" * 64,
+                "bucket_count": 100,
+                "files_per_bucket": 1_000,
+                "file_count": 100_000,
+                "aggregate_digest": "f" * 64,
+                "cardinality": {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
+                "semantic_control_record_count": 100,
+                "semantic_control_envelope_count": 100,
+                "semantic_control_record_limit": 256,
             },
             "reused": False,
             "search_fixture_reused": False,
-            "physical_relation_fixture_reused": False,
+            "physical_bucket_control_reused": False,
         }
         self.assertEqual(
-            _validate_saturation_fresh_semantic_corpus(corpus),
+            _validate_saturation_fresh_semantic_corpus(
+                corpus,
+                candidate_digest="c" * 64,
+                inventory_identity_digest="e" * 64,
+                aggregate_digest="f" * 64,
+            ),
             corpus,
         )
         for field in (
             "reused",
             "search_fixture_reused",
-            "physical_relation_fixture_reused",
+            "physical_bucket_control_reused",
         ):
             with self.subTest(field=field):
                 reused = dict(corpus)
@@ -780,10 +1438,15 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     EvidenceError,
                     "cannot reuse semantic corpus state",
                 ):
-                    _validate_saturation_fresh_semantic_corpus(reused)
+                    _validate_saturation_fresh_semantic_corpus(
+                        reused,
+                        candidate_digest="c" * 64,
+                        inventory_identity_digest="e" * 64,
+                        aggregate_digest="f" * 64,
+                    )
                 with self.assertRaisesRegex(
                     ValueError,
-                    "reused semantic state in a fresh audit iteration",
+                    "bounded semantic corpus is incomplete, stale, or creditable",
                 ):
                     saturation_audit._validate_iteration_semantic_freshness(
                         reused
@@ -795,8 +1458,44 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     EvidenceError,
                     "cannot reuse semantic corpus state",
                 ):
-                    _validate_saturation_fresh_semantic_corpus(missing)
+                    _validate_saturation_fresh_semantic_corpus(
+                        missing,
+                        candidate_digest="c" * 64,
+                        inventory_identity_digest="e" * 64,
+                        aggregate_digest="f" * 64,
+                    )
 
+    def test_fresh_semantic_corpus_rejects_legacy_relation_fixture(self) -> None:
+        corpus = {
+            "record_type": "SaturationSemanticCorpus",
+            "generation": "explicit-authorized-command-events",
+            "harness_generated": True,
+            "product_acceptance_credit": False,
+            "task_count": 132,
+            "relation_count": 28,
+            "depths": list(range(1, 13)),
+            "high_fanout": 16,
+            "conflicting_exact_id_text": True,
+            "query_ids": ["query:fixture", "query:continuation"],
+            "continuation_query_ids": ["query:continuation"],
+            "search_fixture": {
+                "task_count": 32,
+                "relation_count": 28,
+                "depths": list(range(1, 13)),
+                "high_fanout": 16,
+            },
+            "physical_relation_fixture": {},
+            "reused": False,
+            "search_fixture_reused": False,
+            "physical_bucket_control_reused": False,
+        }
+        with self.assertRaisesRegex(EvidenceError, "bounded semantic corpus shape"):
+            _validate_saturation_fresh_semantic_corpus(
+                corpus,
+                candidate_digest="c" * 64,
+                inventory_identity_digest="e" * 64,
+                aggregate_digest="f" * 64,
+            )
     def test_saturation_audit_fresh_state_is_exact_and_bound_to_physical_run(
         self,
     ) -> None:
@@ -1067,7 +1766,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
         )
         saturation_source = inspect.getsource(saturation.run)
         self.assertIn('"core_valid_relations_exact_198999"', saturation_source)
-        self.assertIn('"core_valid_relations_exact"', saturation_source)
+        self.assertIn('"physical_relation_evidence_count_exact"', saturation_source)
         self.assertIn('"runtime_queries_exact"', saturation_source)
         performance_source = inspect.getsource(saturation._load_performance_contract)
         self.assertIn('"core_valid_relation_count"', performance_source)

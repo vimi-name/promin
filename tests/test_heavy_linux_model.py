@@ -35,6 +35,7 @@ def _available_image(reference: str) -> dict[str, object]:
 
 
 def _plan(monkeypatch, source: Path) -> dict[str, object]:
+    """Build a deterministic modeled plan; these tests do not run Docker."""
     monkeypatch.setattr(linux_model, "discover_docker", lambda *_: _available_docker())
     monkeypatch.setattr(
         linux_model,
@@ -98,6 +99,11 @@ def test_plan_binds_image_tool_identity_read_only_mount_limits_and_exact_argv(
         "release_eligible": False,
         "pass_credit": False,
     }
+    assert plan["labels"] == {
+        "evidence_class": "MODELLED_ONLY",
+        "execution_scope": "docker-container-model",
+        "product_credit_eligible": False,
+    }
 
     argv = linux_model.docker_run_argv(plan, command_id="command-001")
     assert argv[0] == "C:/Program Files/Docker/docker.exe"
@@ -112,7 +118,73 @@ def test_plan_binds_image_tool_identity_read_only_mount_limits_and_exact_argv(
     assert "--mount" in argv
     mount = argv[argv.index("--mount") + 1]
     assert mount == f"type=bind,source={source.absolute()},target=/workspace,readonly"
-    assert argv[-3:] == ["python:3.14-slim", "python", "--version"]
+    assert argv[-3:] == ["sha256:" + ("a" * 64), "python", "--version"]
+
+
+def test_docker_argv_is_fully_bound_to_exact_candidate_and_resource_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.txt").write_text("stable\n", encoding="utf-8")
+    plan = _plan(monkeypatch, source)
+
+    assert plan["image"]["reference"] == "python:3.14-slim"
+    assert plan["image"]["image_id"] == "sha256:" + ("a" * 64)
+    assert plan["image"]["resolved_reference"] == "sha256:" + ("a" * 64)
+    assert plan["image"]["repo_digests"] == [
+        "python:3.14-slim@sha256:" + ("b" * 64)
+    ]
+    assert len(plan["image"]["identity_digest"]) == 64
+    assert plan["tool"]["identity_digest"]
+
+    argv = linux_model.docker_run_argv(plan, command_id="command-002")
+    assert argv == [
+        "C:/Program Files/Docker/docker.exe",
+        "run",
+        "--rm",
+        "--pull=never",
+        "--read-only",
+        "--network=none",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=96",
+        "--memory=805306368b",
+        "--cpus=1.250",
+        "--user=65534:65534",
+        "--workdir=/workspace",
+        "--env=PYTHONDONTWRITEBYTECODE=1",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=33554432b",
+        "--mount",
+        f"type=bind,source={source.absolute()},target=/workspace,readonly",
+        "sha256:" + ("a" * 64),
+        "python",
+        "-c",
+        "print('container-only')",
+    ]
+
+
+def test_runner_rechecks_bound_docker_identity_before_container_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.txt").write_text("stable\n", encoding="utf-8")
+    plan = _plan(monkeypatch, source)
+    changed = _available_docker()
+    changed["server_version"] = "27.2.1"
+    monkeypatch.setattr(linux_model, "discover_docker", lambda *_: changed)
+
+    with patch.object(linux_model.subprocess, "run") as spawn:
+        result = linux_model.run_linux_model(plan)
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "docker-identity-drift"
+    assert result["container_executed"] is False
+    assert result["linux_container_observed"] is False
+    assert result["claims"]["pass_credit"] is False
+    spawn.assert_not_called()
 
 
 def test_runner_reports_unavailable_without_claiming_linux_when_docker_is_absent(
@@ -128,16 +200,64 @@ def test_runner_reports_unavailable_without_claiming_linux_when_docker_is_absent
     )
 
     plan = linux_model.build_linux_model_plan(source)
-    result = linux_model.run_linux_model(plan)
+    with patch.object(linux_model.subprocess, "run") as spawn:
+        result = linux_model.run_linux_model(plan)
 
     assert plan["tool"]["status"] == "UNAVAILABLE"
+    assert plan["image"]["status"] == "UNAVAILABLE"
     assert result["status"] == "UNAVAILABLE"
+    assert result["reason"] == "plan-docker-unavailable"
     assert result["container_executed"] is False
+    assert result["linux_container_observed"] is False
     assert result["command_results"] == []
     assert result["claims"] == plan["claims"]
+    assert all(value is False for value in result["claims"].values())
+    spawn.assert_not_called()
 
 
-def test_runner_pass_requires_a_real_container_process_and_never_promotes_credit(
+def test_plan_and_result_are_explicitly_modeled_only_even_after_container_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.txt").write_text("stable\n", encoding="utf-8")
+    plan = _plan(monkeypatch, source)
+
+    with patch.object(
+        linux_model.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess([], 0, stdout="ok\n", stderr=""),
+    ):
+        result = linux_model.run_linux_model(plan)
+
+    assert plan["record_type"] == "LinuxModelPlan"
+    assert result["record_type"] == "LinuxModelResult"
+    assert plan["schema"] == "promin.linux-model.v1"
+    assert result["schema"] == "promin.linux-model-result.v1"
+    assert plan["labels"] == {
+        "evidence_class": "MODELLED_ONLY",
+        "execution_scope": "docker-container-model",
+        "product_credit_eligible": False,
+    }
+    assert result["labels"] == {
+        "evidence_class": "MODELLED_ONLY",
+        "execution_scope": "docker-container-model",
+        "product_credit_eligible": False,
+    }
+    assert result["status"] == "PASS"
+    assert result["reason"] == "all-container-commands-passed"
+    assert result["linux_container_observed"] is True
+    assert result["claims"] == {
+        "actual_linux_host_validated": False,
+        "linux_standard_validated": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+        "release_eligible": False,
+        "pass_credit": False,
+    }
+
+
+def test_modeled_runner_pass_path_uses_mocked_process_and_never_promotes_credit(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = tmp_path / "source"

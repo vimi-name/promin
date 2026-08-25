@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import os
-import shutil
 import sys
 import time
 from dataclasses import replace
@@ -508,19 +507,23 @@ def test_public_guide_closes_js_typescript_python_tooling_boundary() -> None:
 
 def _fake_tool_plan(tmp_path: Path, *, mutate_after_start: bool = False):
     script = tmp_path / "fake_tool.py"
-    mutation = "\nopen(sys.executable, 'ab').write(b'\u0021')\n" if mutate_after_start else ""
+    configuration = tmp_path / "eslint.config.js"
+    configuration.write_text("// fixture\n", encoding="utf-8")
+    mutation = (
+        f"\nopen({str(configuration)!r}, 'ab').write(b'!')\n"
+        if mutate_after_start else ""
+    )
     script.write_text(
         "import sys\n"
         "sys.stdout.buffer.write(bytes([102, 97, 107, 101, 45, 116, 111, 111, 108, 32, 49, 10]))\n"
         + mutation,
         encoding="utf-8",
     )
-    executable = tmp_path / ("fake-python.exe" if os.name == "nt" else "fake-python")
-    shutil.copy2(sys.executable, executable)
     plan = plan_language_tool(
-        load_catalog(), language_id="c-family", tool_id="clang-tidy",
+        load_catalog(), language_id="javascript", tool_id="eslint",
         action_id="static-analysis", root=tmp_path,
     )
+    executable = Path(sys.executable)
     return replace(
         plan,
         executable=str(executable),
@@ -574,19 +577,31 @@ def test_probe_nonzero_exit_and_argv_identity_mismatch(tmp_path: Path) -> None:
     script.write_text("import sys\nsys.exit(7)\n", encoding="utf-8")
     failed = probe_language_tool(replace(plan, argv=(str(executable), str(script))), timeout_seconds=5)
     assert failed.status == "FAILED"
-    mismatch = replace(plan, argv=(sys.executable, str(script)))
+    mismatch = replace(plan, argv=(str(tmp_path / "different-python"), str(script)))
     assert probe_language_tool(mismatch, timeout_seconds=5).invoked is False
 
 
-def test_probe_timeout_with_executable_drift_is_failed(tmp_path: Path) -> None:
+def test_probe_timeout_with_configuration_drift_is_failed(tmp_path: Path) -> None:
     plan, executable = _fake_tool_plan(tmp_path)
+    configuration = tmp_path / "eslint.config.js"
     script = tmp_path / "timeout.py"
     script.write_text(
-        "import sys, time\nopen(sys.executable, 'ab').write(b'!')\ntime.sleep(10)\n",
+        f"import time\nopen({str(configuration)!r}, 'ab').write(b'!')\ntime.sleep(10)\n",
         encoding="utf-8",
     )
     receipt = probe_language_tool(replace(plan, argv=(str(executable), str(script))), timeout_seconds=1)
     assert receipt.status == "FAILED"
+    assert configuration.read_bytes().endswith(b"!")
+
+
+def test_probe_timeout_without_drift_is_timed_out(tmp_path: Path) -> None:
+    plan, executable = _fake_tool_plan(tmp_path)
+    script = tmp_path / "timeout_without_drift.py"
+    script.write_text("import time\ntime.sleep(10)\n", encoding="utf-8")
+    receipt = probe_language_tool(
+        replace(plan, argv=(str(executable), str(script))), timeout_seconds=1
+    )
+    assert receipt.status == "TIMED_OUT"
 
 
 def test_probe_timeout_does_not_wait_for_inherited_pipe(tmp_path: Path) -> None:

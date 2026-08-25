@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from promin import evidence
+from promin.service import ProminService
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -64,11 +65,47 @@ def test_growth_plan_preserves_the_exact_workload_and_uses_profile_ceilings() ->
         "workload_reduced": False,
     }
     assert plan["workspace_components"]["canonical_projection_database_bytes"] == 402_653_184
-    assert plan["workspace_components"]["event_and_derived_state_bytes"] > 12_000_000_000
+    semantic = plan["semantic_control_state"]
+    expected_changed_records = (
+        semantic["aggregate_record_count"] + semantic["envelope_count"]
+    )
+    assert plan["workspace_components"]["event_and_derived_state_bytes"] == (
+        2
+        * _performance_contract()["thresholds"]["commit_bytes_per_changed_record_max"]
+        * expected_changed_records
+    )
     assert plan["workspace_planned_growth_bytes"] == sum(
         plan["workspace_components"].values()
     )
     assert plan["output_planned_growth_bytes"] == sum(plan["output_components"].values())
+
+
+def test_growth_plan_separates_exact_physical_evidence_from_bounded_semantic_state() -> None:
+    """100k physical files must not become 100k semantic records.
+
+    The physical inventory remains exact and is represented by a streamed/bucketed
+    evidence surface.  Only aggregate semantic control records/envelopes may be
+    retained, with the agreed hard cap of 256; the 198999 physical relation rows
+    are evidence input, not individually materialized semantic state.
+    """
+
+    plan = saturation._storage_growth_plan(
+        _performance_contract(),
+        files=100_000,
+        queries=600,
+        reuse_product=False,
+    )
+
+    semantic = plan["semantic_control_state"]
+    assert semantic["aggregate_record_cap"] == 256
+    assert 0 <= semantic["aggregate_record_count"] <= 256
+    assert 0 <= semantic["envelope_count"] <= 256
+    assert 0 <= semantic["relation_record_count"] <= 256
+    assert semantic["physical_evidence_mode"] == "bucketed-stream"
+    assert semantic["physical_file_evidence_count"] == 100_000
+    assert semantic["physical_relation_evidence_count"] == 198_999
+    assert semantic["physical_file_evidence_count"] > semantic["aggregate_record_count"]
+    assert semantic["physical_relation_evidence_count"] > semantic["relation_record_count"]
 
 
 def test_preflight_groups_same_volume_once_and_emits_no_credit_failure_receipt(
@@ -562,11 +599,11 @@ def test_runtime_headroom_breach_and_nested_sqlite_full_error_are_terminal_failu
         assert saturation._storage_failure_code(outer) == "storage-write-exhausted"
 
 
-def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion_for_phase_log(
+def test_publication_invokes_outer_validator_for_failed_semantic_ingestion_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A structural failed result must validate its real raw phase log before publication."""
+    """Publication invokes the outer validator; raw streaming has a separate gate."""
 
     output = tmp_path / "evidence"
     raw_directory = output / "raw"
@@ -576,6 +613,7 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
     process_payload = b"process-samples\n"
     continuation_payload = b""
     phase_payload = b"phase-log\n"
+    relation_payload = b"physical-relation-evidence\n"
 
     observation = {
         "sequence": 1,
@@ -715,6 +753,7 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
         "raw/process-samples.json": process_payload,
         "raw/continuation-state-manifest.jsonl": continuation_payload,
         "raw/phase-log.jsonl": phase_payload,
+        "raw/physical-relation-evidence.jsonl": relation_payload,
         "raw/operation-metrics.json": operation_payload,
     }
     for relative, payload in raw_payloads.items():
@@ -731,6 +770,7 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
         }
         for role, relative, media_type, records in (
             ("inventory-stream", "raw/inventory-stream.jsonl", "application/x-ndjson", 100_000),
+            ("physical-relation-evidence", "raw/physical-relation-evidence.jsonl", "application/x-ndjson", 198_999),
             ("query-results", "raw/query-results.jsonl", "application/x-ndjson", 600),
             ("process-samples", "raw/process-samples.json", "application/json", 4),
             ("continuation-state-manifest", "raw/continuation-state-manifest.jsonl", "application/x-ndjson", 0),
@@ -815,65 +855,11 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
             "invocation_exit_code": 1,
         },
     ]
-    original_parse_raw_json = evidence._parse_raw_json
-
-    def parse_raw_json(payload: bytes, label: str) -> dict:
-        if label == "saturation operation metrics":
-            return original_parse_raw_json(payload, label)
-        assert label == "process samples"
-        return process_samples
-
-    def parse_raw_jsonl(payload: bytes, label: str, **_kwargs: object):
-        if label == "inventory stream":
-            return InventoryRows()
-        if label == "query results":
-            return query_rows
-        assert label == "phase log"
-        return phase_rows
-
-    def recompute_raw_query_result(
-        _row: object,
-        *,
-        expected_index: int,
-        top_k: int,
-    ) -> dict:
-        assert top_k == 1
-        return {
-            "query_class": query_classes[expected_index % len(query_classes)],
-            "depth": 1,
-            "elapsed_ms": 1.0,
-            "class_verified": True,
-            "reference": {
-                "page_digests": [page_digest],
-                "pages": 1,
-                "continuation_pages": 0,
-                "first_truncated": False,
-                "maximum_token_bytes": 0,
-            },
-            "forced": None,
-        }
-
-    monkeypatch.setattr(evidence, "_parse_raw_json", parse_raw_json)
-    monkeypatch.setattr(evidence, "_parse_raw_jsonl", parse_raw_jsonl)
-    monkeypatch.setattr(
-        evidence,
-        "_recompute_raw_query_result",
-        recompute_raw_query_result,
-    )
-    monkeypatch.setattr(
-        evidence,
-        "_validate_saturation_continuation_state",
-        lambda *_args: [],
-    )
-
+    validation_calls: list[dict] = []
     def structural_validation(document: dict, **kwargs: object) -> dict:
         assert kwargs["require_pass"] is False
         assert document["status"] == "fail"
-        assert evidence._validate_saturation_raw_artifacts(
-            document,
-            source_path=kwargs["source_path"],
-            evidence_root=kwargs["evidence_root"],
-        )["operation"]["semantic_ingestion"] == semantic_ingestion
+        validation_calls.append(document)
         return document
 
     monkeypatch.setattr(
@@ -888,6 +874,7 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
     )
 
     assert published == verification
+    assert validation_calls == [verification]
     assert json.loads((output / "saturation-result.json").read_text(encoding="utf-8")) == verification
     for claim in (
         "pass_credit",
@@ -896,3 +883,86 @@ def test_published_failed_saturation_evidence_binds_validated_semantic_ingestion
         "public_release_approved",
     ):
         assert published[claim] is False
+
+
+def test_physical_bucket_controls_capture_head_before_verified_commit_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bucket controls commit without refreshing the public store in-phase."""
+
+    workspace = tmp_path / "physical-saturation"
+    saturation._initialize_saturation_workspace(workspace)
+
+    monkeypatch.setattr(saturation, "_PHYSICAL_BUCKET_COUNT", 2)
+    monkeypatch.setattr(saturation, "_PHYSICAL_FILES_PER_BUCKET", 1)
+    monkeypatch.setattr(saturation, "_EXACT_PHYSICAL_FILES", 2)
+    candidate_digest = "a" * 64
+    inventory = {
+        "candidate": {
+            "inventory_digest": saturation._digest(
+                {"kind": "saturation-inventory", "candidate": candidate_digest}
+            )
+        }
+    }
+    aggregates = [
+        {
+            "bucket_id": f"bucket-{index:03d}",
+            "relative_prefix": f"product/bucket-{index:03d}/",
+            "file_count": 1,
+            "total_bytes": 1,
+            "identity_digest": f"{index + 1:064x}",
+            "first_path": f"product/bucket-{index:03d}/record-{index:06d}.txt",
+            "last_path": f"product/bucket-{index:03d}/record-{index:06d}.txt",
+        }
+        for index in range(2)
+    ]
+    monkeypatch.setattr(
+        saturation,
+        "_physical_bucket_aggregates",
+        lambda _workspace, _inventory, *, files: aggregates,
+    )
+
+    commit_observations: list[dict[str, object]] = []
+    with ProminService(workspace) as runtime:
+        saturation._ensure_semantic_corpus(
+            runtime,
+            candidate_digest=candidate_digest,
+            commit_observations=commit_observations,
+        )
+        baseline_observations = len(commit_observations)
+        original_event_store = runtime._event_store
+        event_store_phase_states: list[bool] = []
+
+        def tracked_event_store(context: object, **kwargs: object):
+            phase = runtime._active_verified_commit_phase
+            event_store_phase_states.append(phase is not None and not phase._closed)
+            return original_event_store(context, **kwargs)
+
+        monkeypatch.setattr(runtime, "_event_store", tracked_event_store)
+        created = saturation._ensure_physical_bucket_controls(
+            runtime,
+            workspace,
+            inventory,
+            candidate_digest=candidate_digest,
+            commit_observations=commit_observations,
+            files=2,
+        )
+
+        assert created["reused"] is False
+        assert created["semantic_control_record_count"] == 2
+        assert len(commit_observations) == baseline_observations + 2
+        assert event_store_phase_states
+        assert not any(event_store_phase_states)
+
+        reused = saturation._ensure_physical_bucket_controls(
+            runtime,
+            workspace,
+            inventory,
+            candidate_digest=candidate_digest,
+            commit_observations=commit_observations,
+            files=2,
+        )
+
+        assert reused["reused"] is True
+        assert len(commit_observations) == baseline_observations + 2

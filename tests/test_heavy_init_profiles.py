@@ -31,8 +31,15 @@ def test_default_experience_is_minimal_one_click_without_language_inference() ->
     assert result["weak_model_semantic_decisions"] is False
     assert result["model_inference_used"] is False
     assert result["host_probe_performed"] is False
+    assert result["profile"]["effective"]["agent_slots"] == 1
+    assert result["profile"]["effective"]["canonical_build_owners"] == 1
+    assert result["profile"]["effective"]["provider_strategy"] == "reuse-preferred"
     assert result["status"] == "CONFIGURED_PENDING_HOST_OBSERVATION"
+    assert result["authority_granted"] is False
+    assert result["pass_credit"] is False
     assert result["acceptance_pass"] is False
+    assert result["product_acceptance_pass"] is False
+    assert result["release_approved"] is False
 
 
 def test_minimal_one_click_is_deterministic_for_every_generic_language() -> None:

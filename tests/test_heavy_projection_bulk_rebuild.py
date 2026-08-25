@@ -225,6 +225,30 @@ class _CrashAfterBulkInventory(Projection):
         raise ProjectionError("simulated bulk rebuild interruption")
 
 
+class _InventoryBatchProbeProjection(Projection):
+    """Record real rebuild flush sizes without changing projection behavior."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.inventory_flush_sizes: list[int] = []
+
+    def _flush_entity_rebuild_rows(
+        self,
+        connection: sqlite3.Connection,
+        rows: tuple[tuple[Any, ...], ...],
+        *,
+        replace_event_state: bool,
+        operational: bool,
+    ) -> None:
+        self.inventory_flush_sizes.append(len(rows))
+        super()._flush_entity_rebuild_rows(
+            connection,
+            rows,
+            replace_event_state=replace_event_state,
+            operational=operational,
+        )
+
+
 def _write_inventory(root: Path, count: int) -> tuple[VerifiedInventoryInput, list[str]]:
     stream_path = root / f"inventory-{count}.jsonl"
     stream_digest = hashlib.sha256()
@@ -586,6 +610,63 @@ class HeavyProjectionBulkRebuildTests(unittest.TestCase):
         self.assertEqual(100_000 + 1 + 4 + exact_tasks, 101_604)
         self.assertEqual(exact_relations, 198_999)
         print("projection_bulk_rebuild_measurements=" + json.dumps(measurements, sort_keys=True))
+
+    def test_persisted_inventory_rebuild_flushes_bounded_pages(self) -> None:
+        """A physical inventory stream is never retained as one semantic-row batch."""
+
+        count = 2_049
+        inventory, _artifact_ids = _write_inventory(self.root, count)
+        event_store = _SyntheticEventStore(self.fixture.event_policy, [], 0)
+        projection = self._projection(_InventoryBatchProbeProjection, "bounded.sqlite")
+
+        self.assertIsNone(inventory.entries)
+        self.assertIsNotNone(inventory.stream_path)
+        result = projection.rebuild(event_store, inventory=inventory)  # type: ignore[arg-type]
+
+        self.assertEqual(result["inventory_entries"], count)
+        self.assertEqual(result["inventory_proxies"], count)
+        self.assertEqual(result["entity_count"], count + 1)
+        self.assertGreaterEqual(len(projection.inventory_flush_sizes), 5)
+        self.assertLessEqual(max(projection.inventory_flush_sizes), projection_module._BULK_REBUILD_BATCH_ROWS)
+        self.assertLess(max(projection.inventory_flush_sizes), count)
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM entities WHERE entity_type='Artifact'"
+                ).fetchone()[0],
+                count,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM entities WHERE entity_type='RawFile'"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_noncompact_projection_rejects_forged_physical_inventory_rows(self) -> None:
+        """A non-compact stream projection cannot gain a physical inventory index post-build."""
+
+        inventory, _artifact_ids = _write_inventory(self.root, 2)
+        event_store = _SyntheticEventStore(self.fixture.event_policy, [], 0)
+        projection = self._projection(Projection, "noncompact-forge.sqlite")
+        rebuilt = projection.rebuild(event_store, inventory=inventory)
+        self.assertEqual(rebuilt["inventory_storage_mode"], "semantic-artifacts-v1")
+
+        with closing(sqlite3.connect(projection.db_path)) as connection:
+            with connection:
+                connection.execute(
+                    "INSERT INTO inventory_records(id,path,digest,size,bucket) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        "artifact:file:forged-noncompact",
+                        "product/forged-noncompact.txt",
+                        "f" * 64,
+                        1,
+                        0,
+                    ),
+                )
+        with self.assertRaisesRegex(ProjectionError, "non-compact inventory has physical inventory rows"):
+            projection.status()
 
     def test_bulk_rebuild_invalidates_continuations_and_preserves_last_durable_db_on_failure(self) -> None:
         count = 1_024

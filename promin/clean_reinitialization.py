@@ -230,6 +230,14 @@ class CleanReinitializationResult:
             ),
             "quarantine_performed": self.quarantine_root is not None,
             "published_result_present": self.publication is not None,
+            "recovery_status": (
+                "PENDING_OWNER_APPLY"
+                if self.state is CleanReinitializationState.PENDING
+                else "PUBLISHED_CANDIDATE"
+            ),
+            "diagnostic_only": True,
+            "no_pass_credit": True,
+            "owner_confirmation_required": self.state is CleanReinitializationState.PENDING,
             "state_migration_supported": False,
             "previous_progress_replay_supported": False,
             "previous_progress_imported": False,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import sys
 import unicodedata
@@ -246,7 +247,9 @@ def _require_evidence(
         or not isinstance(payload["metrics"], dict)
     ):
         raise ConformanceError(f"{check_id} evidence payload is not an exact pass observation")
-    _validate_evidence_metrics(check_id, payload["metrics"], bundle=bundle)
+    _validate_evidence_metrics(
+        check_id, payload["metrics"], bundle=bundle, context=context
+    )
     try:
         reference = store.artifact_reference(artifact["artifact_id"])
         resolved_artifact = store.require_creditable(
@@ -282,12 +285,15 @@ def _validate_evidence_metrics(
     metrics: Mapping[str, Any],
     *,
     bundle: "ContractBundle",
+    context: Mapping[str, Any] | None = None,
 ) -> None:
     if check_id in {
-        "physical-100k-one-artifact-proxy-per-file",
+        "physical-100k-exact-bucketed-inventory",
         "profile-bound-physical-100k-performance",
     }:
-        _validate_physical_scale_result(metrics, bundle=bundle, check_id=check_id)
+        _validate_physical_scale_result(
+            metrics, bundle=bundle, check_id=check_id, context=context
+        )
     elif check_id == "rollback-and-recutover-equivalence":
         if (
             not metrics.get("rollback_executed")
@@ -353,9 +359,566 @@ def _required_nonnegative_number(
     return float(selected)
 
 
-def _validate_physical_scale_result(
-    result: Mapping[str, Any], *, bundle: "ContractBundle", check_id: str
+def _require_digest(value: Mapping[str, Any], key: str, *, owner: str) -> str:
+    selected = value.get(key)
+    if not isinstance(selected, str) or _DIGEST.fullmatch(selected) is None:
+        raise ConformanceError(f"{owner} lacks a canonical SHA-256 digest: {key}")
+    return selected
+
+
+def _validate_physical_raw_evidence(
+    result: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any],
+    check_id: str,
 ) -> None:
+    """Bind scale metrics to the emitted raw stream and bucket commitments."""
+
+    source_path = context.get("physical_100k_result_path")
+    evidence_root = context.get("standard_release_evidence_root")
+    supplied_candidate = context.get("standard_release_candidate_binding")
+    if not isinstance(supplied_candidate, Mapping):
+        raise ConformanceError(f"{check_id} lacks a StandardReleaseCandidateBinding")
+    try:
+        from .evidence import load_external_json_stable, validate_standard_release_candidate_binding
+
+        validated_candidate = validate_standard_release_candidate_binding(
+            supplied_candidate
+        )
+    except Exception as exc:
+        raise ConformanceError(f"{check_id} Candidate binding is not Core-valid") from exc
+    candidate_digest = validated_candidate["candidate_binding_digest"]
+    expected_context_candidate = context.get("candidate_digest")
+    if expected_context_candidate is not None and expected_context_candidate != candidate_digest:
+        raise ConformanceError(f"{check_id} context binds a different Candidate")
+    if source_path is None or evidence_root is None:
+        raise ConformanceError(f"{check_id} lacks supplied raw physical evidence context")
+    manifest = result.get("raw_artifact_manifest")
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest)
+        != {
+            "record_type",
+            "path_scope",
+            "evidence_class",
+            "product_acceptance_credit",
+            "artifacts",
+            "artifact_count",
+            "inventory_stream_digest",
+            "inventory_identity_digest",
+            "manifest_digest",
+        }
+        or manifest.get("record_type") != "SaturationRawArtifactManifest"
+        or manifest.get("path_scope") != "saturation-result-directory"
+        or manifest.get("evidence_class") != "harness_generated"
+        or manifest.get("product_acceptance_credit") is not False
+    ):
+        raise ConformanceError(f"{check_id} lacks an exact raw physical evidence manifest")
+    _require_digest(manifest, "inventory_stream_digest", owner=check_id)
+    _require_digest(manifest, "inventory_identity_digest", owner=check_id)
+    if result.get("raw_artifact_manifest_digest") != manifest["manifest_digest"]:
+        raise ConformanceError(f"{check_id} raw physical manifest binding drifted")
+    inventory = result.get("inventory")
+    physical = result.get("physical")
+    if not isinstance(inventory, Mapping) or not isinstance(physical, Mapping):
+        raise ConformanceError(f"{check_id} physical sections are absent")
+    artifact_binding = result.get("artifact_binding")
+    candidate_binding_digest = result.get("candidate_binding_digest")
+    embedded_candidate = (
+        artifact_binding.get("standard_candidate_binding")
+        if isinstance(artifact_binding, Mapping)
+        else None
+    )
+    if (
+        not isinstance(artifact_binding, Mapping)
+        or not isinstance(candidate_binding_digest, str)
+        or _DIGEST.fullmatch(candidate_binding_digest) is None
+        or candidate_binding_digest != candidate_digest
+        or artifact_binding.get("candidate_binding_digest") != candidate_binding_digest
+        or not isinstance(embedded_candidate, Mapping)
+    ):
+        raise ConformanceError(f"{check_id} physical evidence is not Candidate-bound")
+    try:
+        validate_standard_release_candidate_binding(
+            embedded_candidate, expected=validated_candidate
+        )
+    except Exception as exc:
+        raise ConformanceError(f"{check_id} embedded Candidate binding differs") from exc
+    if inventory.get("candidate_digest") != candidate_digest:
+        raise ConformanceError(f"{check_id} physical inventory binds a different Candidate")
+    manifest_identity = {
+        key: selected for key, selected in manifest.items() if key != "manifest_digest"
+    }
+    _require_digest(manifest, "manifest_digest", owner=check_id)
+    if digest_value(manifest_identity) != manifest["manifest_digest"]:
+        raise ConformanceError(f"{check_id} raw physical manifest digest cannot be recomputed")
+
+    try:
+        root = Path(evidence_root)
+        source = Path(source_path)
+        source_record = load_external_json_stable(source, root=root).value
+    except Exception as exc:
+        raise ConformanceError(f"{check_id} raw physical result is not safely bound") from exc
+    if not isinstance(source_record, Mapping) or dict(source_record) != dict(result):
+        raise ConformanceError(f"{check_id} source/result content binding drifted")
+    source_directory = source.absolute().parent
+
+    expected_layout = {
+        "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson", False),
+        "physical-relation-evidence": (
+            "raw/physical-relation-evidence.jsonl",
+            "application/x-ndjson",
+            False,
+        ),
+        "query-results": ("raw/query-results.jsonl", "application/x-ndjson", False),
+        "process-samples": ("raw/process-samples.json", "application/json", False),
+        "continuation-state-manifest": (
+            "raw/continuation-state-manifest.jsonl",
+            "application/x-ndjson",
+            True,
+        ),
+        "phase-log": ("raw/phase-log.jsonl", "application/x-ndjson", False),
+        "operation-metrics": ("raw/operation-metrics.json", "application/json", False),
+    }
+    artifacts = manifest.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or manifest.get("artifact_count") != len(expected_layout)
+        or len(artifacts) != len(expected_layout)
+    ):
+        raise ConformanceError(f"{check_id} raw physical artifact set is incomplete")
+    by_role: dict[str, Mapping[str, Any]] = {}
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise ConformanceError(f"{check_id} raw physical artifact binding is malformed")
+        if set(artifact) != {"role", "path", "media_type", "sha256", "bytes", "records"}:
+            raise ConformanceError(f"{check_id} raw physical artifact binding is not exact")
+        role = artifact.get("role")
+        if role not in expected_layout or role in by_role:
+            raise ConformanceError(f"{check_id} raw physical artifact roles are not exact")
+        expected_path, expected_media_type, permits_empty = expected_layout[role]
+        if (
+            artifact.get("path") != expected_path
+            or artifact.get("media_type") != expected_media_type
+        ):
+            raise ConformanceError(f"{check_id} raw physical artifact path is not canonical")
+        _require_digest(artifact, "sha256", owner=check_id)
+        size = artifact.get("bytes")
+        records = artifact.get("records")
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not isinstance(records, int)
+            or isinstance(records, bool)
+            or size < 0
+            or records < 0
+            or (
+                (
+                    permits_empty
+                    and not (
+                        (size == 0 and records == 0)
+                        or (size > 0 and records > 0)
+                    )
+                )
+                or (not permits_empty and not (size > 0 and records > 0))
+            )
+        ):
+            raise ConformanceError(f"{check_id} raw physical artifact cardinality is invalid")
+        by_role[role] = artifact
+    if set(by_role) != set(expected_layout):
+        raise ConformanceError(f"{check_id} raw physical artifact roles are incomplete")
+
+    resolved_files: dict[str, bytes] = {}
+    for role, artifact in by_role.items():
+        relative = artifact["path"]
+        try:
+            selected = source_directory.joinpath(*relative.split("/"))
+            from .evidence import read_external_bytes_stable
+
+            stable = read_external_bytes_stable(
+                selected,
+                root=root,
+                max_bytes=(
+                    256 * 1024 * 1024
+                    if role in {"inventory-stream", "physical-relation-evidence"}
+                    else 128 * 1024 * 1024
+                ),
+            )
+        except Exception as exc:
+            raise ConformanceError(f"{check_id} raw physical artifact is not safely bound") from exc
+        if stable.size_bytes != artifact["bytes"] or stable.sha256 != artifact["sha256"]:
+            raise ConformanceError(f"{check_id} raw physical artifact bytes drifted")
+        resolved_files[role] = stable.payload
+
+    inventory_artifact = by_role["inventory-stream"]
+    inventory_payload = resolved_files["inventory-stream"]
+    relation_artifact = by_role["physical-relation-evidence"]
+    relation_payload = resolved_files["physical-relation-evidence"]
+    if (
+        inventory_artifact["sha256"] != manifest["inventory_stream_digest"]
+        or inventory_artifact["bytes"] != inventory.get("stream_bytes")
+    ):
+        raise ConformanceError(f"{check_id} inventory stream digest is not bound")
+
+    inventory_identity = hashlib.sha256()
+    bucket_count = [0] * 100
+    bucket_bytes = [0] * 100
+    bucket_hashes = [hashlib.sha256() for _ in range(100)]
+    first_paths: list[str | None] = [None] * 100
+    last_paths: list[str | None] = [None] * 100
+    previous_path: str | None = None
+    row_count = 0
+    inventory_lines = inventory_payload.splitlines(keepends=True)
+    for line_number, line in enumerate(inventory_lines, 1):
+        if not line.endswith(b"\n") or line == b"\n":
+            raise ConformanceError(f"{check_id} inventory stream has a partial row")
+        try:
+            row = parse_json_strict(line)
+        except Exception as exc:
+            raise ConformanceError(f"{check_id} inventory stream row is not strict JSON") from exc
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"path", "digest", "size", "search_text"}
+            or canonical_bytes(dict(row)) != line
+            or not isinstance(row.get("path"), str)
+            or not row["path"]
+            or (previous_path is not None and row["path"] <= previous_path)
+            or not isinstance(row.get("digest"), str)
+            or _DIGEST.fullmatch(row["digest"]) is None
+            or not isinstance(row.get("size"), int)
+            or isinstance(row["size"], bool)
+            or row["size"] < 0
+            or not isinstance(row.get("search_text"), str)
+            or len(row["search_text"].encode("utf-8")) > 4096
+        ):
+            raise ConformanceError(f"{check_id} inventory row {line_number} is invalid")
+        previous_path = row["path"]
+        identity = {key: row[key] for key in ("path", "digest", "size")}
+        identity_bytes = canonical_bytes(identity)
+        inventory_identity.update(identity_bytes)
+        match = re.fullmatch(r"product/bucket-(\d{3})/record-(\d{6})\.txt", row["path"])
+        if match is None:
+            raise ConformanceError(f"{check_id} inventory row is outside the bucket recipe")
+        bucket = int(match.group(1))
+        record = int(match.group(2))
+        if not 0 <= bucket < 100 or record // 1000 != bucket:
+            raise ConformanceError(f"{check_id} inventory row has an invalid bucket identity")
+        bucket_count[bucket] += 1
+        bucket_bytes[bucket] += row["size"]
+        bucket_hashes[bucket].update(identity_bytes)
+        first_paths[bucket] = first_paths[bucket] or row["path"]
+        last_paths[bucket] = row["path"]
+        row_count += 1
+    if row_count != 100000 or inventory_artifact["records"] != row_count:
+        raise ConformanceError(f"{check_id} inventory stream cardinality is not exact")
+    if inventory_identity.hexdigest() != manifest["inventory_identity_digest"]:
+        raise ConformanceError(f"{check_id} inventory identity digest cannot be recomputed")
+
+    # The physical relation stream is an evidence-only canonical stream.  It
+    # repeats the 100000 streamed inventory identities to reach exactly the
+    # Core relation-evidence count; it must never become semantic Relation
+    # records.  Parse one object at a time and bind every row to the exact
+    # inventory row, Candidate, and Activation digests.
+    relation_summary = result.get("physical_relation_evidence")
+    nested_relation_summary = physical.get("physical_relation_evidence")
+    expected_relation_summary_fields = {
+        "record_type",
+        "evidence_class",
+        "product_acceptance_credit",
+        "relation_count",
+        "relation_id_first",
+        "relation_id_last",
+        "physical_target_cardinality",
+        "inventory_identity_digest",
+        "candidate_digest",
+        "activation_digest",
+        "bytes",
+        "sha256",
+    }
+    if (
+        not isinstance(relation_summary, Mapping)
+        or set(relation_summary) != expected_relation_summary_fields
+        or not isinstance(nested_relation_summary, Mapping)
+        or dict(nested_relation_summary) != dict(relation_summary)
+        or relation_summary.get("record_type") != "PhysicalRelationEvidenceSummary"
+        or relation_summary.get("evidence_class") != "harness_generated_physical"
+        or relation_summary.get("product_acceptance_credit") is not False
+        or relation_summary.get("relation_count") != 198999
+        or relation_summary.get("relation_id_first") != "physical-relation:000000"
+        or relation_summary.get("relation_id_last") != "physical-relation:198998"
+        or relation_summary.get("physical_target_cardinality") != 100000
+        or relation_summary.get("bytes") != relation_artifact["bytes"]
+        or relation_summary.get("sha256") != relation_artifact["sha256"]
+    ):
+        raise ConformanceError(f"{check_id} physical relation evidence summary is not exact")
+    for key in (
+        "inventory_identity_digest",
+        "candidate_digest",
+        "activation_digest",
+        "sha256",
+    ):
+        _require_digest(relation_summary, key, owner=check_id)
+    runtime_binding = result.get("runtime_binding")
+    activation_digest = (
+        runtime_binding.get("activation_digest")
+        if isinstance(runtime_binding, Mapping)
+        else None
+    )
+    if not isinstance(activation_digest, str) or _DIGEST.fullmatch(activation_digest) is None:
+        raise ConformanceError(f"{check_id} lacks a canonical Activation digest")
+    supplied_activation = context.get("activation_digest")
+    if supplied_activation is not None and supplied_activation != activation_digest:
+        raise ConformanceError(f"{check_id} physical evidence binds a different Activation")
+    if (
+        relation_summary.get("inventory_identity_digest")
+        != manifest["inventory_identity_digest"]
+        or relation_summary.get("candidate_digest") != candidate_digest
+        or relation_summary.get("activation_digest") != activation_digest
+    ):
+        raise ConformanceError(f"{check_id} physical relation evidence identity drifted")
+    if relation_artifact["records"] != 198999:
+        raise ConformanceError(f"{check_id} physical relation evidence cardinality is not exact")
+
+    try:
+        relation_text = relation_payload.decode("utf-8", errors="strict")
+        decoder = json.JSONDecoder()
+    except Exception as exc:
+        raise ConformanceError(f"{check_id} physical relation evidence is not UTF-8 JSON") from exc
+    relation_offset = 0
+    relation_index = 0
+    while relation_offset < len(relation_text):
+        try:
+            relation, relation_end = decoder.raw_decode(relation_text, relation_offset)
+            encoded = relation_text[relation_offset:relation_end].encode("utf-8")
+            relation = parse_json_strict(encoded)
+        except Exception as exc:
+            raise ConformanceError(
+                f"{check_id} physical relation evidence row {relation_index} is not canonical JSON"
+            ) from exc
+        if not isinstance(relation, Mapping) or set(relation) != {
+            "record_type",
+            "relation_id",
+            "kind",
+            "source_type",
+            "source_id",
+            "target_type",
+            "target_id",
+            "target_path",
+            "target_digest",
+            "target_size",
+            "bucket",
+            "activation_digest",
+            "candidate_digest",
+            "inventory_identity_digest",
+            "physical_evidence",
+            "semantic_record",
+        } or canonical_bytes(dict(relation)) != encoded:
+            raise ConformanceError(f"{check_id} physical relation evidence row shape is not exact")
+        inventory_line = inventory_lines[relation_index % 100000]
+        try:
+            inventory_row = parse_json_strict(inventory_line)
+        except Exception as exc:
+            raise ConformanceError(f"{check_id} inventory identity row cannot be rebound") from exc
+        if not isinstance(inventory_row, Mapping):
+            raise ConformanceError(f"{check_id} inventory identity row is not a mapping")
+        match = re.fullmatch(
+            r"product/bucket-(\d{3})/record-(\d{6})\.txt", inventory_row["path"]
+        )
+        if match is None:
+            raise ConformanceError(f"{check_id} relation target path is outside inventory contour")
+        bucket = int(match.group(1))
+        expected_relation = {
+            "record_type": "PhysicalRelationEvidence",
+            "relation_id": f"physical-relation:{relation_index:06d}",
+            "kind": "READS",
+            "source_type": "PhysicalBucket",
+            "source_id": f"bucket-{bucket:03d}",
+            "target_type": "PhysicalInventoryRecord",
+            "target_id": "artifact:file:" + hashlib.sha256(
+                inventory_row["path"].encode("utf-8")
+            ).hexdigest()[:48],
+            "target_path": inventory_row["path"],
+            "target_digest": inventory_row["digest"],
+            "target_size": inventory_row["size"],
+            "bucket": bucket,
+            "activation_digest": activation_digest,
+            "candidate_digest": candidate_digest,
+            "inventory_identity_digest": manifest["inventory_identity_digest"],
+            "physical_evidence": True,
+            "semantic_record": False,
+        }
+        if dict(relation) != expected_relation:
+            raise ConformanceError(
+                f"{check_id} physical relation evidence row {relation_index} is not inventory-bound"
+            )
+        relation_offset = relation_end
+        relation_index += 1
+        if relation_index > 198999:
+            raise ConformanceError(f"{check_id} physical relation evidence has extra rows")
+    if relation_offset != len(relation_text) or relation_index != 198999:
+        raise ConformanceError(f"{check_id} physical relation evidence count cannot be recomputed")
+    if hashlib.sha256(relation_payload).hexdigest() != relation_summary["sha256"]:
+        raise ConformanceError(f"{check_id} physical relation evidence digest cannot be recomputed")
+
+    aggregates = []
+    for index in range(100):
+        if bucket_count[index] != 1000:
+            raise ConformanceError(f"{check_id} physical bucket cardinality is not exact")
+        aggregates.append(
+            {
+                "bucket_id": f"bucket-{index:03d}",
+                "relative_prefix": f"product/bucket-{index:03d}/",
+                "file_count": bucket_count[index],
+                "total_bytes": bucket_bytes[index],
+                "identity_digest": bucket_hashes[index].hexdigest(),
+                "first_path": first_paths[index],
+                "last_path": last_paths[index],
+            }
+        )
+    corpus = physical.get("explicit_semantic_corpus")
+    if not isinstance(corpus, Mapping):
+        raise ConformanceError(f"{check_id} semantic corpus is absent")
+    bucket_manifest = corpus.get("physical_bucket_control")
+    if (
+        not isinstance(bucket_manifest, Mapping)
+        or bucket_manifest.get("inventory_identity_digest")
+        != manifest["inventory_identity_digest"]
+    ):
+        raise ConformanceError(f"{check_id} bucket manifest is not inventory-bound")
+    if digest_value(aggregates) != bucket_manifest["aggregate_digest"]:
+        raise ConformanceError(f"{check_id} bucket aggregate digest cannot be recomputed")
+
+
+def _validate_bounded_physical_control(
+    corpus: Mapping[str, Any],
+    physical: Mapping[str, Any],
+    inventory: Mapping[str, Any],
+    *,
+    file_count: int,
+    semantic_task_count: int,
+    semantic_relation_count: int,
+    check_id: str,
+) -> None:
+    """Validate aggregate physical evidence without materializing semantic rows.
+
+    The raw inventory stream and its bucket aggregates are physical evidence.
+    They must not be represented as one semantic Artifact or Relation per raw
+    file/link.  Only the explicit search fixture Relations and bounded bucket
+    control Tasks belong to semantic state.
+    """
+
+    bucket = _required_mapping(corpus, "physical_bucket_control", owner=check_id)
+    if set(bucket) != {
+        "record_type",
+        "generation",
+        "candidate_digest",
+        "inventory_identity_digest",
+        "bucket_count",
+        "files_per_bucket",
+        "file_count",
+        "aggregate_digest",
+        "cardinality",
+        "semantic_control_record_count",
+        "semantic_control_envelope_count",
+        "semantic_control_record_limit",
+    }:
+        raise ConformanceError(f"{check_id} physical bucket control shape is not exact")
+    if (
+        bucket.get("record_type") != "PhysicalBucketControlManifest"
+        or bucket.get("generation") != "streamed-inventory-aggregate"
+        or bucket.get("candidate_digest") != inventory.get("candidate_digest")
+    ):
+        raise ConformanceError(f"{check_id} physical bucket control identity is not bound")
+    _require_digest(bucket, "candidate_digest", owner=check_id)
+    _require_digest(bucket, "inventory_identity_digest", owner=check_id)
+    _require_digest(bucket, "aggregate_digest", owner=check_id)
+
+    _required_exact_int(bucket, "bucket_count", 100, owner=check_id)
+    bucket_count = 100
+    _required_exact_int(bucket, "files_per_bucket", 1000, owner=check_id)
+    _required_exact_int(bucket, "file_count", file_count, owner=check_id)
+    cardinality = _required_mapping(bucket, "cardinality", owner=check_id)
+    if (
+        cardinality.get("minimum") != 1000
+        or cardinality.get("maximum") != 1000
+        or cardinality.get("distinct") != 1
+    ):
+        raise ConformanceError(f"{check_id} physical bucket cardinality is not exact")
+
+    _required_exact_int(
+        bucket, "semantic_control_record_count", bucket_count, owner=check_id
+    )
+    _required_exact_int(
+        bucket, "semantic_control_envelope_count", bucket_count, owner=check_id
+    )
+    _required_exact_int(
+        bucket, "semantic_control_record_limit", 256, owner=check_id
+    )
+
+    # Inventory cardinality and byte evidence are mandatory even though the
+    # stream itself is validated by the raw-evidence route.
+    _required_exact_int(inventory, "entries", file_count, owner=check_id)
+    stream_bytes = _required_nonnegative_int(
+        inventory, "stream_bytes", owner=check_id
+    )
+    if stream_bytes <= 0:
+        raise ConformanceError(f"{check_id} inventory stream has no physical bytes")
+    _require_digest(inventory, "candidate_digest", owner=check_id)
+
+    expected_task_count = semantic_task_count + bucket_count
+    if corpus.get("task_count") != expected_task_count:
+        raise ConformanceError(f"{check_id} semantic task state is not bucket-bounded")
+    if corpus.get("relation_count") != semantic_relation_count:
+        raise ConformanceError(f"{check_id} semantic relation state is not fixture-bounded")
+
+    # Four fixture Grants plus one Candidate are the fixed control envelope.
+    expected_control_records = corpus["task_count"] + semantic_relation_count + 5
+    expected_control_envelopes = corpus["task_count"] + 5
+    _required_exact_int(
+        physical,
+        "semantic_control_records",
+        expected_control_records,
+        owner=check_id,
+    )
+    _required_exact_int(
+        physical,
+        "semantic_control_envelopes",
+        expected_control_envelopes,
+        owner=check_id,
+    )
+    _required_exact_int(
+        physical, "semantic_control_record_limit", 256, owner=check_id
+    )
+    if (
+        expected_control_records > 256
+        or expected_control_envelopes > 256
+        or bucket_count > 256
+    ):
+        raise ConformanceError(f"{check_id} semantic control state exceeded 256 records")
+
+
+def _validate_physical_scale_result(
+    result: Mapping[str, Any],
+    *,
+    bundle: "ContractBundle",
+    check_id: str,
+    context: Mapping[str, Any] | None = None,
+) -> None:
+    if "status" in result and result.get("status") != "fail":
+        raise ConformanceError(f"{check_id} cannot promote a physical saturation result")
+    for field in (
+        "pass_credit",
+        "acceptance_pass",
+        "product_acceptance_pass",
+        "public_release_approved",
+    ):
+        if field in result and result.get(field) is not False:
+            raise ConformanceError(f"{check_id} cannot promote {field}")
+    if (
+        "product_public_approval" in result
+        and result.get("product_public_approval") != "not_approved"
+    ):
+        raise ConformanceError(f"{check_id} cannot promote product approval")
     conformance = _required_mapping(
         bundle.core, "conformance.json", owner="Core bundle"
     )
@@ -426,6 +989,10 @@ def _validate_physical_scale_result(
     ):
         raise ConformanceError("Core reference scale counts are internally inconsistent")
 
+    if context is None:
+        raise ConformanceError(f"{check_id} lacks supplied raw physical evidence context")
+    _validate_physical_raw_evidence(result, context=context, check_id=check_id)
+
     depths = semantic_reference.get("depths")
     if (
         not isinstance(depths, list)
@@ -439,9 +1006,29 @@ def _validate_physical_scale_result(
     ):
         raise ConformanceError("Core reference depth corpus is internally inconsistent")
 
-    proxies_per_file = _required_nonnegative_int(
+    semantic_artifacts_per_file = _required_nonnegative_int(
         inventory_contract,
-        "derived_artifact_proxies_per_raw_file",
+        "semantic_artifacts_per_raw_file",
+        owner="Core inventory scale contract",
+    )
+    physical_inventory_records_per_file = _required_nonnegative_int(
+        inventory_contract,
+        "physical_inventory_records_per_raw_file",
+        owner="Core inventory scale contract",
+    )
+    physical_bucket_count = _required_nonnegative_int(
+        inventory_contract,
+        "physical_bucket_count",
+        owner="Core inventory scale contract",
+    )
+    physical_files_per_bucket = _required_nonnegative_int(
+        inventory_contract,
+        "physical_files_per_bucket",
+        owner="Core inventory scale contract",
+    )
+    semantic_control_record_limit = _required_nonnegative_int(
+        inventory_contract,
+        "semantic_control_record_limit",
         owner="Core inventory scale contract",
     )
     synthetic_tasks_per_file = _required_nonnegative_int(
@@ -486,7 +1073,11 @@ def _validate_physical_scale_result(
         reference, "synthetic_task_ratio", owner="Core reference benchmarks"
     )
     if (
-        proxies_per_file != expected_proxy_ratio
+        physical_inventory_records_per_file != expected_proxy_ratio
+        or semantic_artifacts_per_file != 0
+        or physical_bucket_count != 100
+        or physical_files_per_bucket != 1000
+        or semantic_control_record_limit != 256
         or synthetic_tasks_per_file != expected_synthetic_task_ratio
         or inventory_passes > inventory_passes_max
         or reference.get("rebuild_product_passes") != rebuild_product_passes
@@ -502,16 +1093,28 @@ def _validate_physical_scale_result(
     resources = _required_mapping(result, "resources", owner=check_id)
     performance = _required_mapping(result, "performance", owner=check_id)
 
-    expected_proxy_count = file_count * proxies_per_file
     expected_synthetic_task_count = file_count * synthetic_tasks_per_file
     expected_inventory_relation_count = file_count * synthetic_relations_per_file
     _required_exact_int(physical, "files", file_count, owner=check_id)
     _required_exact_int(physical, "raw_files", file_count, owner=check_id)
+    # Raw files are physical evidence, not one semantic Artifact per file.
     _required_exact_int(
-        physical, "semantic_proxies", expected_proxy_count, owner=check_id
+        physical,
+        "semantic_proxies",
+        file_count * semantic_artifacts_per_file,
+        owner=check_id,
     )
     _required_exact_int(
-        physical, "raw_file_proxies", expected_proxy_count, owner=check_id
+        physical,
+        "raw_file_proxies",
+        file_count * physical_inventory_records_per_file,
+        owner=check_id,
+    )
+    _required_exact_int(
+        physical,
+        "physical_artifact_evidence",
+        file_count * physical_inventory_records_per_file,
+        owner=check_id,
     )
     _required_exact_int(
         physical, "synthetic_tasks", expected_synthetic_task_count, owner=check_id
@@ -525,7 +1128,16 @@ def _validate_physical_scale_result(
         expected_inventory_relation_count,
         owner=check_id,
     )
-    _required_exact_int(physical, "relations", total_relation_count, owner=check_id)
+    # The semantic relation count is deliberately separate from exact physical
+    # relation evidence.  The latter is a streamed/bucketed count, not a list
+    # of individual Relation records.
+    _required_exact_int(physical, "relations", semantic_relation_count, owner=check_id)
+    _required_exact_int(
+        physical,
+        "physical_relation_evidence_count",
+        total_relation_count,
+        owner=check_id,
+    )
     if (
         physical.get("raw_file_proxy_ratio") != expected_proxy_ratio
         or physical.get("synthetic_task_ratio") != expected_synthetic_task_ratio
@@ -535,23 +1147,21 @@ def _validate_physical_scale_result(
         physical, "explicit_semantic_corpus", owner=check_id
     )
     depths = corpus.get("depths")
-    physical_relations = _required_mapping(
-        corpus, "physical_relation_fixture", owner=check_id
-    )
     if (
         depths != semantic_reference["depths"]
-        or corpus.get("task_count") != semantic_task_count + physical_task_count
-        or corpus.get("relation_count") != total_relation_count
         or corpus.get("harness_generated") is not True
         or corpus.get("product_acceptance_credit") is not False
-        or physical_relations.get("task_count") != physical_task_count
-        or physical_relations.get("relation_count") != physical_relation_count
-        or physical_relations.get("relation_kind")
-        != physical_reference.get("relation_kind")
-        or physical_relations.get("artifact_target_coverage")
-        != physical_reference.get("artifact_target_coverage")
     ):
         raise ConformanceError(f"{check_id} semantic corpus differs from Core")
+    _validate_bounded_physical_control(
+        corpus,
+        physical,
+        inventory,
+        file_count=file_count,
+        semantic_task_count=semantic_task_count,
+        semantic_relation_count=semantic_relation_count,
+        check_id=check_id,
+    )
 
     _required_exact_int(inventory, "passes", inventory_passes, owner=check_id)
     _required_exact_int(inventory, "entries", file_count, owner=check_id)
@@ -2040,6 +2650,7 @@ def _profile_bound_physical_100k_performance(
         result,
         bundle=bundle,
         check_id="profile-bound-physical-100k-performance",
+        context=context,
     )
 
 
@@ -4145,7 +4756,7 @@ _ACCEPTANCE_DIRECT: dict[str, Check] = {
     "verified-inventory-result-provenance": _verified_inventory_result_provenance,
     "exact-six-base-command-surface": _supported_command_surface,
     "zero-dead-evidence-budget-fields": _zero_dead_evidence_budget_fields,
-    "physical-100k-one-artifact-proxy-per-file": _profile_bound_physical_100k_performance,
+    "physical-100k-exact-bucketed-inventory": _profile_bound_physical_100k_performance,
     "profile-bound-physical-100k-performance": _profile_bound_physical_100k_performance,
     "windows-linux-exact-zip-matrix": _windows_linux_exact_zip_matrix,
     "three-zero-new-saturation-iterations": _three_zero_new_saturation_iterations,
@@ -4189,7 +4800,7 @@ _ACCEPTANCE_IDS = (
     "normalization-collision-rejection", "provider-substitution-invalidates-derived-state",
     "rollback-and-recutover-equivalence", "zero-forbidden-name-occurrences",
     "zero-unowned-normative-facts", "zero-core-provider-lock-in",
-    "zero-compiled-cache-files", "physical-100k-one-artifact-proxy-per-file",
+    "zero-compiled-cache-files", "physical-100k-exact-bucketed-inventory",
     "external-standard-release-decision-exact-binding", "root-bootstrap-command-limited",
     "deterministic-activation-identity", "configuration-exact-idempotency",
     "truthful-operation-reporting", "depth-aware-seed-budget",
@@ -4277,7 +4888,7 @@ _STANDARD_RELEASE_SIGNED_MANIFEST_ACCEPTANCE = (
     "seven-distinct-role-producer-scopes",
 )
 _SIGNED_ROLE_ACCEPTANCE = (
-    "physical-100k-one-artifact-proxy-per-file",
+    "physical-100k-exact-bucketed-inventory",
     "current-interpreter-and-clean-install-modes",
     "required-no-degradation-tests-fail-closed",
     "profile-bound-physical-100k-performance",

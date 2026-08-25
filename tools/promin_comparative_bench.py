@@ -56,6 +56,7 @@ DEFAULT_MEASURED_RUNS = 3
 DEFAULT_SAMPLING_INTERVAL_MS = 5
 QUERY_TEXT = "comparative benchmark"
 _MAX_ERROR_TEXT = 1024
+FIXED_BUCKET_COUNT = len(SCENARIOS) * len(OPERATIONS) * len(TEMPERATURES) * len(DEFAULT_SIZES)
 
 
 class ComparativeBenchError(RuntimeError):
@@ -873,6 +874,16 @@ def fixed_full_scope_selected(config: BenchmarkConfig) -> bool:
     )
 
 
+def _require_fixed_execution_scope(config: BenchmarkConfig) -> None:
+    """Reject execution requests that silently shrink the 72-bucket workload."""
+
+    if not fixed_full_scope_selected(config):
+        raise ComparativeBenchError(
+            "execution requires the fixed 72-bucket scope: "
+            "scenarios=promin,markdown,empty; operations=init,update,query,docs; sizes=16,64,256"
+        )
+
+
 def _strict_result_key(result: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
     scenario = result.get("scenario")
     operation = result.get("operation")
@@ -941,6 +952,10 @@ def _base_report(config: BenchmarkConfig, *, executed: bool) -> dict[str, Any]:
             "operations": list(config.operations),
             "temperatures": list(TEMPERATURES),
             "execution_order": "sequential; no benchmark samples run concurrently",
+            # A plan may be inspected for a partial/expanded configuration,
+            # but only the exact Cartesian scope is the executable benchmark.
+            "fixed_workload": selected_full_scope,
+            "fixed_bucket_count": FIXED_BUCKET_COUNT,
         },
         "protocol": {
             "source_fixture": "Each non-empty scenario receives one deterministic README plus size Markdown notes.",
@@ -959,7 +974,14 @@ def _base_report(config: BenchmarkConfig, *, executed: bool) -> dict[str, Any]:
             "empty_routes": "empty-root create/scan baseline; it is intentionally not a feature-equivalent repository.",
             "cold_definition": "preparation worker exits; a fresh worker imports and opens state for the measured operation",
             "warm_definition": "one worker process prepares and measures repeated isolated samples",
-            "metrics": "wall time, process CPU time, sampled current RSS, lifetime RSS where available, and regular-file storage",
+            "metrics": "wall time from perf_counter_ns, process CPU time from process_time_ns, sampled current RSS, lifetime RSS where available, and regular-file storage",
+            "metric_reproducibility": {
+                "timed_region": "one prepared operation in one isolated worker process; preparation is excluded",
+                "clock_sources": {"wall": "time.perf_counter_ns", "cpu": "time.process_time_ns"},
+                "rss": "sampled at the configured interval plus before/after samples; unavailable values remain null",
+                "storage": "regular non-symlink file count and byte totals after the operation, including Markdown and .promin control bytes",
+                "ordering": "scenario, operation, temperature, size; samples sequential and never concurrent",
+            },
             "comparability_limit": "This compares defined local workflows, not equivalent products or an acceptance/performance budget.",
         },
         "environment": {
@@ -986,6 +1008,9 @@ def run_benchmark(config: BenchmarkConfig, *, fixture_root: Path) -> dict[str, A
     """Collect all configured samples sequentially and preserve every failure."""
 
     validate_config(config)
+    # Keep the in-process API subject to the same no-shrinking boundary as the
+    # CLI.  Otherwise callers could bypass the fixed 72-bucket protocol.
+    _require_fixed_execution_scope(config)
     if fixture_root.exists() and any(fixture_root.iterdir()):
         raise ComparativeBenchError("fixture_root must be empty so this tool never overwrites user data")
     fixture_root.mkdir(parents=True, exist_ok=True)
@@ -1130,17 +1155,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _emit(build_plan(config), args.output)
             return 0
         if args.fixture_root is not None:
+            _require_fixed_execution_scope(config)
             fixture_root = args.fixture_root.resolve()
             report = run_benchmark(config, fixture_root=fixture_root)
             _emit(report, args.output)
             return 0
         if args.keep_fixtures:
+            _require_fixed_execution_scope(config)
             fixture_root = Path(tempfile.mkdtemp(prefix="promin-comparative-bench-"))
             report = run_benchmark(config, fixture_root=fixture_root)
             report["execution"]["fixture_root"] = str(fixture_root)
             _emit(report, args.output)
             return 0
         with tempfile.TemporaryDirectory(prefix="promin-comparative-bench-") as temporary:
+            _require_fixed_execution_scope(config)
             report = run_benchmark(config, fixture_root=Path(temporary))
         report["execution"]["fixture_root_retained"] = False
         _emit(report, args.output)

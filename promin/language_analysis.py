@@ -1073,6 +1073,45 @@ _TOOL_RECEIPT_KEYS = frozenset(
         "reason",
     }
 )
+
+_EXECUTABLE_EVIDENCE_LABELS = (
+    "executable-sha256", "argv", "exit-code", "stdout-sha256", "stderr-sha256", "output-manifest"
+)
+
+
+def executable_output_evidence(receipt: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return labels only when a real bounded executable receipt has output.
+
+    Planning, discovery, and configured summaries intentionally return no
+    labels; they cannot be promoted to diagnostic evidence.
+    """
+
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "AVAILABLE" or receipt.get("invoked") is not True:
+        return ()
+    if not isinstance(receipt.get("exit_code"), int):
+        return ()
+    if not isinstance(receipt.get("argv"), (list, tuple)) or not receipt["argv"] or not all(isinstance(item, str) and item for item in receipt["argv"]):
+        return ()
+    digests = (receipt.get("executable_sha256"), receipt.get("stdout_sha256"), receipt.get("stderr_sha256"))
+    if any(not isinstance(value, str) or not _HEX64.fullmatch(value) for value in digests):
+        return ()
+    if receipt.get("stream_cleanup_completed") is not True:
+        return ()
+    if any(not isinstance(receipt.get(key), int) or receipt[key] < 0 or receipt[key] > 65_536 for key in ("stdout_size_bytes", "stderr_size_bytes")):
+        return ()
+    manifest = receipt.get("output_manifest")
+    if not isinstance(manifest, (list, tuple)) or len(manifest) > 4096:
+        return ()
+    total_bytes = 0
+    for entry in manifest:
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "bytes", "sha256"}:
+            return ()
+        if not isinstance(entry["path"], str) or not entry["path"] or not isinstance(entry["bytes"], int) or entry["bytes"] < 0 or not isinstance(entry["sha256"], str) or not _HEX64.fullmatch(entry["sha256"]):
+            return ()
+        total_bytes += entry["bytes"]
+        if total_bytes > 64 * 1024 * 1024:
+            return ()
+    return _EXECUTABLE_EVIDENCE_LABELS
 _TRANSFER_KEYS = frozenset(
     {
         "transfer_id",

@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -33,7 +34,13 @@ _MAX_ARGUMENT_BYTES: Final = 16 * 1024
 _MAX_SOURCE_FILES: Final = 20_000
 _MAX_SOURCE_BYTES: Final = 1024 * 1024 * 1024
 _MAX_RESULT_SNIPPET_BYTES: Final = 16 * 1024
+_MAX_TIMEOUT_SECONDS: Final = 3600
+_MAX_MEMORY_BYTES: Final = 8 * 1024 * 1024 * 1024
+_MAX_CPUS_MILLIS: Final = 16_000
+_MAX_PIDS: Final = 4096
+_MAX_TMPFS_BYTES: Final = 1024 * 1024 * 1024
 _REPARSE_POINT: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+_MODELLED_ONLY: Final = "MODELLED_ONLY"
 _CLAIMS: Final = {
     "actual_linux_host_validated": False,
     "linux_standard_validated": False,
@@ -42,6 +49,21 @@ _CLAIMS: Final = {
     "release_eligible": False,
     "pass_credit": False,
 }
+_EVIDENCE_LABELS: Final = {
+    "evidence_class": _MODELLED_ONLY,
+    "execution_scope": "docker-container-model",
+    "product_credit_eligible": False,
+}
+_ISOLATION: Final = {
+    "read_only_root_filesystem": True,
+    "network": "none",
+    "cap_drop": ["ALL"],
+    "security_opt": ["no-new-privileges"],
+    "pull_policy": "never",
+    "user": "65534:65534",
+    "tmpfs": "/tmp",
+}
+_DIGEST_RE: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class LinuxModelError(ValueError):
@@ -112,7 +134,18 @@ def _normalize_limits(value: LinuxModelLimits | Mapping[str, object]) -> dict[st
         frozenset({"timeout_seconds", "memory_bytes", "cpus_millis", "pids_limit", "tmpfs_bytes"}),
         "limits",
     )
-    return {key: _positive_int(limits[key], f"limits.{key}") for key in limits}
+    normalized = {key: _positive_int(limits[key], f"limits.{key}") for key in limits}
+    maxima = {
+        "timeout_seconds": _MAX_TIMEOUT_SECONDS,
+        "memory_bytes": _MAX_MEMORY_BYTES,
+        "cpus_millis": _MAX_CPUS_MILLIS,
+        "pids_limit": _MAX_PIDS,
+        "tmpfs_bytes": _MAX_TMPFS_BYTES,
+    }
+    for key, maximum in maxima.items():
+        if normalized[key] > maximum:
+            raise LinuxModelError(f"limits.{key} exceeds bounded maximum {maximum}")
+    return normalized
 
 
 def _normalize_image_reference(value: object) -> str:
@@ -120,6 +153,15 @@ def _normalize_image_reference(value: object) -> str:
         raise LinuxModelError("image must be a non-empty trimmed reference")
     if any(character.isspace() for character in value) or "\x00" in value:
         raise LinuxModelError("image must not contain whitespace or NUL")
+    if "@" in value:
+        if value.count("@") != 1:
+            raise LinuxModelError("image digest reference must contain one @")
+        repository, digest = value.rsplit("@", 1)
+        if not repository or _DIGEST_RE.fullmatch(digest) is None:
+            raise LinuxModelError("image digest reference must use canonical sha256 form")
+    elif _DIGEST_RE.fullmatch(value) is not None:
+        # A bare content ID is already immutable and is accepted as a lookup.
+        pass
     return value
 
 
@@ -312,18 +354,31 @@ def _normalize_image_identity(value: Mapping[str, object], reference: str) -> di
     observed_reference = raw.get("reference")
     image_id = raw.get("image_id")
     repo_digests = raw.get("repo_digests")
-    if observed_reference != reference or not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+    if (
+        observed_reference != reference
+        or not isinstance(image_id, str)
+        or _DIGEST_RE.fullmatch(image_id) is None
+    ):
         raise LinuxModelError("available image identity is incomplete")
     if isinstance(repo_digests, (str, bytes)) or not isinstance(repo_digests, Sequence):
         raise LinuxModelError("image repo digests must be a string sequence")
     normalized_digests = sorted(str(item) for item in repo_digests)
-    if any(not item or "@sha256:" not in item for item in normalized_digests):
+    if any(
+        not item
+        or item.count("@") != 1
+        or _DIGEST_RE.fullmatch(item.rsplit("@", 1)[1]) is None
+        for item in normalized_digests
+    ):
         raise LinuxModelError("image repo digests must be content-addressed")
     identity = {
         "status": "AVAILABLE",
         "reference": reference,
         "image_id": image_id,
         "repo_digests": normalized_digests,
+        # The tag/reference is lookup identity only. Docker must run this
+        # content-addressed local image ID to avoid tag retargeting between
+        # inspection and spawn.
+        "resolved_reference": image_id,
     }
     return {**identity, "identity_digest": _digest(identity)}
 
@@ -347,7 +402,7 @@ def inspect_image(docker: Mapping[str, object], image: str) -> dict[str, object]
         return {"status": "UNAVAILABLE", "reason": "docker-image-identity-invalid"}
     image_id = record.get("Id")
     repo_digests = record.get("RepoDigests")
-    if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+    if not isinstance(image_id, str) or _DIGEST_RE.fullmatch(image_id) is None:
         return {"status": "UNAVAILABLE", "reason": "docker-image-id-unavailable"}
     if repo_digests is None:
         repo_digests = []
@@ -396,17 +451,10 @@ def build_linux_model_plan(
         "tool": tool,
         "image": image_identity,
         "limits": normalized_limits,
-        "isolation": {
-            "read_only_root_filesystem": True,
-            "network": "none",
-            "cap_drop": ["ALL"],
-            "security_opt": ["no-new-privileges"],
-            "pull_policy": "never",
-            "user": "65534:65534",
-            "tmpfs": "/tmp",
-        },
+        "isolation": dict(_ISOLATION),
         "commands": normalized_commands,
         "claims": dict(_CLAIMS),
+        "labels": dict(_EVIDENCE_LABELS),
     }
     plan["plan_digest"] = _digest(plan)
     return plan
@@ -426,6 +474,7 @@ def _validated_plan(value: Mapping[str, object]) -> dict[str, object]:
             "isolation",
             "commands",
             "claims",
+            "labels",
             "plan_digest",
         }
     )
@@ -451,10 +500,35 @@ def _validated_plan(value: Mapping[str, object]) -> dict[str, object]:
         or not isinstance(source_mount["source_digest"], str)
     ):
         raise LinuxModelError("source mount is invalid")
+    source_identity = _require_exact_keys(
+        plan["source_identity"],
+        frozenset({"root", "file_count", "total_bytes", "tree_digest"}),
+        "source_identity",
+    )
+    if (
+        source_identity["root"] != source_mount["host_path"]
+        or not isinstance(source_identity["file_count"], int)
+        or isinstance(source_identity["file_count"], bool)
+        or source_identity["file_count"] < 0
+        or not isinstance(source_identity["total_bytes"], int)
+        or isinstance(source_identity["total_bytes"], bool)
+        or source_identity["total_bytes"] < 0
+        or source_identity["tree_digest"] != source_mount["source_digest"]
+        or not isinstance(source_identity["tree_digest"], str)
+        or len(source_identity["tree_digest"]) != 64
+    ):
+        raise LinuxModelError("source identity is not bound to the source mount")
+    isolation = _require_exact_keys(
+        plan["isolation"], frozenset(_ISOLATION), "isolation"
+    )
+    if dict(isolation) != _ISOLATION:
+        raise LinuxModelError("linux model isolation policy is invalid")
     _normalize_tool_identity(_required_mapping(plan["tool"], "tool"))
     image = _required_mapping(plan["image"], "image")
     reference = image.get("reference")
-    _normalize_image_identity(image, _normalize_image_reference(reference))
+    normalized_image = _normalize_image_identity(image, _normalize_image_reference(reference))
+    if dict(image) != normalized_image:
+        raise LinuxModelError("image identity is not canonical or immutable")
     _normalize_limits(_required_mapping(plan["limits"], "limits"))
     command_values = plan["commands"]
     if isinstance(command_values, (str, bytes)) or not isinstance(command_values, Sequence):
@@ -472,6 +546,8 @@ def _validated_plan(value: Mapping[str, object]) -> dict[str, object]:
         raise LinuxModelError("plan commands are not canonical")
     if plan["claims"] != _CLAIMS:
         raise LinuxModelError("linux model claims must remain non-crediting")
+    if plan["labels"] != _EVIDENCE_LABELS:
+        raise LinuxModelError("linux model evidence labels must remain MODELLED_ONLY")
     return dict(plan)
 
 
@@ -511,7 +587,7 @@ def docker_run_argv(plan: Mapping[str, object], *, command_id: str) -> list[str]
         "type=bind,source={source},target={target},readonly".format(
             source=source_mount["host_path"], target=source_mount["target_path"]
         ),
-        str(image["reference"]),
+        str(image["resolved_reference"]),
         *(str(argument) for argument in command["argv"]),
     ]
 
@@ -527,6 +603,7 @@ def _unavailable_result(plan: Mapping[str, object], *, reason: str) -> dict[str,
         "linux_container_observed": False,
         "command_results": [],
         "claims": dict(_CLAIMS),
+        "labels": dict(_EVIDENCE_LABELS),
     }
 
 
@@ -543,6 +620,7 @@ def _failed_result(
         "linux_container_observed": container_executed,
         "command_results": list(results),
         "claims": dict(_CLAIMS),
+        "labels": dict(_EVIDENCE_LABELS),
     }
 
 
@@ -622,8 +700,27 @@ def run_linux_model(plan: Mapping[str, object]) -> dict[str, object]:
                 container_executed=True,
                 results=command_results,
             )
-        except OSError:
-            return _unavailable_result(normalized, reason="docker-run-unavailable")
+        except OSError as error:
+            # Keep every earlier command receipt and the observation that a
+            # prior container really ran. An OSError from a later launch must
+            # not erase that evidence or relabel it pre-spawn unavailable.
+            command_results.append(
+                {
+                    "id": command_id,
+                    "status": "FAIL",
+                    "failure_class": "docker-run-error",
+                    "exit_code": None,
+                    "elapsed_seconds": round(time.monotonic() - started, 6),
+                    "stdout": "",
+                    "stderr": _snippet(str(error)),
+                }
+            )
+            return _failed_result(
+                normalized,
+                reason="docker-run-unavailable",
+                container_executed=container_executed,
+                results=command_results,
+            )
         command_results.append(
             {
                 "id": command_id,
@@ -669,6 +766,7 @@ def run_linux_model(plan: Mapping[str, object]) -> dict[str, object]:
         "linux_container_observed": True,
         "command_results": command_results,
         "claims": dict(_CLAIMS),
+        "labels": dict(_EVIDENCE_LABELS),
     }
 
 
@@ -751,6 +849,7 @@ def main(argv: list[str] | None = None) -> int:
             "linux_container_observed": False,
             "command_results": [],
             "claims": dict(_CLAIMS),
+            "labels": dict(_EVIDENCE_LABELS),
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 1

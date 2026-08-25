@@ -420,3 +420,59 @@ def test_live_writer_blocks_destructive_clean_transaction(tmp_path: Path) -> Non
 
     with pytest.raises(RecoveryError, match="writer recovery is blocked"):
         CleanReinitializationTransaction(tmp_path / "project", admission, live)
+
+
+def test_inspection_and_owner_admission_are_read_only_until_transaction_is_started(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    control = project / ".promin" / "state"
+    control.mkdir(parents=True)
+    progress = control / "progress.json"
+    progress.write_bytes(b"existing progress must remain untouched\n")
+
+    admission, intent = _admission(tmp_path / "package")
+    before = progress.read_bytes()
+
+    # Admission is the inspect/authorization boundary; it must not quarantine,
+    # clean, or otherwise rewrite the active project root.
+    assert admission.intent.intent_digest == intent.intent_digest
+    assert progress.read_bytes() == before
+    assert not (project / ".promin-host").exists()
+
+    wrong_intent = CleanReinitializationIntent(
+        project_identity=intent.project_identity,
+        package_digest=intent.package_digest,
+        profile_id="diagnostic",
+        extension_admission_digest=intent.extension_admission_digest,
+    )
+    with pytest.raises(RecoveryIntentMismatch, match="owner confirmation"):
+        admit_clean_state(
+            wrong_intent,
+            admission.owner_confirmation,
+            admission.extension_admission,
+        )
+    assert progress.read_bytes() == before
+
+    # Even an exact owner-bound admission remains blocked while a writer is live.
+    live = WriterIdentity(
+        writer_id="writer:owner-gate",
+        pid=771,
+        process_birth_token="windows-filetime:100",
+        activation_digest="a" * 64,
+        intent_digest=intent.intent_digest,
+        lease_started_ns=100,
+        lease_expires_ns=200,
+    )
+    liveness = classify_writer_liveness(
+        live,
+        now_ns=150,
+        observer=lambda pid: ProcessObservation(
+            pid=pid,
+            exists=True,
+            process_birth_token="windows-filetime:100",
+        ),
+    )
+    with pytest.raises(RecoveryError, match="writer recovery is blocked"):
+        CleanReinitializationTransaction(project, admission, liveness)
+    assert progress.read_bytes() == before

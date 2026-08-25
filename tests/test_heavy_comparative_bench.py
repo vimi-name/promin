@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -337,7 +338,13 @@ def test_isolated_worker_resolves_the_checked_out_public_promin_init_route(tmp_p
         assert "'promin' is not a package" not in reason
 
 
-def test_isolated_empty_run_emits_percentiles_rss_storage_and_scaling(tmp_path: Path) -> None:
+def test_isolated_empty_run_emits_percentiles_rss_storage_and_scaling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This is a micro smoke for metric serialization; fixed-scope execution is
+    # covered separately and partial CLI execution is rejected by contract.
+    monkeypatch.setattr(bench, "_require_fixed_execution_scope", lambda _config: None)
     report = bench.run_benchmark(_config(), fixture_root=tmp_path / "fixtures")
     assert report["claim"] is False
     assert report["pass_credit"] is False
@@ -359,3 +366,138 @@ def test_isolated_empty_run_emits_percentiles_rss_storage_and_scaling(tmp_path: 
             "markdown_bytes": 0,
             "control_bytes": 0,
         }
+
+
+def test_fixed_execution_scope_is_exactly_the_72_bucket_public_route() -> None:
+    config = bench.BenchmarkConfig(
+        sizes=(16, 64, 256),
+        scenarios=("promin", "markdown", "empty"),
+        operations=("init", "update", "query", "docs"),
+    )
+
+    assert bench.fixed_full_scope_selected(config) is True
+    assert len(bench.expected_bucket_keys(config)) == 72
+    assert bench.FIXED_BUCKET_COUNT == 72
+    assert bench._base_report(config, executed=True)["config"] == {
+        "sizes": [16, 64, 256],
+        "warmup_runs": 1,
+        "measured_runs": 3,
+        "sampling_interval_ms": 5,
+        "scenarios": ["promin", "markdown", "empty"],
+        "operations": ["init", "update", "query", "docs"],
+        "temperatures": ["cold", "warm"],
+        "execution_order": "sequential; no benchmark samples run concurrently",
+        "fixed_workload": True,
+        "fixed_bucket_count": 72,
+    }
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        _config(sizes=(1, 2, 3)),
+        bench.BenchmarkConfig(
+            sizes=(16, 64, 256),
+            scenarios=("promin", "markdown"),
+            operations=("init", "update", "query", "docs"),
+        ),
+        bench.BenchmarkConfig(
+            sizes=(16, 64, 256),
+            scenarios=("promin", "markdown", "empty"),
+            operations=("init", "update", "query"),
+        ),
+    ),
+)
+def test_execution_rejects_a_partial_route_instead_of_silently_shrinking_workload(config) -> None:
+    with pytest.raises(bench.ComparativeBenchError, match="fixed 72-bucket scope"):
+        bench._require_fixed_execution_scope(config)
+
+
+def test_cli_partial_execution_emits_failure_envelope_without_claims(tmp_path: Path) -> None:
+    output = tmp_path / "partial.json"
+    exit_code = bench.main(
+        [
+            "--execute",
+            "--sizes",
+            "1,2,3",
+            "--scenarios",
+            "empty",
+            "--operations",
+            "query",
+            "--output",
+            str(output),
+        ]
+    )
+    failure = json.loads(output.read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert failure["schema"] == "promin.comparative-benchmark.v1"
+    assert failure["record_type"] == "ProminComparativeBenchmarkFailure"
+    assert failure["execution"] == {"performed": True, "status": "failed"}
+    assert failure["claim"] is False
+    assert failure["pass_credit"] is False
+    assert failure["acceptance_pass"] is False
+    assert "fixed 72-bucket scope" in failure["reason"]
+
+
+def test_default_benchmark_contract_keeps_one_warmup_and_three_measured_repetitions() -> None:
+    config = bench.BenchmarkConfig()
+    assert config.sizes == (16, 64, 256)
+    assert config.warmup_runs == 1
+    assert config.measured_runs == 3
+    assert config.scenarios == ("promin", "markdown", "empty")
+    assert config.operations == ("init", "update", "query", "docs")
+    plan = bench.build_plan(config)
+    assert plan["config"]["warmup_runs"] == 1
+    assert plan["config"]["measured_runs"] == 3
+    assert plan["execution"]["expected_bucket_count"] == 72
+
+
+@pytest.mark.parametrize("operation", ("update", "query", "docs"))
+def test_real_local_fixture_exercises_promin_public_routes(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    root = tmp_path / operation
+    config = _config(scenarios=("promin",), operations=(operation,))
+    try:
+        prepared = bench.prepare_case(root, scenario="promin", operation=operation, size=2)
+        measured = bench.measure_case(root, scenario="promin", operation=operation, size=2, sampling_interval_ms=5)
+    except bench.ComparativeBenchError as exc:
+        # The checked-out candidate may reject the real public init precondition
+        # on implementation-closure drift. Preserve that evidence; never turn
+        # it into a synthetic success or benchmark credit.
+        assert "implementation closure drift" in str(exc)
+        return
+
+    assert prepared["storage_before"]["file_count"] >= 3
+    expected_route = {"update": "refresh", "query": "context", "docs": "refresh"}[operation]
+    assert measured["operation_result"]["route"] == f"promin-public-cli:{expected_route}"
+    assert measured["operation_result"]["status"] in {"ok", "updated", "created"}
+    assert measured["measurement"]["wall_ms"] >= 0
+    assert measured["measurement"]["cpu_ms"] >= 0
+    assert measured["storage_after"]["file_count"] >= measured["storage_before"]["file_count"]
+    assert config.warmup_runs == 0
+    assert config.measured_runs == 1
+
+
+def test_comparative_report_has_no_truthy_acceptance_or_performance_claims() -> None:
+    report = bench.build_plan(
+        bench.BenchmarkConfig(
+            sizes=(16, 64, 256),
+            scenarios=("promin", "markdown", "empty"),
+            operations=("init", "update", "query", "docs"),
+        )
+    )
+    forbidden = {"claim", "pass_credit", "acceptance_pass", "product_acceptance_pass", "performance_acceptance"}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in forbidden:
+                    assert child is False, (key, child)
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(report)

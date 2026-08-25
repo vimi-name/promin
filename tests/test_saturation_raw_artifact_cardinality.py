@@ -10,10 +10,12 @@ from jsonschema import Draft202012Validator
 
 from promin.evidence import (
     EvidenceError,
+    canonical_digest,
     _is_valid_saturation_raw_artifact_binding,
     _parse_raw_jsonl,
     _resolve_saturation_raw_artifact_binding,
     _saturation_continuation_state_within_limit,
+    _validate_saturation_raw_artifacts,
     _validate_saturation_continuation_state,
 )
 
@@ -24,6 +26,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 CONTINUATION_ROLE = "continuation-state-manifest"
 REQUIRED_NONEMPTY_ROLES = (
     "inventory-stream",
+    "physical-relation-evidence",
     "query-results",
     "process-samples",
     "phase-log",
@@ -31,6 +34,10 @@ REQUIRED_NONEMPTY_ROLES = (
 )
 ARTIFACT_LAYOUT = {
     "inventory-stream": ("raw/inventory-stream.jsonl", "application/x-ndjson"),
+    "physical-relation-evidence": (
+        "raw/physical-relation-evidence.jsonl",
+        "application/x-ndjson",
+    ),
     "query-results": ("raw/query-results.jsonl", "application/x-ndjson"),
     "process-samples": ("raw/process-samples.json", "application/json"),
     CONTINUATION_ROLE: (
@@ -65,6 +72,19 @@ def _artifact_validator() -> Draft202012Validator:
                 "#/$defs/SaturationEvidence/properties/raw_artifact_manifest/"
                 "properties/artifacts/items"
             ),
+            "$defs": schema["$defs"],
+        }
+    )
+
+
+def _raw_manifest_validator() -> Draft202012Validator:
+    schema = json.loads(
+        (PACKAGE_ROOT / "core" / "contracts.schema.json").read_text(encoding="utf-8")
+    )
+    return Draft202012Validator(
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "#/$defs/SaturationEvidence/properties/raw_artifact_manifest",
             "$defs": schema["$defs"],
         }
     )
@@ -188,9 +208,8 @@ def test_required_saturation_artifacts_remain_nonempty(role: str) -> None:
     assert not _is_valid_saturation_raw_artifact_binding(
         _artifact(role=role, byte_count=0, record_count=0)
     )
-    assert list(
-        validator.iter_errors(_artifact(role=role, byte_count=1, record_count=1))
-    ) == []
+    records = 198_999 if role == "physical-relation-evidence" else 1
+    assert list(validator.iter_errors(_artifact(role=role, byte_count=1, record_count=records))) == []
 
 
 @pytest.mark.parametrize(
@@ -219,6 +238,110 @@ def test_artifact_role_cannot_claim_another_roles_path() -> None:
 
     assert list(validator.iter_errors(artifact))
     assert not _is_valid_saturation_raw_artifact_binding(artifact)
+
+
+def test_exact_physical_inventory_is_one_stream_artifact_not_per_file_semantic_artifacts() -> None:
+    """The raw manifest binds the 100k-file stream, never 100k Artifact records."""
+
+    validator = _artifact_validator()
+    manifest_validator = _raw_manifest_validator()
+    seven_role_artifacts = [
+        _artifact(
+            role=role,
+            byte_count=1,
+            record_count=198_999 if role == "physical-relation-evidence" else 1,
+        )
+        for role in ARTIFACT_LAYOUT
+    ]
+    assert len(seven_role_artifacts) == 7
+    assert all(list(validator.iter_errors(item)) == [] for item in seven_role_artifacts)
+
+    manifest_base = {
+        "record_type": "SaturationRawArtifactManifest",
+        "path_scope": "saturation-result-directory",
+        "evidence_class": "harness_generated",
+        "product_acceptance_credit": False,
+        "artifacts": seven_role_artifacts,
+        "artifact_count": 7,
+        "inventory_stream_digest": "0" * 64,
+        "inventory_identity_digest": "1" * 64,
+        "manifest_digest": "2" * 64,
+    }
+    assert list(manifest_validator.iter_errors(manifest_base)) == []
+
+    per_file_artifacts = [
+        _artifact(role="inventory-stream", byte_count=1, record_count=1)
+        for _ in range(8)
+    ]
+    # The seven-role closure is the guard against semantic materialization
+    # of one Artifact record per physical file; physical rows remain in the
+    # inventory stream and are validated by their exact stream digest/count.
+    oversized_manifest = dict(manifest_base)
+    oversized_manifest["artifacts"] = per_file_artifacts
+    oversized_manifest["artifact_count"] = 8
+    assert list(manifest_validator.iter_errors(oversized_manifest))
+
+
+def test_physical_relation_evidence_binding_is_exactly_198999_records() -> None:
+    relation = _artifact(
+        role="physical-relation-evidence",
+        byte_count=1,
+        record_count=198_999,
+    )
+    assert relation["path"] == "raw/physical-relation-evidence.jsonl"
+    assert relation["media_type"] == "application/x-ndjson"
+    assert _is_valid_saturation_raw_artifact_binding(relation)
+
+    for field, value in (
+        ("path", "raw/inventory-stream.jsonl"),
+        ("media_type", "application/json"),
+        ("records", 198_998),
+    ):
+        malformed = dict(relation)
+        malformed[field] = value
+        assert not _is_valid_saturation_raw_artifact_binding(malformed)
+
+
+def test_production_validator_rejects_duplicate_inventory_and_missing_relation_roles(
+    tmp_path: Path,
+) -> None:
+    """Seven-role closure rejects duplicate inventory and missing relation roles."""
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    payload = b"{}\n"
+    artifacts = []
+    for index in range(6):
+        relative = f"raw/inventory-{index}.jsonl"
+        (tmp_path / relative).write_bytes(payload)
+        artifacts.append(
+            {
+                "role": "inventory-stream",
+                "path": relative,
+                "media_type": "application/x-ndjson",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "bytes": len(payload),
+                "records": 1,
+            }
+        )
+    identity = {
+        "record_type": "SaturationRawArtifactManifest",
+        "path_scope": "saturation-result-directory",
+        "evidence_class": "harness_generated",
+        "product_acceptance_credit": False,
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "inventory_stream_digest": hashlib.sha256(payload).hexdigest(),
+        "inventory_identity_digest": "1" * 64,
+    }
+    manifest = {**identity, "manifest_digest": canonical_digest(identity)}
+
+    with pytest.raises(EvidenceError, match="saturation raw artifact set is incomplete"):
+        _validate_saturation_raw_artifacts(
+            {"raw_artifact_manifest": manifest},
+            source_path=tmp_path / "saturation-result.json",
+            evidence_root=tmp_path,
+        )
 
 
 @pytest.mark.parametrize(

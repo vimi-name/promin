@@ -56,6 +56,10 @@ _SEMANTIC_GROUP_WIDTH = 16
 _SEMANTIC_GROUP_COUNT = _SEMANTIC_BUCKET_COUNT // _SEMANTIC_GROUP_WIDTH
 _BULK_REBUILD_BATCH_ROWS = 512
 _BULK_SQL_VALUE_ROWS = 64
+_COMPACT_INVENTORY_ENTRY_THRESHOLD = 100_000
+_INVENTORY_BUCKET_COUNT = 256
+_INVENTORY_BUCKET_DIGEST_ALGORITHM = "inventory-path-buckets-v1"
+_INVENTORY_STORAGE_LAYOUT = "physical-inventory-buckets-v1"
 _SEARCH_ROUTE = "search-v1"
 _READY_FRONTIER_ROUTE = "ready-frontier-v1"
 _READY_FRONTIER_ORDERING = ("created_at-ascending", "task_id-ascending")
@@ -342,6 +346,7 @@ class VerifiedInventoryInput:
     manifest_digest: str | None = None
     observed_at: str | None = None
     product_tree_passes: int = 1
+    retain_artifact_entities: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.activation_digest, str) or not _DIGEST.fullmatch(self.activation_digest):
@@ -352,6 +357,8 @@ class VerifiedInventoryInput:
             raise ProjectionError("verified inventory entry count is invalid")
         if self.product_tree_passes != 1:
             raise ProjectionError("verified inventory must represent exactly one product-tree pass")
+        if self.retain_artifact_entities is not None and type(self.retain_artifact_entities) is not bool:
+            raise ProjectionError("verified inventory semantic retention flag is invalid")
         inventory_digest = self.stream_digest if self.inventory_digest is None else self.inventory_digest
         if not isinstance(inventory_digest, str) or not _DIGEST.fullmatch(inventory_digest):
             raise ProjectionError("verified inventory identity digest must be SHA-256")
@@ -359,6 +366,10 @@ class VerifiedInventoryInput:
         if self.stream_path is None:
             if not isinstance(self.entries, tuple):
                 raise ProjectionError("verified in-memory inventory entries must be an immutable tuple")
+            if self.retain_artifact_entities is False:
+                raise ProjectionError(
+                    "compact inventory projection requires a persisted stream"
+                )
             object.__setattr__(self, "entries", tuple(copy.deepcopy(value) for value in self.entries))
             if self.stream_bytes is not None or self.manifest_digest is not None:
                 raise ProjectionError("in-memory inventory cannot claim persisted stream bindings")
@@ -379,6 +390,17 @@ class VerifiedInventoryInput:
         if not isinstance(self.manifest_digest, str) or not _DIGEST.fullmatch(self.manifest_digest):
             raise ProjectionError("verified inventory manifest digest must be SHA-256")
         object.__setattr__(self, "stream_path", path.resolve(strict=True))
+
+    @property
+    def compact_projection(self) -> bool:
+        """Whether physical rows must stay outside the semantic entity graph."""
+
+        if self.retain_artifact_entities is not None:
+            return not self.retain_artifact_entities
+        return (
+            self.stream_path is not None
+            and self.entry_count >= _COMPACT_INVENTORY_ENTRY_THRESHOLD
+        )
 
 
 def compile_relation_domains(semantic_model: Mapping[str, Any]) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
@@ -551,6 +573,9 @@ class Projection:
             "event_count": 0,
             "synthetic_task_count": 0,
             "inventory_stream_bytes": 0,
+            "inventory_storage_mode": "none",
+            "inventory_bucket_count": 0,
+            "inventory_bucket_manifest_digest": "",
         }
         try:
             connection = sqlite3.connect(sqlite_path(temporary))
@@ -560,7 +585,12 @@ class Projection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._ingest_events_for_rebuild(connection, event_store, stats)
                 if inventory is not None:
-                    self._ingest_inventory_for_rebuild(connection, inventory, stats)
+                    if inventory.compact_projection:
+                        self._ingest_compact_inventory_for_rebuild(
+                            connection, inventory, stats
+                        )
+                    else:
+                        self._ingest_inventory_for_rebuild(connection, inventory, stats)
                 self._validate_relation_closure(connection)
                 self._create_search_indexes(connection)
                 self._validate_dependency_graph_acyclic(connection)
@@ -593,6 +623,11 @@ class Projection:
                     "incremental_commit_count": "0",
                     "incremental_changed_records": "0",
                     "projection_compaction_count": "1",
+                    "inventory_storage_mode": stats["inventory_storage_mode"],
+                    "inventory_bucket_count": str(stats["inventory_bucket_count"]),
+                    "inventory_bucket_manifest_digest": stats[
+                        "inventory_bucket_manifest_digest"
+                    ],
                 }
                 connection.executemany("INSERT INTO metadata(key,value) VALUES (?,?)", sorted(metadata.items()))
                 connection.commit()
@@ -703,6 +738,18 @@ class Projection:
               target_id TEXT NOT NULL,
               created_at TEXT NOT NULL,
               payload_json TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE inventory_records(
+              id TEXT PRIMARY KEY,
+              path TEXT NOT NULL UNIQUE,
+              digest TEXT NOT NULL,
+              size INTEGER NOT NULL CHECK(size>=0),
+              bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256)
+            ) WITHOUT ROWID;
+            CREATE TABLE inventory_bucket_commitments(
+              bucket INTEGER PRIMARY KEY CHECK(bucket>=0 AND bucket<256),
+              row_count INTEGER NOT NULL CHECK(row_count>=0),
+              digest TEXT NOT NULL
             ) WITHOUT ROWID;
             CREATE TRIGGER relations_cardinality_after_insert
             AFTER INSERT ON relations
@@ -1289,6 +1336,210 @@ class Projection:
                     flush_entities()
         flush_all()
 
+    @staticmethod
+    def _inventory_bucket(path: str) -> int:
+        """Select a deterministic physical bucket without retaining the corpus."""
+
+        return hashlib.sha256(path.encode("utf-8")).digest()[0]
+
+    @staticmethod
+    def _inventory_bucket_seed(bucket: int) -> bytes:
+        return (
+            b"promin:inventory-bucket:v1\x00"
+            + bytes((bucket,))
+        )
+
+    @classmethod
+    def _inventory_bucket_manifest_digest(
+        cls,
+        entry_count: int,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> str:
+        value = {
+            "record_type": "InventoryBucketManifest",
+            "algorithm": _INVENTORY_BUCKET_DIGEST_ALGORITHM,
+            "entry_count": entry_count,
+            "buckets": [dict(row) for row in rows],
+        }
+        return digest_value(value)
+
+    @classmethod
+    def _read_inventory_bucket_manifest(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, Any], ...]:
+        """Recompute compact physical commitments from bounded cursor rows."""
+
+        hashes = [
+            hashlib.sha256(cls._inventory_bucket_seed(bucket))
+            for bucket in range(_INVENTORY_BUCKET_COUNT)
+        ]
+        counts = [0] * _INVENTORY_BUCKET_COUNT
+        previous: list[str | None] = [None] * _INVENTORY_BUCKET_COUNT
+        for entity_id, path, file_digest, size, bucket in connection.execute(
+            "SELECT id,path,digest,size,bucket FROM inventory_records ORDER BY bucket,path"
+        ):
+            if (
+                not isinstance(entity_id, str)
+                or not isinstance(path, str)
+                or not isinstance(file_digest, str)
+                or type(size) is not int
+                or type(bucket) is not int
+                or not 0 <= bucket < _INVENTORY_BUCKET_COUNT
+            ):
+                raise ProjectionError("compact inventory physical record is invalid")
+            cls._validate_inventory_path(path)
+            if _DIGEST.fullmatch(file_digest) is None:
+                raise ProjectionError("compact inventory physical digest is invalid")
+            expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            if entity_id != expected_id or size < 0:
+                raise ProjectionError("compact inventory physical identity is invalid")
+            if previous[bucket] is not None and path <= previous[bucket]:
+                raise ProjectionError("compact inventory physical paths are not ordered")
+            previous[bucket] = path
+            identity = canonical_bytes({"path": path, "digest": file_digest, "size": size})
+            hashes[bucket].update(identity)
+            counts[bucket] += 1
+        return tuple(
+            {
+                "bucket": bucket,
+                "row_count": counts[bucket],
+                "digest": hashes[bucket].hexdigest(),
+            }
+            for bucket in range(_INVENTORY_BUCKET_COUNT)
+        )
+
+    def _ingest_compact_inventory_for_rebuild(
+        self,
+        connection: sqlite3.Connection,
+        inventory: VerifiedInventoryInput,
+        stats: dict[str, Any],
+    ) -> None:
+        """Consume a physical stream without creating semantic Artifact rows.
+
+        The endpoint index is physical provenance only.  Payloads never enter
+        ``entities``, ``entity_fts``, or ``semantic_rows``; bounded records and
+        256 rolling bucket commitments are the only retained inventory state.
+        """
+
+        identity_stream = hashlib.sha256()
+        persisted_stream = hashlib.sha256()
+        previous_path: str | None = None
+        persisted = inventory.stream_path is not None
+        if persisted:
+            source: Iterable[tuple[Mapping[str, Any], bytes | None]] = (
+                self._iter_persisted_inventory(inventory, persisted_stream)
+            )
+        else:
+            assert inventory.entries is not None
+            source = ((row, None) for row in inventory.entries)
+        bucket_hashes = [
+            hashlib.sha256(self._inventory_bucket_seed(bucket))
+            for bucket in range(_INVENTORY_BUCKET_COUNT)
+        ]
+        bucket_counts = [0] * _INVENTORY_BUCKET_COUNT
+        pending: list[tuple[str, str, str, int, int]] = []
+
+        def flush() -> None:
+            if pending:
+                self._insert_bulk_values(
+                    connection,
+                    "inventory_records",
+                    ("id", "path", "digest", "size", "bucket"),
+                    tuple(pending),
+                )
+                pending.clear()
+
+        for row, encoded_line in source:
+            stats["inventory_entries"] += 1
+            if not isinstance(row, Mapping):
+                raise ProjectionError("inventory row must be an object")
+            required = {"path", "digest", "size", "search_text"} if persisted else {
+                "record_type", "path", "digest", "size", "semantic_proxy"
+            }
+            if set(row) != required or (
+                not persisted and row.get("record_type") != "InventoryProjectionRow"
+            ):
+                raise ProjectionError("InventoryProjectionRow fields mismatch")
+            path = row["path"]
+            file_digest = row["digest"]
+            size = row["size"]
+            self._validate_inventory_path(path)
+            if previous_path is not None and path <= previous_path:
+                raise ProjectionError("inventory paths must be strictly sorted and unique")
+            previous_path = path
+            if not isinstance(file_digest, str) or not _DIGEST.fullmatch(file_digest):
+                raise ProjectionError("inventory digest must be SHA-256")
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise ProjectionError("inventory size must be a nonnegative integer")
+            if persisted:
+                search_text = row["search_text"]
+                if (
+                    not isinstance(search_text, str)
+                    or len(search_text.encode("utf-8")) > 4096
+                    or "\x00" in search_text
+                ):
+                    raise ProjectionError(
+                        "inventory search text is invalid or exceeds 4096 bytes"
+                    )
+            else:
+                self._validated_inventory_proxy(
+                    row["semantic_proxy"],
+                    "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48],
+                    path,
+                    file_digest,
+                    size,
+                )
+            identity = canonical_bytes({"path": path, "digest": file_digest, "size": size})
+            identity_stream.update(identity)
+            stats["inventory_stream_bytes"] += (
+                len(encoded_line) if encoded_line is not None else len(identity)
+            )
+            bucket = self._inventory_bucket(path)
+            bucket_hashes[bucket].update(identity)
+            bucket_counts[bucket] += 1
+            expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+            pending.append((expected_id, path, file_digest, size, bucket))
+            if len(pending) >= _BULK_REBUILD_BATCH_ROWS:
+                flush()
+            stats["inventory_proxies"] += 1
+        flush()
+        if stats["inventory_entries"] != inventory.entry_count:
+            raise ProjectionError("verified inventory entry count mismatch")
+        if identity_stream.hexdigest() != inventory.inventory_digest:
+            raise ProjectionError("verified inventory identity digest mismatch")
+        if persisted and persisted_stream.hexdigest() != inventory.stream_digest:
+            raise ProjectionError("verified inventory stream digest mismatch")
+        if stats["inventory_proxies"] != stats["inventory_entries"]:
+            raise ProjectionError("raw inventory must produce exactly one physical record per file")
+        physical_count = connection.execute(
+            "SELECT COUNT(*) FROM inventory_records"
+        ).fetchone()[0]
+        if type(physical_count) is not int or physical_count != inventory.entry_count:
+            raise ProjectionError("physical inventory record cardinality differs from manifest")
+        manifest_rows = tuple(
+            {
+                "bucket": bucket,
+                "row_count": bucket_counts[bucket],
+                "digest": bucket_hashes[bucket].hexdigest(),
+            }
+            for bucket in range(_INVENTORY_BUCKET_COUNT)
+        )
+        self._insert_bulk_values(
+            connection,
+            "inventory_bucket_commitments",
+            ("bucket", "row_count", "digest"),
+            tuple(
+                (row["bucket"], row["row_count"], row["digest"])
+                for row in manifest_rows
+            ),
+        )
+        stats["inventory_storage_mode"] = _INVENTORY_STORAGE_LAYOUT
+        stats["inventory_bucket_count"] = _INVENTORY_BUCKET_COUNT
+        stats["inventory_bucket_manifest_digest"] = self._inventory_bucket_manifest_digest(
+            inventory.entry_count, manifest_rows
+        )
+
     def _ingest_events(self, connection: sqlite3.Connection, event_store: EventStore, stats: dict[str, int]) -> None:
         for envelope in event_store.iter_envelopes(validate=True):
             batch = envelope["batch"]
@@ -1587,6 +1838,9 @@ class Projection:
             raise ProjectionError(
                 "raw inventory must produce exactly one Artifact proxy per file"
             )
+        stats["inventory_storage_mode"] = "semantic-artifacts-v1"
+        stats["inventory_bucket_count"] = 0
+        stats["inventory_bucket_manifest_digest"] = ""
 
     def _ingest_inventory(
         self,
@@ -1674,6 +1928,9 @@ class Projection:
             raise ProjectionError("verified inventory stream digest mismatch")
         if stats["inventory_proxies"] != stats["inventory_entries"]:
             raise ProjectionError("raw inventory must produce exactly one Artifact proxy per file")
+        stats["inventory_storage_mode"] = "semantic-artifacts-v1"
+        stats["inventory_bucket_count"] = 0
+        stats["inventory_bucket_manifest_digest"] = ""
 
     @staticmethod
     def _iter_persisted_inventory(
@@ -2198,12 +2455,19 @@ class Projection:
         broken = connection.execute(
             """
             SELECT r.id,r.source_type,r.source_id,r.target_type,r.target_id,
-                   source.entity_type,target.entity_type
+                   source.entity_type,target.entity_type,
+                   source_inventory.id,target_inventory.id
             FROM relations AS r
             LEFT JOIN entities AS source ON source.id=r.source_id
             LEFT JOIN entities AS target ON target.id=r.target_id
-            WHERE source.id IS NULL OR target.id IS NULL
-               OR source.entity_type<>r.source_type OR target.entity_type<>r.target_type
+            LEFT JOIN inventory_records AS source_inventory
+              ON source_inventory.id=r.source_id AND r.source_type='Artifact'
+            LEFT JOIN inventory_records AS target_inventory
+              ON target_inventory.id=r.target_id AND r.target_type='Artifact'
+            WHERE (source.id IS NULL AND source_inventory.id IS NULL)
+               OR (target.id IS NULL AND target_inventory.id IS NULL)
+               OR (source.id IS NOT NULL AND source.entity_type<>r.source_type)
+               OR (target.id IS NOT NULL AND target.entity_type<>r.target_type)
             ORDER BY r.id LIMIT 1
             """
         ).fetchone()
@@ -2262,13 +2526,20 @@ class Projection:
         broken = connection.execute(
             f"""
             SELECT r.id,r.source_type,r.source_id,r.target_type,r.target_id,
-                   source.entity_type,target.entity_type
+                   source.entity_type,target.entity_type,
+                   source_inventory.id,target_inventory.id
             FROM relations AS r
             LEFT JOIN entities AS source ON source.id=r.source_id
             LEFT JOIN entities AS target ON target.id=r.target_id
+            LEFT JOIN inventory_records AS source_inventory
+              ON source_inventory.id=r.source_id AND r.source_type='Artifact'
+            LEFT JOIN inventory_records AS target_inventory
+              ON target_inventory.id=r.target_id AND r.target_type='Artifact'
             WHERE r.id IN ({placeholders})
-              AND (source.id IS NULL OR target.id IS NULL
-                   OR source.entity_type<>r.source_type OR target.entity_type<>r.target_type)
+              AND ((source.id IS NULL AND source_inventory.id IS NULL)
+                   OR (target.id IS NULL AND target_inventory.id IS NULL)
+                   OR (source.id IS NOT NULL AND source.entity_type<>r.source_type)
+                   OR (target.id IS NOT NULL AND target.entity_type<>r.target_type))
             ORDER BY r.id LIMIT 1
             """,
             selected,
@@ -2475,6 +2746,8 @@ class Projection:
             "storage_layout",
             "incremental_commit_count", "incremental_changed_records",
             "projection_compaction_count",
+            "inventory_storage_mode", "inventory_bucket_count",
+            "inventory_bucket_manifest_digest",
         }
         if set(metadata) != required:
             raise ProjectionError("projection metadata is incomplete or unknown")
@@ -2496,6 +2769,7 @@ class Projection:
             "inventory_proxies", "inventory_relations", "inventory_passes",
             "product_passes", "event_count", "incremental_commit_count",
             "incremental_changed_records", "projection_compaction_count",
+            "inventory_bucket_count",
         )
         try:
             numeric = {key: int(metadata[key]) for key in numeric_keys}
@@ -2520,8 +2794,54 @@ class Projection:
             or numeric["inventory_proxies"] > numeric["inventory_entries"]
             or numeric["inventory_passes"] not in {0, 1}
             or numeric["product_passes"] != 0
+            or numeric["inventory_bucket_count"] not in {0, _INVENTORY_BUCKET_COUNT}
         ):
             raise ProjectionError("projection metadata binding is invalid")
+        storage_mode = metadata["inventory_storage_mode"]
+        if storage_mode not in {"none", "semantic-artifacts-v1", _INVENTORY_STORAGE_LAYOUT}:
+            raise ProjectionError("projection inventory storage mode is invalid")
+        if storage_mode == _INVENTORY_STORAGE_LAYOUT:
+            if numeric["inventory_bucket_count"] != _INVENTORY_BUCKET_COUNT:
+                raise ProjectionError("compact inventory bucket cardinality is invalid")
+            bucket_rows = connection.execute(
+                "SELECT bucket,row_count,digest FROM inventory_bucket_commitments ORDER BY bucket"
+            ).fetchall()
+            if len(bucket_rows) != _INVENTORY_BUCKET_COUNT:
+                raise ProjectionError("compact inventory bucket manifest cardinality is invalid")
+            manifest_rows = []
+            for expected_bucket, row in enumerate(bucket_rows):
+                bucket, row_count, digest = row
+                if (
+                    type(bucket) is not int
+                    or bucket != expected_bucket
+                    or type(row_count) is not int
+                    or row_count < 0
+                    or not isinstance(digest, str)
+                    or _DIGEST.fullmatch(digest) is None
+                ):
+                    raise ProjectionError("compact inventory bucket manifest is invalid")
+                manifest_rows.append({"bucket": bucket, "row_count": row_count, "digest": digest})
+            if sum(row["row_count"] for row in manifest_rows) != numeric["inventory_entries"]:
+                raise ProjectionError("compact inventory bucket cardinality differs from metadata")
+            if connection.execute("SELECT COUNT(*) FROM inventory_records").fetchone()[0] != numeric[
+                "inventory_entries"
+            ]:
+                raise ProjectionError("compact inventory physical record cardinality is invalid")
+            if self._read_inventory_bucket_manifest(connection) != tuple(manifest_rows):
+                raise ProjectionError("compact inventory physical records differ from bucket manifest")
+            if metadata["inventory_bucket_manifest_digest"] != self._inventory_bucket_manifest_digest(
+                numeric["inventory_entries"], manifest_rows
+            ):
+                raise ProjectionError("compact inventory bucket manifest digest differs from metadata")
+        elif (
+            numeric["inventory_bucket_count"] != 0
+            or metadata["inventory_bucket_manifest_digest"] != ""
+        ):
+            raise ProjectionError("non-compact inventory has bucket manifest metadata")
+        elif connection.execute("SELECT COUNT(*) FROM inventory_bucket_commitments").fetchone()[0] != 0:
+            raise ProjectionError("non-compact inventory has bucket commitment rows")
+        elif connection.execute("SELECT COUNT(*) FROM inventory_records").fetchone()[0] != 0:
+            raise ProjectionError("non-compact inventory has physical inventory rows")
         try:
             parse_timestamp(metadata["built_at"])
             actual_entity_count, actual_relation_count = self._read_projection_cardinality(
@@ -2544,6 +2864,11 @@ class Projection:
             "relation_count": numeric["relation_count"],
             "inventory_entries": inventory_entries,
             "inventory_proxies": inventory_proxies,
+            "inventory_storage_mode": storage_mode,
+            "inventory_bucket_count": numeric["inventory_bucket_count"],
+            "inventory_bucket_manifest_digest": metadata[
+                "inventory_bucket_manifest_digest"
+            ],
             "inventory_relations": numeric["inventory_relations"],
             "inventory_passes": numeric["inventory_passes"],
             "product_passes": numeric["product_passes"],
@@ -3863,6 +4188,13 @@ class Projection:
         exact = connection.execute("SELECT id FROM entities WHERE id=?", (query,)).fetchone()
         if exact is not None:
             return ([{"id": exact[0], "tier": 0, "score": 0.0}], False, [])
+        physical = connection.execute(
+            "SELECT id FROM inventory_records WHERE id=? OR path=? "
+            "ORDER BY id LIMIT 1",
+            (query, query),
+        ).fetchone()
+        if physical is not None:
+            return ([{"id": physical[0], "tier": 0, "score": 0.0}], False, [])
         ranked: list[dict[str, Any]] = []
         tokens = _QUERY_TOKEN.findall(query)
         expression = " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
@@ -3922,14 +4254,60 @@ class Projection:
             "SELECT id,entity_type,data_class,payload_json FROM entities WHERE id=?",
             (entity_id,),
         ).fetchone()
-        if row is None:
+        if row is not None:
+            try:
+                payload = json.loads(row[3])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ProjectionError("typed closure entity payload is invalid") from exc
+            if not isinstance(payload, dict):
+                raise ProjectionError("typed closure entity payload is not an object")
+            entities[row[0]] = {
+                "id": row[0],
+                "entity_type": row[1],
+                "data_class": row[2],
+                "payload": payload,
+                "source_digest": hashlib.sha256(row[3].encode("utf-8")).hexdigest(),
+            }
+            return True
+        physical = connection.execute(
+            "SELECT id,path,digest,size FROM inventory_records WHERE id=?",
+            (entity_id,),
+        ).fetchone()
+        if physical is None:
             return False
-        entities[row[0]] = {
-            "id": row[0],
-            "entity_type": row[1],
-            "data_class": row[2],
-            "payload": json.loads(row[3]),
-            "source_digest": hashlib.sha256(row[3].encode("utf-8")).hexdigest(),
+        physical_id, path, file_digest, size = physical
+        if (
+            not isinstance(physical_id, str)
+            or not isinstance(path, str)
+            or not isinstance(file_digest, str)
+            or type(size) is not int
+            or size < 0
+            or _DIGEST.fullmatch(file_digest) is None
+        ):
+            raise ProjectionError("typed closure physical inventory row is invalid")
+        Projection._validate_inventory_path(path)
+        expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
+        if physical_id != expected_id:
+            raise ProjectionError("typed closure physical inventory identity is invalid")
+        payload = {
+            "record_type": "Artifact",
+            "artifact_id": physical_id,
+            "artifact_kind": "product",
+            "digest": file_digest,
+            "media_type": "application/octet-stream",
+            "size_bytes": size,
+            "retention_class": "project",
+            "inventory_path": path,
+            "inventory_digest": file_digest,
+            "inventory_size": size,
+        }
+        payload_json = canonical_bytes(payload).decode("utf-8")
+        entities[physical_id] = {
+            "id": physical_id,
+            "entity_type": "Artifact",
+            "data_class": "untrusted-source",
+            "payload": payload,
+            "source_digest": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
         }
         return True
 

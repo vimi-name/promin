@@ -479,6 +479,34 @@ def verify_tracked_extension_admission(
     return observed
 
 
+def revalidate_clean_state_admission(
+    admission: CleanStateAdmission,
+) -> CleanStateAdmission:
+    """Revalidate the exact owner-approved input immediately before mutation.
+
+    Recovery admission is intentionally not a durable permission token.  The
+    package/extension closure can change between planning and quarantine, so a
+    mutation boundary must re-read it and preserve the exact digest bound to
+    the owner's confirmation.  The returned admission is a fresh observation;
+    it never imports prior state and never grants product or acceptance credit.
+    """
+
+    if not isinstance(admission, CleanStateAdmission):
+        raise RecoveryError("clean state admission is required")
+    observed = verify_tracked_extension_admission(admission.extension_admission)
+    if observed.admission_digest != admission.intent.extension_admission_digest:
+        raise RecoveryIntentMismatch(
+            "tracked extension closure changed after owner admission"
+        )
+    # Reconstructing the value also rechecks the confirmation-to-intent binding
+    # at the mutation boundary instead of trusting a stale object graph.
+    return CleanStateAdmission(
+        intent=admission.intent,
+        owner_confirmation=admission.owner_confirmation,
+        extension_admission=observed,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CleanReinitializationIntent:
     """The exact non-replay operation the owner is being asked to approve."""
@@ -823,7 +851,7 @@ def quarantine_previous_control_root(
         raise RecoveryError(str(exc)) from exc
     project, active, configured_quarantine_parent = _control_paths(project_root)
     target = configured_quarantine_parent / admission.intent.intent_digest
-    verify_tracked_extension_admission(admission.extension_admission)
+    admission = revalidate_clean_state_admission(admission)
     active_exists = os.path.lexists(filesystem_path(active))
     if not active_exists:
         if os.path.lexists(filesystem_path(target)):
@@ -849,7 +877,7 @@ def quarantine_previous_control_root(
     def _revalidate_quarantine_reservation() -> None:
         _require_absent(target, "quarantine target")
         _reject_previous_control_extension_source(admission.extension_admission, active)
-        verify_tracked_extension_admission(admission.extension_admission)
+        revalidate_clean_state_admission(admission)
         refreshed_active = _require_real_directory(active, "previous active control root")
         if _file_identity(active_stat) != _file_identity(refreshed_active):
             raise RecoveryError("previous active control root changed before quarantine")
@@ -1047,6 +1075,8 @@ class CleanReinitializationRestartAttempt:
     stage: str
     outcome: CleanReinitializationRestartOutcome
     transaction_phase: CleanReinitializationPhase
+    original_failure: str | None = None
+    rollback_failure: str | None = None
 
     def __post_init__(self) -> None:
         _require_positive(self.ordinal, "clean reinitialization restart ordinal")
@@ -1056,6 +1086,21 @@ class CleanReinitializationRestartAttempt:
             raise RecoveryError("clean reinitialization restart outcome is invalid")
         if not isinstance(self.transaction_phase, CleanReinitializationPhase):
             raise RecoveryError("clean reinitialization transaction phase is invalid")
+        for label, value in (
+            ("original_failure", self.original_failure),
+            ("rollback_failure", self.rollback_failure),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value or len(value) > 512
+            ):
+                raise RecoveryError(f"{label} evidence is invalid")
+        if self.outcome is CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED:
+            if self.original_failure is None or self.rollback_failure is None:
+                raise RecoveryError(
+                    "rollback-blocked outcome requires original and rollback evidence"
+                )
+        elif self.rollback_failure is not None:
+            raise RecoveryError("rollback failure evidence needs ROLLBACK_BLOCKED")
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -1063,6 +1108,8 @@ class CleanReinitializationRestartAttempt:
             "stage": self.stage,
             "outcome": self.outcome.value,
             "transaction_phase": self.transaction_phase.value,
+            "original_failure": self.original_failure,
+            "rollback_failure": self.rollback_failure,
         }
 
 
@@ -1207,6 +1254,39 @@ def _restart_report(
     )
 
 
+def _failure_evidence(error: BaseException) -> str:
+    """Return total, deterministically bounded evidence for a lifecycle record.
+
+    This runs while handling arbitrary ``BaseException`` values, including
+    exceptions with hostile ``__str__`` implementations.  Evidence is
+    diagnostic only; formatting must never replace the required blocked
+    recovery report.
+    """
+
+    limit = 512
+    try:
+        raw_type = type(error).__name__
+        type_name = raw_type if isinstance(raw_type, str) else "BaseException"
+    except BaseException:
+        type_name = "BaseException"
+    try:
+        type_name = type_name.replace("\x00", " ").strip() or "BaseException"
+    except BaseException:
+        type_name = "BaseException"
+    try:
+        detail = str(error)
+        if not isinstance(detail, str):
+            detail = "<unprintable exception>"
+    except BaseException:
+        detail = "<unprintable exception>"
+    try:
+        detail = detail.replace("\x00", " ").strip() or "<no message>"
+    except BaseException:
+        detail = "<unprintable exception>"
+    prefix = f"{type_name}: "
+    return (prefix + detail)[:limit]
+
+
 def run_bounded_clean_reinitialization(
     project_root: str | os.PathLike[str],
     admission: CleanStateAdmission,
@@ -1307,13 +1387,15 @@ def run_bounded_clean_reinitialization(
         except RecoveryInterruption as interruption:
             try:
                 transaction.rollback_before_publication()
-            except RecoveryError:
+            except BaseException as rollback_error:
                 attempts.append(
                     CleanReinitializationRestartAttempt(
                         ordinal=ordinal,
                         stage="rollback",
                         outcome=CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
                         transaction_phase=transaction.phase,
+                        original_failure=_failure_evidence(interruption),
+                        rollback_failure=_failure_evidence(rollback_error),
                     )
                 )
                 return _restart_report(
@@ -1340,16 +1422,18 @@ def run_bounded_clean_reinitialization(
                     CleanReinitializationRestartOutcome.RESTART_LIMIT_REACHED,
                 )
             continue
-        except Exception:
+        except BaseException as error:
             try:
                 transaction.rollback_before_publication()
-            except RecoveryError:
+            except BaseException as rollback_error:
                 attempts.append(
                     CleanReinitializationRestartAttempt(
                         ordinal=ordinal,
                         stage="rollback",
                         outcome=CleanReinitializationRestartOutcome.ROLLBACK_BLOCKED,
                         transaction_phase=transaction.phase,
+                        original_failure=_failure_evidence(error),
+                        rollback_failure=_failure_evidence(rollback_error),
                     )
                 )
                 return _restart_report(
@@ -1416,6 +1500,7 @@ __all__ = [
     "TrackedExtensionAdmission",
     "TrackedExtensionRoot",
     "admit_clean_state",
+    "revalidate_clean_state_admission",
     "admit_tracked_extensions",
     "quarantine_previous_control_root",
     "reuse_verified_clean_reinitialization",
