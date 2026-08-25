@@ -1112,7 +1112,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "arguments": {"archive_sha256": "d" * 64},
                 },
                 "physical_files": 100_000,
-                "core_valid_relations": 28,
+                "core_valid_relations": 198_999,
                 "core_valid_relations_exact_198999": True,
                 "runtime_queries": 600,
                 "silent_truncations": 0,
@@ -1765,9 +1765,18 @@ class ScaleOrchestrationTests(unittest.TestCase):
             saturation._EXACT_CORE_VALID_RELATIONS,
         )
         saturation_source = inspect.getsource(saturation.run)
+        self.assertIn(
+            '"core_valid_relations": _EXACT_CORE_VALID_RELATIONS,',
+            saturation_source,
+        )
         self.assertIn('"core_valid_relations_exact_198999"', saturation_source)
         self.assertIn('"physical_relation_evidence_count_exact"', saturation_source)
         self.assertIn('"runtime_queries_exact"', saturation_source)
+        audit_source = inspect.getsource(saturation_audit._validate_physical_result)
+        self.assertIn(
+            '"core_valid_relations": physical["physical_relation_evidence_count"],',
+            audit_source,
+        )
         performance_source = inspect.getsource(saturation._load_performance_contract)
         self.assertIn('"core_valid_relation_count"', performance_source)
         self.assertIn('"query_count"', performance_source)

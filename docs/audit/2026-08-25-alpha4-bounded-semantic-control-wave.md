@@ -65,6 +65,21 @@ and failure receipt remain preserved.  The correction makes the writer,
 schema, and evidence recomputation use the same exact 30-predicate set; it
 does not grant r35 any credit and r35 is not reused.
 
+r36 passed exact extracted-package validation and the predicate closure, then
+reached the next release-evidence schema field.  It is terminal
+FAILED_NO_CREDIT because the producer put the local bounded semantic relation
+count (`28`) into `core_valid_relations`, whose public physical contract is
+exactly `198999`.  The producer now publishes the canonical physical Core
+count while retaining the bounded semantic count only in its separate fields.
+r36, its candidate, extracted package, raw evidence, and failure receipt are
+preserved and are not reused.
+
+Before r37, the independent audit was aligned with the same split: its
+top-level validation and its published iteration metrics now use the physical
+Core relation count (`198999`), while the explicit bounded semantic relation
+fields retain `28`.  This is a preflight correction only; it does not alter
+the r36 verdict or grant any credit.
+
 validation_claim=targeted_functional_tier_a
 runtime_diagnostic_pass=false
 acceptance_pass=false

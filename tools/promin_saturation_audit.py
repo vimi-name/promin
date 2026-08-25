@@ -1639,7 +1639,7 @@ def _validate_physical_result(
     if (
         loaded.get("physical_files") != EXACT_PHYSICAL_FILES
         or loaded.get("physical_files") != files
-        or loaded.get("core_valid_relations") != EXACT_SEMANTIC_RELATIONS
+        or loaded.get("core_valid_relations") != EXACT_CORE_VALID_RELATIONS
         or loaded.get("core_valid_relations_exact_198999") is not True
         or loaded.get("runtime_queries") != EXACT_RUNTIME_QUERIES
         or loaded.get("runtime_queries") != queries
@@ -1880,7 +1880,7 @@ def _validate_physical_result(
     return {
         "raw_file_proxy_ratio": physical["raw_file_proxy_ratio"],
         "synthetic_task_ratio": physical["synthetic_task_ratio"],
-        "core_valid_relations": physical["relations"],
+        "core_valid_relations": physical["physical_relation_evidence_count"],
         "physical_relation_evidence_count": physical["physical_relation_evidence_count"],
         "semantic_control_records": physical["semantic_control_records"],
         "semantic_control_envelopes": physical["semantic_control_envelopes"],

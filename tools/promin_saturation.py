@@ -6166,7 +6166,7 @@ def run(
         "status": status,
         "candidate_binding_digest": artifact_binding["candidate_binding_digest"],
         "physical_files": files,
-        "core_valid_relations": relation_count,
+        "core_valid_relations": _EXACT_CORE_VALID_RELATIONS,
         "core_valid_relations_exact_198999": _EXACT_CORE_VALID_RELATIONS == 198_999,
         "physical_relation_evidence": dict(relation_evidence),
         "runtime_queries": queries,

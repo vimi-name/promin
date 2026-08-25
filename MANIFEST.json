@@ -253,8 +253,8 @@
     },
     {
       "path": "docs/audit/2026-08-25-alpha4-bounded-semantic-control-wave.md",
-      "sha256": "00a6a694965accc6f944ff9df818bc1f3a547f14be77d3f557b3560423ad7bbd",
-      "size": 3856
+      "sha256": "ac03efb52299016c4f34c82646611cf59ff4fc85c23abc611220737ad71511c4",
+      "size": 4752
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
@@ -1273,8 +1273,8 @@
     },
     {
       "path": "tests/test_scale_orchestration.py",
-      "sha256": "d57e4a62f501c918a92be78ffb8373ece77b865c2e8e83550a89e88965ed75e8",
-      "size": 122228
+      "sha256": "f05cad6a54dcbb5c51eda18beb50aff7dc0978741ba4c5b8af2c603df894fcf7",
+      "size": 122594
     },
     {
       "path": "tests/test_search_scale.py",
@@ -1403,13 +1403,13 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "eb1cf53ed506cb5608197c69a85cd16aebcc48d100349a6dbd5317cc64759f0b",
-      "size": 285271
+      "sha256": "cab28a3e4bd105be184263b8f8c8748e6725e97e96bfb3570f1411bab4a782f9",
+      "size": 285284
     },
     {
       "path": "tools/promin_saturation_audit.py",
-      "sha256": "978a79323fe4583389bdbb9e8540b4efd5d73b4dc9406682cd1f47608cbc2b33",
-      "size": 110289
+      "sha256": "3f6984e517e63f65fa90cca7ec4af8715393347c9350cd38e53d3e5ddf8a8ed4",
+      "size": 110314
     },
     {
       "path": "tools/promin_service.py",
