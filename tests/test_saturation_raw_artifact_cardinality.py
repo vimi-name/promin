@@ -90,6 +90,24 @@ def _raw_manifest_validator() -> Draft202012Validator:
     )
 
 
+def test_saturation_schema_admits_exact_runner_physical_predicates() -> None:
+    """The released schema must admit the verified physical predicates emitted by saturation."""
+
+    schema = json.loads(
+        (PACKAGE_ROOT / "core" / "contracts.schema.json").read_text(encoding="utf-8")
+    )
+    predicates = schema["$defs"]["SaturationEvidence"]["properties"][
+        "contract_predicates"
+    ]["properties"]
+    expected = {
+        "physical_relation_evidence_exact",
+        "raw_file_proxy_ratio_exact",
+    }
+
+    assert not (expected - set(predicates))
+    assert all(predicates[name] == {"const": True} for name in expected)
+
+
 def test_empty_continuation_manifest_is_a_bound_zero_record_artifact() -> None:
     validator = _artifact_validator()
 

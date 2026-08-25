@@ -18423,6 +18423,12 @@
             "physical_relation_evidence_count_exact": {
               "const": true
             },
+            "physical_relation_evidence_exact": {
+              "const": true
+            },
+            "raw_file_proxy_ratio_exact": {
+              "const": true
+            },
             "rebuild_digest_equal": {},
             "rebuild_product_passes_zero": {},
             "runtime_depths_1_through_12": {},
@@ -18461,6 +18467,8 @@
             "mixed_query_classes_complete",
             "physical_bucket_cardinality_exact",
             "physical_relation_evidence_count_exact",
+            "physical_relation_evidence_exact",
+            "raw_file_proxy_ratio_exact",
             "rebuild_digest_equal",
             "rebuild_product_passes_zero",
             "runtime_depths_1_through_12",

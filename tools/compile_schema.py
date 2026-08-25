@@ -5983,6 +5983,7 @@ def _compile_projection(
                 "inventory_incremental_memory_amplification_at_most_32",
                 "inventory_passes_exact", "miss_behavior_verified", "mixed_query_classes_complete",
                 "physical_bucket_cardinality_exact", "physical_relation_evidence_count_exact",
+                "physical_relation_evidence_exact", "raw_file_proxy_ratio_exact",
                 "rebuild_digest_equal", "rebuild_product_passes_zero", "runtime_depths_1_through_12",
                  "runtime_queries_exact", "runtime_query_budget_bounded",
                 "semantic_control_envelopes_bounded", "semantic_control_records_bounded",
@@ -5993,6 +5994,8 @@ def _compile_projection(
             {
                 "physical_bucket_cardinality_exact": {"const": True},
                 "physical_relation_evidence_count_exact": {"const": True},
+                "physical_relation_evidence_exact": {"const": True},
+                "raw_file_proxy_ratio_exact": {"const": True},
                 "runtime_queries_exact": {"const": True},
                 "semantic_control_envelopes_bounded": {"const": True},
                 "semantic_control_records_bounded": {"const": True},

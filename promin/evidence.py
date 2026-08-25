@@ -4826,8 +4826,6 @@ def validate_saturation_evidence(
         is True,
         "continuation_union_complete": search.get("forced_union_matches")
         == search.get("forced_continuation_chains"),
-        "core_valid_relations_exact": physical.get("physical_relation_evidence_count")
-        == 198_999,
         "exact_artifact_binding_unchanged": verification.get("artifact_binding_unchanged") is True,
         "exact_artifact_search_verified": search.get("exact_artifact_search_verified") is True,
         "high_cardinality_terms_verified": search.get("high_cardinality_terms_verified") is True,
@@ -4838,6 +4836,7 @@ def validate_saturation_evidence(
         "mixed_query_classes_complete": mixed_complete,
         "physical_bucket_cardinality_exact": raw["physical_bucket_cardinality"]
         == {"minimum": 1_000, "maximum": 1_000, "distinct": 1},
+        "raw_file_proxy_ratio_exact": physical.get("raw_file_proxy_ratio") == 1.0,
         "rebuild_digest_equal": projection.get("equal_semantic_digest") is True,
         "rebuild_product_passes_zero": projection.get("rebuild_product_passes") == 0,
         "runtime_depths_1_through_12": {int(key) for key in depth_counts} == set(range(1, 13)),

@@ -56,6 +56,15 @@ The compact route now uses the policy-owned untrusted-source class while
 retaining path, digest, size, and bucket metadata in its payload; the public
 RetrievalPage regression passes.  r34 is preserved and is not reused.
 
+r35 passed exact extracted-package validation, completed its bounded control
+state and raw physical evidence publication, then reached release-evidence
+schema validation.  It is terminal FAILED_NO_CREDIT: the producer emitted
+the verified raw-file ratio and physical-relation predicates while the closed
+schema had not yet admitted them.  The root, candidate, extracted package,
+and failure receipt remain preserved.  The correction makes the writer,
+schema, and evidence recomputation use the same exact 30-predicate set; it
+does not grant r35 any credit and r35 is not reused.
+
 validation_claim=targeted_functional_tier_a
 runtime_diagnostic_pass=false
 acceptance_pass=false

@@ -2,7 +2,7 @@
   "acceptance_predicate_count": 102,
   "action_capability_count": 16,
   "aliases": [],
-  "bundle_digest": "263366f633e37dedccbeb8203d5fd3ec00c2a0fcfc071a60c0598a1f17b905a3",
+  "bundle_digest": "124a4a406783947d664fd121efcb2c4b834aaead3d3e5074e7c917ed9a1d4634",
   "canonical_name": "promin",
   "canonical_name_only": true,
   "core_artifact_count": 6,
@@ -21,7 +21,7 @@
     },
     {
       "path": "contracts.schema.json",
-      "sha256": "1d81eb87701822be8f3ae9b9809f370505ab3a2009a32d136b88e340642b7180"
+      "sha256": "971965425686851617d1e98fc8a7ef2a06c545cf5e2df980092039c3bc8957cc"
     },
     {
       "path": "conformance.json",
