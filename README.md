@@ -609,6 +609,23 @@ configure the process-level `PROMIN_EVIDENCE_*` variables for the distinct
 nested `physical-scale` producer; the two producers must use distinct keys and
 subjects in the same pinned trust configuration.
 
+Each newly started saturation output also has a create-only
+`saturation-run-lifecycle.jsonl`. It records the ordered physical-generation,
+inventory, semantic-ingestion, projection, runtime-query, result, and
+evidence-publication boundaries without granting pass or acceptance credit.
+Use the read-only inspection route after an interruption:
+
+```text
+python tools/promin_saturation.py --inspect-output ../evidence/saturation-run
+```
+
+An incomplete or unclassified root is preserved exactly, is never resumed or
+reused by this command, and requires a distinct output directory for any later
+candidate. The read-only inspection reports `saturation-result.json` as
+result-published only when the same lifecycle journal closes through evidence
+publication; partial progress and every inspection outcome retain
+`pass_credit=false` and `acceptance_pass=false`.
+
 The saturation audit preserves the incoming `.promin` as a byte-identified
 baseline, creates a fresh five-record, zero-scan control state for every full
 iteration, never reuses semantic state, preserves each iteration state, and

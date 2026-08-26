@@ -323,7 +323,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 290)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 291)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -351,6 +351,7 @@ class PackageValidationTests(unittest.TestCase):
             "core/semantic-model.json",
             "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
             "docs/audit/2026-08-25-compact-physical-search-performance-plan.md",
+            "docs/audit/2026-08-26-windows-saturation-lifecycle-wave.md",
             "presets/semantic-standard.json",
         ):
             self.assertIn(required, CANONICAL_PACKAGE_FILES)
@@ -924,7 +925,7 @@ class PackageValidationTests(unittest.TestCase):
             [error.message for error in errors],
         )
 
-    def test_compiled_saturation_projection_requires_exact_entity_contour(
+    def test_compiled_saturation_projection_requires_bounded_entity_contour(
         self,
     ) -> None:
         schema = json.loads(
@@ -940,12 +941,11 @@ class PackageValidationTests(unittest.TestCase):
         projection = {
             "database_bytes": 8_192,
             "elapsed_ms": 250.0,
-            "entity_count": 101_604,
+            "entity_count": 137,
             "entity_type_counts": {
-                "Artifact": 100_000,
                 "Candidate": 1,
                 "Grant": 4,
-                "Task": 1_599,
+                "Task": 132,
             },
             "equal_semantic_digest": True,
             "implementation_closure_digest": "a" * 64,
@@ -956,7 +956,7 @@ class PackageValidationTests(unittest.TestCase):
             "projection_amplification": 2.0,
             "rebuild_inventory_passes": 1,
             "rebuild_product_passes": 0,
-            "relation_count": 198_999,
+            "relation_count": 28,
             "semantic_digest": "b" * 64,
             "semantic_inflation": 3.0,
         }
@@ -970,16 +970,16 @@ class PackageValidationTests(unittest.TestCase):
         extra_entity_type["entity_type_counts"]["Document"] = 1
         self.assertTrue(list(validator.iter_errors(extra_entity_type)))
 
-        zero_candidate = json.loads(json.dumps(projection))
-        zero_candidate["entity_type_counts"]["Candidate"] = 0
-        self.assertTrue(list(validator.iter_errors(zero_candidate)))
+        oversized_candidate = json.loads(json.dumps(projection))
+        oversized_candidate["entity_type_counts"]["Candidate"] = 257
+        self.assertTrue(list(validator.iter_errors(oversized_candidate)))
 
         wrong_total = json.loads(json.dumps(projection))
-        wrong_total["entity_count"] = 101_603
+        wrong_total["entity_count"] = 257
         self.assertTrue(list(validator.iter_errors(wrong_total)))
 
         wrong_relation_total = json.loads(json.dumps(projection))
-        wrong_relation_total["relation_count"] = 198_998
+        wrong_relation_total["relation_count"] = 257
         self.assertTrue(list(validator.iter_errors(wrong_relation_total)))
 
     def test_existing_pdf_verification_does_not_invoke_generator(self) -> None:

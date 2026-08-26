@@ -100,6 +100,18 @@ _DEFAULT_STORAGE_HEADROOM_BYTES = 8 * _GIBIBYTE
 _STORAGE_FAILURE_RESERVE_BYTES = 2 * 1024 * 1024
 _STORAGE_SAMPLE_INTERVAL_SECONDS = 0.5
 _BOUND_STORAGE_CHECKPOINT_LIMIT = 10_000
+_SATURATION_LIFECYCLE_FILE_NAME = "saturation-run-lifecycle.jsonl"
+_SATURATION_LIFECYCLE_SCHEMA = "promin.saturation-run-lifecycle.v1"
+_SATURATION_LIFECYCLE_PHASE_ORDER = (
+    "physical-generation",
+    "inventory",
+    "semantic-ingestion",
+    "projection",
+    "runtime-queries",
+    "result",
+    "evidence-publication",
+)
+_SATURATION_LIFECYCLE_PHASES = frozenset(_SATURATION_LIFECYCLE_PHASE_ORDER)
 _REPRESENTATIVE_PHRASES = (
     "task workflow objective",
     "grant authority capability",
@@ -225,6 +237,148 @@ def _write_bytes(path: Path, payload: bytes) -> None:
 def _write_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
     payload = b"".join(_canonical_bytes(dict(row)) for row in rows)
     _write_bytes(path, payload)
+
+
+def _saturation_lifecycle_path(output: Path) -> Path:
+    return Path(output) / _SATURATION_LIFECYCLE_FILE_NAME
+
+
+def _physical_regular_file(path: Path) -> bool:
+    try:
+        state = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SaturationError(f"saturation lifecycle path is unavailable: {exc}") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+    return stat.S_ISREG(state.st_mode) and not (
+        int(getattr(state, "st_file_attributes", 0)) & reparse_flag
+    )
+
+
+def _read_saturation_lifecycle(output: Path) -> list[dict[str, Any]]:
+    """Read one immutable lifecycle journal without repairing or changing it."""
+
+    path = _saturation_lifecycle_path(output)
+    if not path.exists():
+        return []
+    if not _physical_regular_file(path):
+        raise SaturationError("saturation lifecycle must be a regular file")
+    try:
+        lines = path.read_bytes().splitlines(keepends=True)
+    except OSError as exc:
+        raise SaturationError(f"saturation lifecycle cannot be read: {exc}") from exc
+    if not lines:
+        raise SaturationError("saturation lifecycle is empty")
+    events: list[dict[str, Any]] = []
+    run_id: str | None = None
+    active_phase: str | None = None
+    completed_phase_index = -1
+    for sequence, line in enumerate(lines, start=1):
+        if not line.endswith(b"\n"):
+            raise SaturationError("saturation lifecycle record is not newline terminated")
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SaturationError("saturation lifecycle record is invalid JSON") from exc
+        if not isinstance(event, dict):
+            raise SaturationError("saturation lifecycle record must be an object")
+        digest = event.get("record_digest")
+        identity = {key: value for key, value in event.items() if key != "record_digest"}
+        if (
+            event.get("schema") != _SATURATION_LIFECYCLE_SCHEMA
+            or event.get("record_type") != "SaturationRunLifecycleEvent"
+            or not isinstance(event.get("run_id"), str)
+            or not event["run_id"]
+            or event.get("sequence") != sequence
+            or event.get("phase") not in _SATURATION_LIFECYCLE_PHASES
+            or event.get("status") not in {"started", "completed"}
+            or not isinstance(event.get("recorded_at"), str)
+            or event.get("pass_credit") is not False
+            or event.get("acceptance_pass") is not False
+            or event.get("product_acceptance_pass") is not False
+            or not isinstance(digest, str)
+            or digest != _digest(identity)
+            or _canonical_bytes(event) != line
+        ):
+            raise SaturationError("saturation lifecycle record is invalid")
+        if run_id is None:
+            run_id = event["run_id"]
+        elif event["run_id"] != run_id:
+            raise SaturationError("saturation lifecycle mixes run identities")
+        if event["status"] == "started":
+            if active_phase is not None:
+                raise SaturationError("saturation lifecycle starts a phase before closing one")
+            next_phase_index = completed_phase_index + 1
+            if (
+                next_phase_index >= len(_SATURATION_LIFECYCLE_PHASE_ORDER)
+                or _SATURATION_LIFECYCLE_PHASE_ORDER[next_phase_index]
+                != event["phase"]
+            ):
+                raise SaturationError("saturation lifecycle phase order is not deterministic")
+            active_phase = event["phase"]
+        else:
+            if active_phase != event["phase"]:
+                raise SaturationError("saturation lifecycle completes an unopened phase")
+            active_phase = None
+            completed_phase_index += 1
+        events.append(event)
+    return events
+
+
+def inspect_saturation_lifecycle(output: Path) -> dict[str, Any]:
+    """Classify an evidence root read-only; never resume, replace, or delete it."""
+
+    source = Path(output)
+    try:
+        state = os.lstat(source)
+    except OSError as exc:
+        raise SaturationError(f"saturation lifecycle output is unavailable: {exc}") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+    if not stat.S_ISDIR(state.st_mode) or (
+        int(getattr(state, "st_file_attributes", 0)) & reparse_flag
+    ):
+        raise SaturationError("saturation lifecycle output must be a physical directory")
+    root = source.resolve(strict=True)
+    events = _read_saturation_lifecycle(root)
+    result_present = _physical_regular_file(root / "saturation-result.json")
+    failure_present = any(
+        _physical_regular_file(root / name)
+        for name in ("saturation-failure.json", "saturation-storage-failure.json")
+    )
+    lifecycle_complete = bool(events) and len(events) == 2 * len(
+        _SATURATION_LIFECYCLE_PHASE_ORDER
+    ) and events[-1]["phase"] == "evidence-publication" and events[-1]["status"] == "completed"
+    if result_present and lifecycle_complete:
+        status = "result-published"
+    elif failure_present:
+        status = "failure-published"
+    elif events:
+        status = "incomplete"
+    else:
+        status = "unclassified"
+    last_event: dict[str, Any] | None = None
+    if events:
+        event = events[-1]
+        last_event = {
+            "sequence": event["sequence"],
+            "phase": event["phase"],
+            "status": event["status"],
+        }
+    identity = {
+        "schema": "promin.saturation-run-inspection.v1",
+        "record_type": "SaturationRunInspection",
+        "output": str(root),
+        "status": status,
+        "lifecycle_event_count": len(events),
+        "last_event": last_event,
+        "saturation_result_present": result_present,
+        "terminal_failure_receipt_present": failure_present,
+        "pass_credit": False,
+        "acceptance_pass": False,
+        "product_acceptance_pass": False,
+    }
+    return {**identity, "inspection_digest": _digest(identity)}
 
 
 def _stream_file_digest(path: Path) -> tuple[int, str]:
@@ -982,6 +1136,9 @@ class _StorageRunTelemetry:
         self._terminal_observed = False
         self._terminal_free_space: list[dict[str, Any]] = []
         self._terminal_telemetry_error: str | None = None
+        self._lifecycle_run_id = f"saturation-run:{uuid.uuid4().hex}"
+        self._lifecycle_sequence = 0
+        self._active_lifecycle_phase: str | None = None
 
     @staticmethod
     def _directory_identity(state: os.stat_result) -> dict[str, int]:
@@ -1111,6 +1268,80 @@ class _StorageRunTelemetry:
                 f"storage failure receipt reserve could not be allocated: {exc}",
                 failure_code="storage-preflight-insufficient",
             ) from exc
+
+    def _record_lifecycle_event(self, phase: str, status: str) -> None:
+        if phase not in _SATURATION_LIFECYCLE_PHASES:
+            raise SaturationError(f"unknown saturation lifecycle phase: {phase}")
+        if status not in {"started", "completed"}:
+            raise SaturationError(f"unknown saturation lifecycle status: {status}")
+        if status == "started":
+            if self._active_lifecycle_phase is not None:
+                raise SaturationError(
+                    "saturation lifecycle cannot start a new phase before the prior phase completes"
+                )
+            next_phase_index = self._lifecycle_sequence // 2
+            if (
+                next_phase_index >= len(_SATURATION_LIFECYCLE_PHASE_ORDER)
+                or _SATURATION_LIFECYCLE_PHASE_ORDER[next_phase_index] != phase
+            ):
+                raise SaturationError(
+                    "saturation lifecycle phase order is not deterministic"
+                )
+        elif self._active_lifecycle_phase != phase:
+            raise SaturationError(
+                "saturation lifecycle cannot complete a phase that is not active"
+            )
+        self._assert_output_identity()
+        path = _saturation_lifecycle_path(self.output)
+        if self._lifecycle_sequence:
+            events = _read_saturation_lifecycle(self.output)
+            if (
+                len(events) != self._lifecycle_sequence
+                or events[-1]["run_id"] != self._lifecycle_run_id
+            ):
+                raise StorageBudgetError(
+                    "saturation lifecycle changed during the active run",
+                    failure_code="storage-telemetry-unavailable",
+                )
+        identity = {
+            "schema": _SATURATION_LIFECYCLE_SCHEMA,
+            "record_type": "SaturationRunLifecycleEvent",
+            "run_id": self._lifecycle_run_id,
+            "sequence": self._lifecycle_sequence + 1,
+            "phase": phase,
+            "status": status,
+            "recorded_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "pass_credit": False,
+            "acceptance_pass": False,
+            "product_acceptance_pass": False,
+        }
+        event = {**identity, "record_digest": _digest(identity)}
+        payload = _canonical_bytes(event)
+        try:
+            mode = "xb" if self._lifecycle_sequence == 0 else "ab"
+            with path.open(mode) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise StorageBudgetError(
+                f"saturation lifecycle could not be persisted: {exc}",
+                failure_code="storage-write-exhausted",
+            ) from exc
+        self._lifecycle_sequence += 1
+        self._active_lifecycle_phase = phase if status == "started" else None
+
+    def record_lifecycle_phase(self, phase: str) -> None:
+        """Durably mark a phase before executing work that belongs to it."""
+
+        self._record_lifecycle_event(phase, "started")
+
+    def complete_lifecycle_phase(self, phase: str) -> None:
+        """Durably mark a completed phase without promoting any pass claim."""
+
+        self._record_lifecycle_event(phase, "completed")
 
     def prepare(self) -> None:
         if self.output.exists():
@@ -1603,6 +1834,26 @@ def _measure_storage_phase(phase: str) -> None:
     telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
     if telemetry is not None:
         telemetry.measure_phase(phase)
+
+
+def _start_saturation_lifecycle_phase(phase: str) -> None:
+    telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
+    if telemetry is None:
+        raise StorageBudgetError(
+            "storage telemetry is unavailable before saturation phase execution",
+            failure_code="storage-telemetry-unavailable",
+        )
+    telemetry.record_lifecycle_phase(phase)
+
+
+def _complete_saturation_lifecycle_phase(phase: str) -> None:
+    telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
+    if telemetry is None:
+        raise StorageBudgetError(
+            "storage telemetry is unavailable after saturation phase execution",
+            failure_code="storage-telemetry-unavailable",
+        )
+    telemetry.complete_lifecycle_phase(phase)
 
 
 def _peak_rss_bytes() -> int:
@@ -5508,6 +5759,7 @@ def run(
     except ImportError as exc:
         raise SaturationError(f"production promin.service is unavailable: {exc}") from exc
 
+    _start_saturation_lifecycle_phase("physical-generation")
     workspace = workspace.resolve()
     workspace_initialization = _initialize_saturation_workspace(workspace)
     runtime = service.ProminService(workspace)
@@ -5527,7 +5779,9 @@ def run(
             f"expected {files}"
         )
     _measure_storage_phase("physical-generation")
+    _complete_saturation_lifecycle_phase("physical-generation")
 
+    _start_saturation_lifecycle_phase("inventory")
     inventory_started = time.perf_counter()
     inventory, inventory_rss, inventory_rss_samples = _measure_rss(
         lambda: service.inventory_candidate(
@@ -5548,7 +5802,9 @@ def run(
     if not isinstance(candidate_digest, str) or len(candidate_digest) != 64:
         raise SaturationError("InventoryResult omitted its Candidate digest")
     _measure_storage_phase("inventory")
+    _complete_saturation_lifecycle_phase("inventory")
     semantic_commit_observations: list[dict[str, Any]] = []
+    _start_saturation_lifecycle_phase("semantic-ingestion")
     semantic_ingestion_started = time.perf_counter()
     search_corpus = _ensure_semantic_corpus(
         runtime,
@@ -5623,7 +5879,9 @@ def run(
             "physical saturation cannot reuse semantic corpus state"
         )
     _measure_storage_phase("semantic-ingestion")
+    _complete_saturation_lifecycle_phase("semantic-ingestion")
 
+    _start_saturation_lifecycle_phase("projection")
     rebuild_started = time.perf_counter()
     first_rebuild, rebuild_rss, rebuild_rss_samples = _measure_rss(
         lambda: runtime.rebuild(inventory)
@@ -5779,7 +6037,9 @@ def run(
     ):
         raise SaturationError("inventory/rebuild improperly changed release eligibility/history")
     _measure_storage_phase("projection")
+    _complete_saturation_lifecycle_phase("projection")
 
+    _start_saturation_lifecycle_phase("runtime-queries")
     query_grant = semantic_corpus.get("query_grant")
     query_ids = semantic_corpus.get("query_ids")
     continuation_query_ids = semantic_corpus.get("continuation_query_ids")
@@ -6040,6 +6300,7 @@ def run(
     if final_artifact_binding["binding_digest"] != artifact_binding["binding_digest"]:
         raise SaturationError("exact package/archive identity changed during saturation")
     _measure_storage_phase("runtime-queries")
+    _complete_saturation_lifecycle_phase("runtime-queries")
 
     p50_ms = _percentile(query_latencies_ms, 0.50)
     p95_ms = _percentile(query_latencies_ms, 0.95)
@@ -6152,7 +6413,9 @@ def run(
             "storage telemetry is unavailable before evidence publication",
             failure_code="storage-telemetry-unavailable",
         )
+    _start_saturation_lifecycle_phase("result")
     storage_telemetry.stop_for_publication()
+    _complete_saturation_lifecycle_phase("result")
     inventory_stream_path = _field(inventory, "stream_path")
     inventory_stream_digest = _field(inventory, "stream_digest")
     inventory_identity_digest = _field(
@@ -6167,6 +6430,7 @@ def run(
         or not isinstance(activation_digest, str)
     ):
         raise SaturationError("verified physical relation evidence bindings are unavailable")
+    _start_saturation_lifecycle_phase("evidence-publication")
     relation_evidence = _write_physical_relation_evidence(
         output / "raw" / "physical-relation-evidence.jsonl",
         inventory_stream_path,
@@ -6638,6 +6902,7 @@ def run(
         "manifest_digest": _digest(raw_manifest_identity),
     }
     evidence = seal_release_evidence(evidence)
+    _complete_saturation_lifecycle_phase("evidence-publication")
     return _publish_completed_saturation_result(
         output,
         evidence,
@@ -6785,10 +7050,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reuse-product", action="store_true")
     parser.add_argument("--performance-profile", default="portable-local-v1")
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument(
+        "--inspect-output",
+        type=Path,
+        help="read-only lifecycle classification for one existing saturation evidence root",
+    )
     args = parser.parse_args(argv)
     try:
         if args.self_check:
+            if args.inspect_output is not None:
+                parser.error("--self-check and --inspect-output cannot be combined")
             result = self_check(args.performance_profile)
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.inspect_output is not None:
+            if args.workspace is not None or args.output is not None or args.archive is not None:
+                parser.error("--inspect-output cannot be combined with saturation run arguments")
+            result = inspect_saturation_lifecycle(args.inspect_output)
             print(json.dumps(result, sort_keys=True))
             return 0
         if args.workspace is None or args.output is None or args.archive is None:

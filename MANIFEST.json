@@ -38,8 +38,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "222ab2c3c4a415e10cc4586cb256dbc8fc7401f803e902012808619a5fd4c907",
-      "size": 33804
+      "sha256": "374def2a5098e06db8d032673c5eec408c7cae4152eeea864f99e95579bce94b",
+      "size": 34660
     },
     {
       "path": "SECURITY.md",
@@ -265,6 +265,11 @@
       "path": "docs/audit/2026-08-25-saturation-query-trace-implementation-plan.md",
       "sha256": "2e3a1658b57abb68786769dd3fab5f0906734d9fd3f98b264904f3d39ca9a610",
       "size": 9842
+    },
+    {
+      "path": "docs/audit/2026-08-26-windows-saturation-lifecycle-wave.md",
+      "sha256": "350e486886a87911044f868f88b8ac10f52534eece43b3af9254c1b5f3e2f18b",
+      "size": 2454
     },
     {
       "path": "docs/audit/ALPHA4_HEAVY_HARDENING_WAVE_UA.md",
@@ -1168,8 +1173,8 @@
     },
     {
       "path": "tests/test_heavy_saturation_storage_budget.py",
-      "sha256": "031461406a5825736c56d84c6cc31faa3e95a7cc58db6ec52a7ad1c7b717bc48",
-      "size": 39101
+      "sha256": "663014deda09d306c30e4dd0cc87fab6bc9f039c470a1afa9c57e852f28f0e4c",
+      "size": 43963
     },
     {
       "path": "tests/test_heavy_state_binding_batch_union.py",
@@ -1238,8 +1243,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "25c2fec53aaf497a18efcf13c19af786cc1f8c46ef5546e354c1af5b9365376f",
-      "size": 75079
+      "sha256": "3a8301dee6e5e41ea1121a8ffda179ec3f6f7bf03afdde58ac6d07a75eebaf89",
+      "size": 75116
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1423,8 +1428,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "6a6718ce3836e3160cacdc8fd0beab83be9788a321f4458103854c18e3c44dfc",
-      "size": 286175
+      "sha256": "842a51ffbe54ed45fec00946374e89ff726b986bd3c50caf4955bebaf006747c",
+      "size": 298333
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1438,8 +1443,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "b9913d639b63e25c67a2cb0123d60193a0a70f8fe7fe27593d813591ede99da6",
-      "size": 145089
+      "sha256": "1cba6cdea49128356ec8988fe5a9a154b28faf469fa4687de35a7f6713039eaf",
+      "size": 145159
     }
   ],
   "generated_surfaces": [

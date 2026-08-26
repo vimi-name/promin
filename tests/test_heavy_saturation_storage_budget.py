@@ -284,6 +284,145 @@ def test_preexisting_output_is_rejected_without_deleting_its_files(tmp_path: Pat
     assert sentinel.read_bytes() == b"user-owned"
 
 
+def test_interrupted_run_has_a_durable_nonmutating_lifecycle_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted evidence run remains inspectable and cannot be reused."""
+
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "evidence"
+    archive = tmp_path / "promin-candidate.zip"
+    archive.write_bytes(b"exact candidate archive payload\n")
+    monkeypatch.setattr(
+        saturation,
+        "_disk_space_record",
+        lambda _path: _space(free_bytes=100_000_000_000),
+    )
+
+    @saturation._guard_storage_run
+    def interrupt_after_semantic_boundary(
+        selected_workspace: Path,
+        selected_output: Path,
+        *,
+        archive: Path | None = None,
+        files: int = 100_000,
+        queries: int = 600,
+        reuse_product: bool = False,
+        performance_profile: str = "portable-local-v1",
+    ) -> dict[str, object]:
+        del archive, files, queries, reuse_product, performance_profile
+        selected_workspace.mkdir(parents=True, exist_ok=False)
+        assert selected_output == output.resolve()
+        telemetry = saturation._ACTIVE_STORAGE_TELEMETRY.get()
+        assert telemetry is not None
+        telemetry.record_lifecycle_phase("physical-generation")
+        telemetry.complete_lifecycle_phase("physical-generation")
+        telemetry.record_lifecycle_phase("inventory")
+        telemetry.complete_lifecycle_phase("inventory")
+        telemetry.record_lifecycle_phase("semantic-ingestion")
+        raise KeyboardInterrupt("controlled interrupted saturation")
+
+    with pytest.raises(KeyboardInterrupt, match="controlled interrupted saturation"):
+        interrupt_after_semantic_boundary(
+            workspace,
+            output,
+            archive=archive,
+            files=100_000,
+            queries=600,
+            reuse_product=False,
+            performance_profile="portable-local-v1",
+        )
+
+    lifecycle_path = output / "saturation-run-lifecycle.jsonl"
+    lifecycle_before = lifecycle_path.read_bytes()
+    inspection = saturation.inspect_saturation_lifecycle(output)
+    assert inspection["status"] == "incomplete"
+    assert inspection["pass_credit"] is False
+    assert inspection["acceptance_pass"] is False
+    assert inspection["product_acceptance_pass"] is False
+    assert inspection["last_event"] == {
+        "sequence": 5,
+        "phase": "semantic-ingestion",
+        "status": "started",
+    }
+
+    next_telemetry = saturation._StorageRunTelemetry(
+        workspace,
+        output,
+        archive=archive,
+        performance_contract=_performance_contract(),
+        files=100_000,
+        queries=600,
+        reuse_product=False,
+        headroom_bytes=1024,
+    )
+    with pytest.raises(saturation.SaturationError, match="output directory already exists"):
+        next_telemetry.prepare()
+    next_telemetry.stop()
+    assert lifecycle_path.read_bytes() == lifecycle_before
+    assert not (output / "saturation-result.json").exists()
+
+
+def test_lifecycle_requires_ordered_completion_before_result_is_terminal(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "evidence"
+    output.mkdir()
+    telemetry = saturation._StorageRunTelemetry(
+        tmp_path / "workspace",
+        output,
+        archive=None,
+        performance_contract=_performance_contract(),
+        files=100_000,
+        queries=600,
+        reuse_product=False,
+        headroom_bytes=1024,
+    )
+    telemetry._output_created = True
+    telemetry._bind_output_identity()
+    for phase in (
+        "physical-generation",
+        "inventory",
+        "semantic-ingestion",
+        "projection",
+        "runtime-queries",
+        "result",
+    ):
+        telemetry.record_lifecycle_phase(phase)
+        telemetry.complete_lifecycle_phase(phase)
+    telemetry.record_lifecycle_phase("evidence-publication")
+    (output / "saturation-result.json").write_text("{}\n", encoding="utf-8")
+
+    inspection = saturation.inspect_saturation_lifecycle(output)
+    assert inspection["status"] == "incomplete"
+    assert inspection["saturation_result_present"] is True
+    assert inspection["pass_credit"] is False
+
+
+def test_lifecycle_rejects_out_of_order_phase_start(tmp_path: Path) -> None:
+    output = tmp_path / "evidence"
+    output.mkdir()
+    telemetry = saturation._StorageRunTelemetry(
+        tmp_path / "workspace",
+        output,
+        archive=None,
+        performance_contract=_performance_contract(),
+        files=100_000,
+        queries=600,
+        reuse_product=False,
+        headroom_bytes=1024,
+    )
+    telemetry._output_created = True
+    telemetry._bind_output_identity()
+
+    with pytest.raises(
+        saturation.SaturationError, match="phase order is not deterministic"
+    ):
+        telemetry.record_lifecycle_phase("projection")
+    assert not (output / "saturation-run-lifecycle.jsonl").exists()
+
+
 def test_storage_guard_persists_generic_saturation_rejection_after_prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
