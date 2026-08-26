@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 293
+CANONICAL_PACKAGE_FILE_COUNT = 294
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -131,6 +131,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/audit/2026-08-26-windows-saturation-lifecycle-wave.md',
         'docs/audit/2026-08-26-windows-content-index-linearization-wave.md',
         'docs/audit/2026-08-26-windows-broad-search-dependency-batch-wave.md',
+        'docs/audit/2026-08-26-windows-execution-status-sealing-wave.md',
         'docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',

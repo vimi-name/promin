@@ -277,6 +277,11 @@
       "size": 2465
     },
     {
+      "path": "docs/audit/2026-08-26-windows-execution-status-sealing-wave.md",
+      "sha256": "6e977323fed7d369a30a315ec156080e92a176e197d913ca9d4d4e377468d0b8",
+      "size": 1885
+    },
+    {
       "path": "docs/audit/2026-08-26-windows-saturation-lifecycle-wave.md",
       "sha256": "350e486886a87911044f868f88b8ac10f52534eece43b3af9254c1b5f3e2f18b",
       "size": 2454
@@ -1183,8 +1188,8 @@
     },
     {
       "path": "tests/test_heavy_saturation_storage_budget.py",
-      "sha256": "663014deda09d306c30e4dd0cc87fab6bc9f039c470a1afa9c57e852f28f0e4c",
-      "size": 43963
+      "sha256": "7f3baa38d90c3452fdb35ec86b4937e7f5f9cc8a6be7ed7b2e28b926423bdab7",
+      "size": 48207
     },
     {
       "path": "tests/test_heavy_state_binding_batch_union.py",
@@ -1253,8 +1258,8 @@
     },
     {
       "path": "tests/test_package_validation.py",
-      "sha256": "243b7dd6c7e8bf94a742c015cf8f5ba687f9ebd4995dd2cf3b26448c63af5f6d",
-      "size": 75280
+      "sha256": "b52bca5f0deb05cfbd80f809dff45ba1c80b248a07526ebdc0ae2082b0480eba",
+      "size": 75358
     },
     {
       "path": "tests/test_platform_paths_hotpath.py",
@@ -1438,8 +1443,8 @@
     },
     {
       "path": "tools/promin_saturation.py",
-      "sha256": "842a51ffbe54ed45fec00946374e89ff726b986bd3c50caf4955bebaf006747c",
-      "size": 298333
+      "sha256": "987de4014d667e54827c2bc875bc8c3a4428b8aaab8d713f5bbf3d8e96831baf",
+      "size": 301425
     },
     {
       "path": "tools/promin_saturation_audit.py",
@@ -1453,8 +1458,8 @@
     },
     {
       "path": "tools/promin_validate.py",
-      "sha256": "05d6607c21003c1f42bca67697272c88fbbac142049ac645d07ff5ee8051d93e",
-      "size": 145315
+      "sha256": "ce60c0e26587164189d3839a5604de3ed088d0d241df46811293c413280a8ec9",
+      "size": 145389
     }
   ],
   "generated_surfaces": [

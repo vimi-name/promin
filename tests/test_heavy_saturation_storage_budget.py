@@ -23,6 +23,128 @@ saturation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(saturation)
 
 
+def test_saturation_execution_status_is_independent_from_acceptance_credit() -> None:
+    passing_predicates = {
+        name: True
+        for name in {
+            "broad_query_refinement_required",
+            "content_search_verified",
+            "continuation_state_bytes_at_most_16384",
+            "continuation_token_bytes_at_most_256",
+            "continuation_token_overhead_at_most_10_percent",
+            "continuation_union_complete",
+            "exact_artifact_binding_unchanged",
+            "exact_artifact_search_verified",
+            "high_cardinality_terms_verified",
+            "hostile_proxy_content_verified",
+            "inventory_incremental_memory_amplification_at_most_32",
+            "inventory_passes_exact",
+            "miss_behavior_verified",
+            "mixed_query_classes_complete",
+            "physical_bucket_cardinality_exact",
+            "physical_relation_evidence_count_exact",
+            "physical_relation_evidence_exact",
+            "raw_file_proxy_ratio_exact",
+            "rebuild_digest_equal",
+            "rebuild_product_passes_zero",
+            "runtime_depths_1_through_12",
+            "runtime_queries_exact",
+            "runtime_query_budget_bounded",
+            "selected_closure_union_complete",
+            "semantic_commit_count_exact",
+            "semantic_control_envelopes_bounded",
+            "semantic_control_records_bounded",
+            "semantic_relation_count_bounded_exact",
+            "silent_truncations_zero",
+            "synthetic_task_ratio_zero",
+        }
+    }
+    performance_predicates = {
+        name: True
+        for name in {
+            "commit_bytes_per_changed_record_within_profile",
+            "commit_p95_within_profile",
+            "commit_p99_within_profile",
+            "database_within_profile",
+            "p50_within_profile",
+            "p95_within_profile",
+            "p99_within_profile",
+            "peak_rss_within_profile",
+            "projection_amplification_within_profile",
+            "runtime_checkpoint_count_within_profile",
+            "semantic_inflation_within_profile",
+            "semantic_ingestion_within_profile",
+        }
+    }
+    passing_performance = {
+        "predicates": performance_predicates,
+        "all_within_profile": True,
+    }
+
+    assert (
+        saturation._saturation_execution_status(
+            passing_predicates,
+            passing_performance,
+        )
+        == "pass"
+    )
+    assert (
+        saturation._saturation_execution_status(
+            {
+                **passing_predicates,
+                "broad_query_refinement_required": False,
+            },
+            passing_performance,
+        )
+        == "fail"
+    )
+    assert (
+        saturation._saturation_execution_status(
+            passing_predicates,
+            {
+                "predicates": {
+                    **performance_predicates,
+                    "commit_p99_within_profile": False,
+                },
+                "all_within_profile": False,
+            },
+        )
+        == "fail"
+    )
+    with pytest.raises(saturation.SaturationError, match="incomplete"):
+        saturation._saturation_execution_status(
+            {
+                key: value
+                for key, value in passing_predicates.items()
+                if key != "physical_relation_evidence_exact"
+            },
+            passing_performance,
+        )
+    with pytest.raises(saturation.SaturationError, match="incomplete"):
+        saturation._saturation_execution_status(
+            passing_predicates,
+            {
+                "predicates": {
+                    key: value
+                    for key, value in performance_predicates.items()
+                    if key != "commit_p99_within_profile"
+                },
+                "all_within_profile": True,
+            },
+        )
+    with pytest.raises(saturation.SaturationError, match="disagrees"):
+        saturation._saturation_execution_status(
+            passing_predicates,
+            {
+                "predicates": {
+                    **performance_predicates,
+                    "commit_p99_within_profile": False,
+                },
+                "all_within_profile": True,
+            },
+        )
+
+
 def test_compact_query_verification_requires_physical_fts_endpoint() -> None:
     physical_page = {
         "entities": [

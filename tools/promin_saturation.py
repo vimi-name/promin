@@ -88,6 +88,56 @@ _PHYSICAL_BUCKET_COUNT = 100
 _PHYSICAL_FILES_PER_BUCKET = 1_000
 _COMPACT_INVENTORY_BUCKET_COUNT = 256
 _MAX_SEMANTIC_CONTROL_RECORDS = 256
+_SATURATION_EXECUTION_PREDICATES = frozenset(
+    {
+        "broad_query_refinement_required",
+        "content_search_verified",
+        "continuation_state_bytes_at_most_16384",
+        "continuation_token_bytes_at_most_256",
+        "continuation_token_overhead_at_most_10_percent",
+        "continuation_union_complete",
+        "exact_artifact_binding_unchanged",
+        "exact_artifact_search_verified",
+        "high_cardinality_terms_verified",
+        "hostile_proxy_content_verified",
+        "inventory_incremental_memory_amplification_at_most_32",
+        "inventory_passes_exact",
+        "miss_behavior_verified",
+        "mixed_query_classes_complete",
+        "physical_bucket_cardinality_exact",
+        "physical_relation_evidence_count_exact",
+        "physical_relation_evidence_exact",
+        "raw_file_proxy_ratio_exact",
+        "rebuild_digest_equal",
+        "rebuild_product_passes_zero",
+        "runtime_depths_1_through_12",
+        "runtime_queries_exact",
+        "runtime_query_budget_bounded",
+        "selected_closure_union_complete",
+        "semantic_commit_count_exact",
+        "semantic_control_envelopes_bounded",
+        "semantic_control_records_bounded",
+        "semantic_relation_count_bounded_exact",
+        "silent_truncations_zero",
+        "synthetic_task_ratio_zero",
+    }
+)
+_SATURATION_PERFORMANCE_PREDICATES = frozenset(
+    {
+        "commit_bytes_per_changed_record_within_profile",
+        "commit_p95_within_profile",
+        "commit_p99_within_profile",
+        "database_within_profile",
+        "p50_within_profile",
+        "p95_within_profile",
+        "p99_within_profile",
+        "peak_rss_within_profile",
+        "projection_amplification_within_profile",
+        "runtime_checkpoint_count_within_profile",
+        "semantic_inflation_within_profile",
+        "semantic_ingestion_within_profile",
+    }
+)
 _PHYSICAL_BUCKET_TASK_PREFIX = "task:physical-bucket-saturation:"
 _PHYSICAL_RELATION_COUNT = (
     _EXACT_CORE_VALID_RELATIONS - _SEARCH_FIXTURE_RELATION_COUNT
@@ -5620,6 +5670,33 @@ def _performance_result(
     }
 
 
+def _saturation_execution_status(
+    contract_predicates: Mapping[str, Any],
+    performance: Mapping[str, Any],
+) -> str:
+    """Classify this exact harness run without granting product acceptance."""
+
+    performance_predicates = performance.get("predicates")
+    if (
+        not isinstance(contract_predicates, Mapping)
+        or set(contract_predicates) != _SATURATION_EXECUTION_PREDICATES
+        or any(not isinstance(value, bool) for value in contract_predicates.values())
+        or not isinstance(performance_predicates, Mapping)
+        or set(performance_predicates) != _SATURATION_PERFORMANCE_PREDICATES
+        or any(not isinstance(value, bool) for value in performance_predicates.values())
+        or not isinstance(performance.get("all_within_profile"), bool)
+    ):
+        raise SaturationError("saturation execution predicates are incomplete")
+    if performance["all_within_profile"] is not all(performance_predicates.values()):
+        raise SaturationError("saturation performance aggregate disagrees with predicates")
+    return (
+        "pass"
+        if all(contract_predicates.values())
+        and performance["all_within_profile"] is True
+        else "fail"
+    )
+
+
 def _close_active_query_phase_after_failure(primary: BaseException) -> None:
     phase = _ACTIVE_QUERY_PHASE.get()
     if phase is None:
@@ -6403,10 +6480,6 @@ def run(
         ),
         "exact_artifact_binding_unchanged": True,
     }
-    # This route is evidence-only after the semantic-state correction.  Even
-    # when bounded predicates and local profile thresholds happen to hold, it
-    # must not publish a pass or performance acceptance claim.
-    status = "fail"
     storage_telemetry = _ACTIVE_STORAGE_TELEMETRY.get()
     if storage_telemetry is None:
         raise StorageBudgetError(
@@ -6445,6 +6518,10 @@ def run(
         and relation_evidence["candidate_digest"] == candidate_digest
         and relation_evidence["activation_digest"] == activation_digest
     )
+    # Execution status classifies the exact complete harness result only.
+    # Product, release, performance-acceptance, and pass-credit fields remain
+    # independently false.
+    status = _saturation_execution_status(contract_predicates, performance)
     evidence = {
         "record_type": "SaturationEvidence",
         "status": status,
