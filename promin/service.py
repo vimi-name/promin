@@ -33,6 +33,7 @@ from .canonical import (
 from .contracts import (
     ContractBundle,
     ContractError,
+    bind_dependency_relation_batch,
     compile_candidate_recipe,
     validate_candidate_consistency,
     validate_definition,
@@ -5794,15 +5795,16 @@ def _validated_auxiliary_relations(
             or not isinstance(relation_history, Sequence)
         ):
             raise ServiceError("current Relation history must be a sequence")
-        validation_context.update(
+        validation_context = bind_dependency_relation_batch(
             {
-                "current_tasks": list(domain.tasks.values()),
-                "current_relations": [
+                **validation_context,
+                "current_tasks": tuple(domain.tasks.values()),
+                "current_relations": (
                     *[dict(value) for value in relation_history],
                     *ordered,
-                ],
-                "current_gate_results": list(domain.gate_results.values()),
-                "current_findings": list(domain.findings.values()),
+                ),
+                "current_gate_results": tuple(domain.gate_results.values()),
+                "current_findings": tuple(domain.findings.values()),
             }
         )
     for relation in ordered:

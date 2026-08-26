@@ -1554,13 +1554,29 @@ class SearchScaleFocusedTests(unittest.TestCase):
             saturation._initialize_saturation_workspace(workspace)
             with _promin_runtime(workspace) as runtime:
                 commit_observations = []
-                created = saturation._ensure_semantic_corpus(
-                    runtime,
-                    candidate_digest="a" * 64,
-                    commit_observations=commit_observations,
-                )
+                from promin import conformance
+
+                dependency_state_calls = 0
+                original_dependency_state = conformance._dependency_state
+
+                def counted_dependency_state(*args, **kwargs):
+                    nonlocal dependency_state_calls
+                    dependency_state_calls += 1
+                    return original_dependency_state(*args, **kwargs)
+
+                with mock.patch.object(
+                    conformance,
+                    "_dependency_state",
+                    counted_dependency_state,
+                ):
+                    created = saturation._ensure_semantic_corpus(
+                        runtime,
+                        candidate_digest="a" * 64,
+                        commit_observations=commit_observations,
+                    )
                 self.assertEqual(created["task_count"], 32)
                 self.assertEqual(created["relation_count"], 28)
+                self.assertEqual(dependency_state_calls, 13)
                 self.assertEqual(
                     created["continuation_query_ids"],
                     [

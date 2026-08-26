@@ -60,7 +60,9 @@ _COMPACT_INVENTORY_ENTRY_THRESHOLD = 100_000
 _INVENTORY_BUCKET_COUNT = 256
 _INVENTORY_BUCKET_DIGEST_ALGORITHM = "inventory-path-buckets-v1"
 _INVENTORY_STORAGE_LAYOUT = "physical-inventory-buckets-v1"
-_INVENTORY_CONTENT_INDEX_ALGORITHM = "inventory-content-fts-v2"
+_INVENTORY_CONTENT_INDEX_ALGORITHM = "inventory-content-fts-v3"
+_INVENTORY_SOURCE_SEARCH_TEXT_MAX_BYTES = 4_096
+_INVENTORY_INDEXED_SEARCH_TEXT_MAX_BYTES = 8_193
 _SEARCH_ROUTE = "search-v1"
 _READY_FRONTIER_ROUTE = "ready-frontier-v1"
 _READY_FRONTIER_ORDERING = ("created_at-ascending", "task_id-ascending")
@@ -1502,7 +1504,8 @@ class Projection:
                 or not 0 <= bucket < _INVENTORY_BUCKET_COUNT
                 or not isinstance(search_text, str)
                 or not search_text
-                or len(search_text.encode("utf-8")) > 4096
+                or len(search_text.encode("utf-8"))
+                > _INVENTORY_INDEXED_SEARCH_TEXT_MAX_BYTES
                 or "\x00" in search_text
             ):
                 raise ProjectionError("compact inventory content index row is invalid")
@@ -1621,7 +1624,8 @@ class Projection:
                 if (
                     not isinstance(search_text, str)
                     or not search_text
-                    or len(search_text.encode("utf-8")) > 4096
+                    or len(search_text.encode("utf-8"))
+                    > _INVENTORY_SOURCE_SEARCH_TEXT_MAX_BYTES
                     or "\x00" in search_text
                 ):
                     raise ProjectionError(
@@ -1635,6 +1639,15 @@ class Projection:
                     file_digest,
                     size,
                 )
+                raise ProjectionError(
+                    "compact inventory content index requires a persisted stream"
+                )
+            indexed_search_text = f"{path} {search_text}"
+            if (
+                len(indexed_search_text.encode("utf-8"))
+                > _INVENTORY_INDEXED_SEARCH_TEXT_MAX_BYTES
+            ):
+                raise ProjectionError("indexed inventory search text exceeds its bound")
             identity = canonical_bytes({"path": path, "digest": file_digest, "size": size})
             identity_stream.update(identity)
             stats["inventory_stream_bytes"] += (
@@ -1644,12 +1657,10 @@ class Projection:
             bucket_hashes[bucket].update(identity)
             bucket_counts[bucket] += 1
             expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
-            pending.append((expected_id, path, file_digest, size, bucket, search_text))
-            if not persisted:
-                raise ProjectionError(
-                    "compact inventory content index requires a persisted stream"
-                )
-            pending_content.append((expected_id, search_text))
+            pending.append(
+                (expected_id, path, file_digest, size, bucket, indexed_search_text)
+            )
+            pending_content.append((expected_id, indexed_search_text))
             if len(pending) >= _BULK_REBUILD_BATCH_ROWS:
                 flush()
             stats["inventory_proxies"] += 1

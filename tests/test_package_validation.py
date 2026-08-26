@@ -323,7 +323,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 292)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 293)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -353,6 +353,7 @@ class PackageValidationTests(unittest.TestCase):
             "docs/audit/2026-08-25-compact-physical-search-performance-plan.md",
             "docs/audit/2026-08-26-windows-saturation-lifecycle-wave.md",
             "docs/audit/2026-08-26-windows-content-index-linearization-wave.md",
+            "docs/audit/2026-08-26-windows-broad-search-dependency-batch-wave.md",
             "presets/semantic-standard.json",
         ):
             self.assertIn(required, CANONICAL_PACKAGE_FILES)

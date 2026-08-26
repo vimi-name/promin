@@ -1012,6 +1012,45 @@ def _relation_domain_range(
         raise ContractError("relation violates its Core domain or range")
 
 
+@dataclass
+class _DependencyRelationBatchValidation:
+    tasks: tuple[Any, ...]
+    relations: tuple[Any, ...]
+    gate_results: tuple[Any, ...]
+    findings: tuple[Any, ...]
+    validated: bool = False
+
+
+_DEPENDENCY_RELATION_BATCH_KEY = "_dependency_relation_batch_validation"
+
+
+def bind_dependency_relation_batch(
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind one immutable relation batch to one dependency-graph validation."""
+
+    checked = dict(context)
+    values: dict[str, tuple[Any, ...]] = {}
+    for field in (
+        "current_tasks",
+        "current_relations",
+        "current_gate_results",
+        "current_findings",
+    ):
+        selected = checked.get(field)
+        if not isinstance(selected, (list, tuple)):
+            raise ContractError("dependency relation batch requires exact current records")
+        values[field] = tuple(selected)
+        checked[field] = values[field]
+    checked[_DEPENDENCY_RELATION_BATCH_KEY] = _DependencyRelationBatchValidation(
+        tasks=values["current_tasks"],
+        relations=values["current_relations"],
+        gate_results=values["current_gate_results"],
+        findings=values["current_findings"],
+    )
+    return checked
+
+
 def _dependency_graph_binding(
     value: Mapping[str, Any], bundle: ContractBundle, context: Mapping[str, Any]
 ) -> None:
@@ -1021,6 +1060,18 @@ def _dependency_graph_binding(
     relations = context.get("current_relations")
     if not isinstance(tasks, (list, tuple)) or not isinstance(relations, (list, tuple)):
         raise ContractError("DEPENDS_ON validation requires current graph state")
+    gate_results = context.get("current_gate_results", ())
+    findings = context.get("current_findings", ())
+    batch = context.get(_DEPENDENCY_RELATION_BATCH_KEY)
+    batch_is_bound = (
+        isinstance(batch, _DependencyRelationBatchValidation)
+        and batch.tasks is tasks
+        and batch.relations is relations
+        and batch.gate_results is gate_results
+        and batch.findings is findings
+    )
+    if batch_is_bound and batch.validated:
+        return
     relation_values = [
         relation
         for relation in relations
@@ -1034,10 +1085,12 @@ def _dependency_graph_binding(
             {
                 "current_tasks": tasks,
                 "current_relations": relation_values,
-                "current_gate_results": context.get("current_gate_results", []),
-                "current_findings": context.get("current_findings", []),
+                "current_gate_results": gate_results,
+                "current_findings": findings,
             },
         )
+        if batch_is_bound:
+            batch.validated = True
     except Exception as exc:
         raise ContractError("DEPENDS_ON graph is cyclic or unresolved") from exc
 

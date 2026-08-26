@@ -297,7 +297,7 @@ def test_compact_stream_indexes_content_without_semantic_materialization(
             now=profile.CREATED_AT,
         )
         artifact_id = profile._artifact_id(0)
-        assert rebuilt["inventory_content_index_algorithm"] == "inventory-content-fts-v2"
+        assert rebuilt["inventory_content_index_algorithm"] == "inventory-content-fts-v3"
         assert rebuilt["inventory_content_index_rows"] == 4
         assert isinstance(rebuilt["inventory_content_index_digest"], str)
         assert [entity["id"] for entity in result["entities"]] == [artifact_id]
@@ -317,6 +317,41 @@ def test_compact_stream_indexes_content_without_semantic_materialization(
             assert connection.execute(
                 "SELECT COUNT(*) FROM inventory_content_fts"
             ).fetchone()[0] == 4
+    finally:
+        store.close()
+
+
+def test_compact_stream_indexes_path_tokens_with_bounded_refinement(
+    tmp_path: Path,
+) -> None:
+    """A broad physical path term reports bounded, non-traversable refinement."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-path-search")
+    try:
+        projection.rebuild(store, inventory=compact_inventory)
+        binding = {
+            field: f"compact-path-{index}"
+            for index, field in enumerate(projection.limits.required_resume_binding_fields)
+        }
+        broad = projection.search(
+            "record",
+            depth=1,
+            budget={**projection.limits.default_budget, "top_k": 1},
+            resume_binding=binding,
+            now=profile.CREATED_AT,
+        )
+        assert len(broad["entities"]) == 1
+        assert broad["entities"][0]["entity_type"] == "Artifact"
+        assert broad["entities"][0]["payload"]["inventory_path"].startswith(
+            "product/record-"
+        )
+        assert broad["refinement_required"] is True
+        assert 0 < len(broad["refinement_hints"]) <= 4
+        assert broad["unselected_matches_traversable"] is False
     finally:
         store.close()
 
@@ -377,10 +412,15 @@ def test_compact_content_index_rejects_null_fts_text(
         store.close()
 
 
-def test_compact_content_index_v1_metadata_requires_full_rebuild(
+@pytest.mark.parametrize(
+    "stale_algorithm",
+    ["inventory-content-fts-v1", "inventory-content-fts-v2"],
+)
+def test_compact_content_index_stale_metadata_requires_full_rebuild(
     tmp_path: Path,
+    stale_algorithm: str,
 ) -> None:
-    """The changed physical-row commitment does not silently read v1 state."""
+    """The changed physical-row commitment does not silently read stale state."""
 
     contracts = profile._compile_runtime_contracts()
     inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
@@ -391,8 +431,9 @@ def test_compact_content_index_v1_metadata_requires_full_rebuild(
         projection.rebuild(store, inventory=compact_inventory)
         with sqlite3.connect(projection.db_path) as connection:
             connection.execute(
-                "UPDATE metadata SET value='inventory-content-fts-v1' "
-                "WHERE key='inventory_content_index_algorithm'"
+                "UPDATE metadata SET value=? "
+                "WHERE key='inventory_content_index_algorithm'",
+                (stale_algorithm,),
             )
             connection.commit()
         with pytest.raises(projection_module.ProjectionError, match="content index metadata"):
