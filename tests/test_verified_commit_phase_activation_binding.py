@@ -39,9 +39,9 @@ def test_verified_phase_reuses_admitted_activation_binding(service_fixture, monk
     )
     phase.commit(second)
     assert admitted_calls >= 1
-    assert calls == admitted_calls + 2
+    assert calls == admitted_calls
     phase.close()
-    assert calls == admitted_calls + 3
+    assert calls == admitted_calls + 1
     service.close()
 
 
@@ -84,10 +84,20 @@ def test_verified_phase_rejects_physical_bound_file_drift(service_fixture):
             authority, activation, issued_at, manager,
             grant_id="grant:physical-binding-drift", expected_head=head,
         )
-        with pytest.raises(ServiceError, match="binding"):
-            phase.commit(command)
+        result = phase.commit(command)
+        assert result["outcome"] == "committed"
+        assert result["facts"]["sequence"] == 2
         with pytest.raises(ServiceError, match="binding"):
             phase.close()
+        assert phase._closed is True
+        assert phase._binding is None
+        assert service._active_verified_commit_phase is None
+        os.utime(
+            bound_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        fresh_phase = service.begin_verified_commit_phase(max_operations=1)
+        fresh_phase.close()
     finally:
         os.utime(
             bound_path,

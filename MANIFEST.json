@@ -663,8 +663,8 @@
     },
     {
       "path": "promin/service.py",
-      "sha256": "d496f1f88a3bc6434a940bae270fd36adfa4f73ebcb58a467ea40bdcd82a38bd",
-      "size": 310493
+      "sha256": "b70366f6887d0100a51336dd0b025d4bd186632a227d2f427151aa8da8ad3e1f",
+      "size": 311246
     },
     {
       "path": "promin/skills.py",
@@ -1313,13 +1313,13 @@
     },
     {
       "path": "tests/test_verified_commit_phase.py",
-      "sha256": "22a13e64a0208794dba0b1f88bc08611edc9b115f44faaa352c1fcac17abb3da",
-      "size": 4496
+      "sha256": "d92ec7d97c63d3319ead265795534624da04f34b115e7a3141631661daee9810",
+      "size": 9985
     },
     {
       "path": "tests/test_verified_commit_phase_activation_binding.py",
-      "sha256": "8dcacc668e601d33e5022b29cfbdf3158e4c476e36f1fbe4f6034f07818ab937",
-      "size": 4986
+      "sha256": "dc92523ca57a6e5d0d417b3a001867a6c23f73820afdcc826a2158f4d4194474",
+      "size": 5387
     },
     {
       "path": "tests/test_verified_commit_phase_refresh_budget.py",

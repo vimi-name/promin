@@ -2894,6 +2894,7 @@ class ProminService:
     def _close_verified_commit_phase(self, phase: VerifiedCommitPhase) -> None:
         with self._query_runtime_lock:
             phase._ensure_owner(self)
+            close_error: BaseException | None = None
             try:
                 binding = phase._binding
                 if binding is None:
@@ -2912,9 +2913,21 @@ class ProminService:
                 )
                 if current != binding.fingerprint:
                     raise ServiceError("verified commit phase binding drifted")
+            except BaseException as exc:
+                close_error = exc
+            try:
                 phase._event_phase.close()
-            except EventStoreError as exc:
-                raise ServiceError(str(exc)) from exc
+            except BaseException as exc:
+                if close_error is None:
+                    close_error = exc
+                else:
+                    try:
+                        close_error.add_note(
+                            "verified commit phase EventStore cleanup failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    except BaseException:
+                        pass
             finally:
                 phase._closed = True
                 phase._binding = None
@@ -2923,6 +2936,10 @@ class ProminService:
                 self._verified_mutation_bindings = None
                 if self._active_verified_commit_phase is phase:
                     self._active_verified_commit_phase = None
+            if close_error is not None:
+                if isinstance(close_error, EventStoreError):
+                    raise ServiceError(str(close_error)) from close_error
+                raise close_error
 
     def begin_immutable_query_phase(
         self, max_operations: int = 1
@@ -3532,6 +3549,7 @@ class ProminService:
             self._verified_mutation_context(
                 verified_phase._context_value,
                 verified_phase=verified_phase,
+                revalidate_phase_binding=False,
             )
             if verified_phase is not None
             else self._context()
