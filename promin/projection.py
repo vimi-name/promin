@@ -60,7 +60,7 @@ _COMPACT_INVENTORY_ENTRY_THRESHOLD = 100_000
 _INVENTORY_BUCKET_COUNT = 256
 _INVENTORY_BUCKET_DIGEST_ALGORITHM = "inventory-path-buckets-v1"
 _INVENTORY_STORAGE_LAYOUT = "physical-inventory-buckets-v1"
-_INVENTORY_CONTENT_INDEX_ALGORITHM = "inventory-content-fts-v1"
+_INVENTORY_CONTENT_INDEX_ALGORITHM = "inventory-content-fts-v2"
 _SEARCH_ROUTE = "search-v1"
 _READY_FRONTIER_ROUTE = "ready-frontier-v1"
 _READY_FRONTIER_ORDERING = ("created_at-ascending", "task_id-ascending")
@@ -763,8 +763,11 @@ class Projection:
               path TEXT NOT NULL UNIQUE,
               digest TEXT NOT NULL,
               size INTEGER NOT NULL CHECK(size>=0),
-              bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256)
+              bucket INTEGER NOT NULL CHECK(bucket>=0 AND bucket<256),
+              search_text TEXT NOT NULL DEFAULT ''
             ) WITHOUT ROWID;
+            CREATE INDEX inventory_records_bucket_path
+              ON inventory_records(bucket,path,id);
             CREATE TABLE inventory_bucket_commitments(
               bucket INTEGER PRIMARY KEY CHECK(bucket>=0 AND bucket<256),
               row_count INTEGER NOT NULL CHECK(row_count>=0),
@@ -1465,27 +1468,28 @@ class Projection:
             raise ProjectionError(
                 "compact inventory content index cardinality is invalid"
             )
-        orphan = connection.execute(
+        mismatch = connection.execute(
             """
             SELECT 1
             FROM inventory_content_fts AS content
             LEFT JOIN inventory_records AS records ON records.id=content.id
             WHERE records.id IS NULL
+               OR content.text IS NULL
+               OR content.text<>records.search_text
             LIMIT 1
             """
         ).fetchone()
-        if orphan is not None:
-            raise ProjectionError("compact inventory content index contains an orphan row")
+        if mismatch is not None:
+            raise ProjectionError("compact inventory content index differs from physical rows")
 
         row_hasher = hashlib.sha256(b"promin:inventory-content-rows:v1\x00")
         row_count = 0
         previous: tuple[int, str] | None = None
-        for entity_id, path, file_digest, size, bucket, content_id, search_text in connection.execute(
+        for entity_id, path, file_digest, size, bucket, search_text in connection.execute(
             """
             SELECT records.id,records.path,records.digest,records.size,records.bucket,
-                   content.id,content.text
+                   records.search_text
             FROM inventory_records AS records
-            LEFT JOIN inventory_content_fts AS content ON content.id=records.id
             ORDER BY records.bucket,records.path
             """
         ):
@@ -1496,7 +1500,6 @@ class Projection:
                 or type(size) is not int
                 or type(bucket) is not int
                 or not 0 <= bucket < _INVENTORY_BUCKET_COUNT
-                or content_id != entity_id
                 or not isinstance(search_text, str)
                 or not search_text
                 or len(search_text.encode("utf-8")) > 4096
@@ -1570,7 +1573,7 @@ class Projection:
             for bucket in range(_INVENTORY_BUCKET_COUNT)
         ]
         bucket_counts = [0] * _INVENTORY_BUCKET_COUNT
-        pending: list[tuple[str, str, str, int, int]] = []
+        pending: list[tuple[str, str, str, int, int, str]] = []
         pending_content: list[tuple[str, str]] = []
 
         def flush() -> None:
@@ -1578,7 +1581,7 @@ class Projection:
                 self._insert_bulk_values(
                     connection,
                     "inventory_records",
-                    ("id", "path", "digest", "size", "bucket"),
+                    ("id", "path", "digest", "size", "bucket", "search_text"),
                     tuple(pending),
                 )
                 pending.clear()
@@ -1641,7 +1644,7 @@ class Projection:
             bucket_hashes[bucket].update(identity)
             bucket_counts[bucket] += 1
             expected_id = "artifact:file:" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:48]
-            pending.append((expected_id, path, file_digest, size, bucket))
+            pending.append((expected_id, path, file_digest, size, bucket, search_text))
             if not persisted:
                 raise ProjectionError(
                     "compact inventory content index requires a persisted stream"

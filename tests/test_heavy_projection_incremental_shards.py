@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -296,7 +297,7 @@ def test_compact_stream_indexes_content_without_semantic_materialization(
             now=profile.CREATED_AT,
         )
         artifact_id = profile._artifact_id(0)
-        assert rebuilt["inventory_content_index_algorithm"] == "inventory-content-fts-v1"
+        assert rebuilt["inventory_content_index_algorithm"] == "inventory-content-fts-v2"
         assert rebuilt["inventory_content_index_rows"] == 4
         assert isinstance(rebuilt["inventory_content_index_digest"], str)
         assert [entity["id"] for entity in result["entities"]] == [artifact_id]
@@ -348,6 +349,123 @@ def test_compact_content_index_is_deterministic_and_tamper_fails_status(
             connection.commit()
         with pytest.raises(projection_module.ProjectionError, match="content index"):
             first.status()
+    finally:
+        store.close()
+
+
+def test_compact_content_index_rejects_null_fts_text(
+    tmp_path: Path,
+) -> None:
+    """A missing physical-text entry cannot evade compact-index validation."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-content-null")
+    try:
+        projection.rebuild(store, inventory=compact_inventory)
+        with sqlite3.connect(projection.db_path) as connection:
+            connection.execute(
+                "UPDATE inventory_content_fts SET text=NULL WHERE id=?",
+                (profile._artifact_id(0),),
+            )
+            connection.commit()
+        with pytest.raises(projection_module.ProjectionError, match="content index"):
+            projection.status()
+    finally:
+        store.close()
+
+
+def test_compact_content_index_v1_metadata_requires_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    """The changed physical-row commitment does not silently read v1 state."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-content-v1")
+    try:
+        projection.rebuild(store, inventory=compact_inventory)
+        with sqlite3.connect(projection.db_path) as connection:
+            connection.execute(
+                "UPDATE metadata SET value='inventory-content-fts-v1' "
+                "WHERE key='inventory_content_index_algorithm'"
+            )
+            connection.commit()
+        with pytest.raises(projection_module.ProjectionError, match="content index metadata"):
+            projection.status()
+    finally:
+        store.close()
+
+
+def test_compact_content_integrity_uses_indexed_rows_not_fts_nested_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Physical content integrity stays exact without an FTS-per-record join."""
+
+    contracts = profile._compile_runtime_contracts()
+    inventory, _manifest = profile._build_inventory_stream(tmp_path, 4)
+    compact_inventory = replace(inventory, retain_artifact_entities=False)
+    store, _events = profile._build_event_stream(tmp_path, 1, contracts)
+    projection = _projection(tmp_path, "compact-content-plan")
+    try:
+        projection.rebuild(store, inventory=compact_inventory)
+        statements: list[str] = []
+        original_connect = projection._connect_readonly
+
+        @contextmanager
+        def traced_connection():
+            with original_connect() as connection:
+                connection.set_trace_callback(statements.append)
+                try:
+                    yield connection
+                finally:
+                    connection.set_trace_callback(None)
+
+        monkeypatch.setattr(projection, "_connect_readonly", traced_connection)
+        assert projection.status()["inventory_content_index_rows"] == 4
+        normalized_statements = [" ".join(statement.split()).lower() for statement in statements]
+        assert not any(
+            "from inventory_records as records left join inventory_content_fts" in statement
+            for statement in normalized_statements
+        )
+        assert any(
+            "from inventory_content_fts as content left join inventory_records as records"
+            in statement
+            for statement in normalized_statements
+        )
+        with sqlite3.connect(projection.db_path) as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(inventory_records)")
+            }
+            assert "search_text" in columns
+            row_plan = [
+                row[3]
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT id,path,digest,size,bucket,search_text "
+                    "FROM inventory_records ORDER BY bucket,path"
+                )
+            ]
+            assert not any("VIRTUAL TABLE" in detail for detail in row_plan)
+            assert not any("TEMP B-TREE" in detail for detail in row_plan)
+            alignment_plan = [
+                row[3]
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT content.id,content.text,records.id,records.search_text "
+                    "FROM inventory_content_fts AS content "
+                    "LEFT JOIN inventory_records AS records ON records.id=content.id"
+                )
+            ]
+            assert any("SCAN content VIRTUAL TABLE" in detail for detail in alignment_plan)
+            assert any("SEARCH records USING PRIMARY KEY" in detail for detail in alignment_plan)
+            assert not any("SCAN records" in detail for detail in alignment_plan)
     finally:
         store.close()
 
