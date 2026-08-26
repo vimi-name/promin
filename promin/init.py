@@ -526,6 +526,32 @@ class ProviderDispatch:
             for capability in sorted(self._adapters)
         )
 
+    def rebind_runtime_evidence(
+        self, observations: Sequence[Mapping[str, Any]]
+    ) -> tuple[dict[str, Any], ...]:
+        """Bind immutable health observations to this exact provider closure."""
+
+        rebound: dict[str, Mapping[str, Any]] = {}
+        for observation in observations:
+            if not isinstance(observation, Mapping):
+                raise InitError("provider health observation must be an object")
+            capability_id = observation.get("capability_id")
+            if not isinstance(capability_id, str):
+                raise InitError("provider health observation lacks capability")
+            if capability_id in rebound:
+                raise InitError(f"duplicate provider health observation: {capability_id}")
+            if capability_id not in self._adapters:
+                raise InitError(f"unknown provider health observation: {capability_id}")
+            rebound[capability_id] = deepcopy(dict(observation))
+        missing = set(self._adapters).difference(rebound)
+        if missing or set(rebound) != set(self._adapters):
+            raise InitError(
+                "provider health observations do not match configured adapter closure"
+            )
+        for capability_id in sorted(rebound):
+            self._record_health_observation(capability_id, rebound[capability_id])
+        return self.runtime_evidence()
+
     def _record_health_observation(
         self, capability_id: str, observation: Mapping[str, Any]
     ) -> None:
@@ -2642,19 +2668,73 @@ class InitPreflightReceipt:
     provider_count: int
     observation_digests: tuple[str, ...]
     receipt_digest: str
+    observation_bytes: tuple[bytes, ...] = ()
 
 
 def _init_preflight_receipt(
     observations: Sequence[Mapping[str, Any]],
 ) -> InitPreflightReceipt:
-    observation_digests = tuple(digest_value(observation) for observation in observations)
+    ordered = tuple(
+        sorted(
+            (dict(observation) for observation in observations),
+            key=lambda observation: str(observation.get("capability_id", "")),
+        )
+    )
+    observation_digests = tuple(digest_value(observation) for observation in ordered)
     return InitPreflightReceipt(
         provider_count=len(observation_digests),
         observation_digests=observation_digests,
         receipt_digest=digest_value(
             {"observation_digests": list(observation_digests)}
         ),
+        observation_bytes=tuple(canonical_bytes(observation) for observation in ordered),
     )
+
+
+def _decode_init_preflight_observations(
+    receipt: InitPreflightReceipt, dispatch: ProviderDispatch
+) -> tuple[dict[str, Any], ...]:
+    """Decode and authenticate the immutable observation payloads in a receipt."""
+
+    if (
+        not isinstance(receipt.provider_count, int)
+        or isinstance(receipt.provider_count, bool)
+        or receipt.provider_count < 0
+        or len(receipt.observation_bytes) != receipt.provider_count
+        or len(receipt.observation_digests) != receipt.provider_count
+        or digest_value({"observation_digests": list(receipt.observation_digests)})
+        != receipt.receipt_digest
+    ):
+        raise InitError("provider preflight receipt shape or digest is invalid")
+    decoded: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for payload, expected_digest in zip(
+        receipt.observation_bytes, receipt.observation_digests
+    ):
+        if not isinstance(payload, bytes):
+            raise InitError("provider preflight observation payload is not bytes")
+        try:
+            value = parse_json_strict(payload)
+        except CanonicalError as exc:
+            raise InitError("provider preflight observation payload is invalid") from exc
+        if not isinstance(value, Mapping) or canonical_bytes(value) != payload:
+            raise InitError("provider preflight observation payload is not canonical")
+        observation = dict(value)
+        if digest_value(observation) != expected_digest:
+            raise InitError("provider preflight observation digest mismatch")
+        capability_id = observation.get("capability_id")
+        if not isinstance(capability_id, str):
+            raise InitError("provider preflight observation lacks capability")
+        if capability_id not in dispatch._adapters:
+            raise InitError(f"unknown provider preflight capability: {capability_id}")
+        if capability_id in seen:
+            raise InitError(f"duplicate provider preflight capability: {capability_id}")
+        seen.add(capability_id)
+        decoded.append(deepcopy(observation))
+    configured = set(dispatch._adapters)
+    if seen != configured:
+        raise InitError("provider preflight observations do not match configured capabilities")
+    return tuple(decoded)
 
 
 @dataclass(frozen=True)
@@ -3759,6 +3839,7 @@ def verify_provider_preflight(
     contract_bundle: ContractBundle | None = None,
     provider_dispatch: ProviderDispatch | None = None,
     receipt_root: Path | None = None,
+    preflight_receipt: InitPreflightReceipt | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if receipt_root is None:
         installed_receipts = project_root / ".promin" / "providers"
@@ -3788,8 +3869,41 @@ def verify_provider_preflight(
         receipt_root=receipt_root,
         verify_implementation=False,
     )
+    if preflight_receipt is not None:
+        if receipt_root is None:
+            raise InitError("reused provider preflight requires a receipt root")
+        verify_provider_receipt_inventory(dispatch_input, receipt_root, project_root)
+        observations = _decode_init_preflight_observations(preflight_receipt, dispatch)
+        return dispatch.rebind_runtime_evidence(observations)
     observations: list[dict[str, Any]] = []
     source_runtime_dispatch: ProviderDispatch | None = None
+    source_runtime_capabilities: set[str] = set()
+    if receipt_root is not None:
+        source_runtime_bindings = [
+            source_binding
+            for source_binding in dispatch_input["bindings"]
+            if source_binding["invocation"]["kind"] == "python-runtime"
+            and _init_identity_path(
+                str(source_binding["identity"]["source"]),
+                project_root,
+                strict=False,
+            ).exists()
+        ]
+        if source_runtime_bindings:
+            source_runtime_input = {
+                "record_type": "TechnologiesInit",
+                "bindings": source_runtime_bindings,
+            }
+            verify_provider_identities(source_runtime_input, project_root)
+            source_runtime_dispatch = resolve_provider_dispatch(
+                source_runtime_input,
+                project_root,
+                contract_bundle=contract_bundle,
+                verify_implementation=False,
+            )
+            source_runtime_capabilities = {
+                str(binding["capability_id"]) for binding in source_runtime_bindings
+            }
     for source_binding in dispatch_input["bindings"]:
         capability_id = str(source_binding["capability_id"])
         binding = dispatch.binding(capability_id)
@@ -3797,16 +3911,10 @@ def verify_provider_preflight(
         if (
             receipt_root is not None
             and source_binding["invocation"]["kind"] == "python-runtime"
+            and capability_id in source_runtime_capabilities
         ):
-            if source_runtime_dispatch is None:
-                verify_provider_identities(dispatch_input, project_root)
-                source_runtime_dispatch = resolve_provider_dispatch(
-                    dispatch_input,
-                    project_root,
-                    contract_bundle=contract_bundle,
-                    verify_implementation=False,
-                )
-            healthcheck_binding = source_runtime_dispatch.binding(capability_id)
+            if source_runtime_dispatch is not None:
+                healthcheck_binding = source_runtime_dispatch.binding(capability_id)
         identity = healthcheck_binding["identity"]
         invocation = healthcheck_binding["invocation"]
         healthcheck = healthcheck_binding["healthcheck"]
@@ -4439,6 +4547,7 @@ def _initialize_project_locked(
             contract_bundle=bundle,
             provider_dispatch=provider_dispatch,
             receipt_root=receipt_root,
+            preflight_receipt=preflight_receipt,
         )
         selected_verifier = (
             provider_dispatch.signature_verifier()
@@ -4499,6 +4608,7 @@ def _initialize_project_locked(
                         contract_bundle=context.bundle,
                         provider_dispatch=context.provider_dispatch,
                         receipt_root=context.control_root / "providers",
+                        preflight_receipt=preflight_receipt,
                     )
                     write_current_host_binding(context.control_root)
                     _remove_staging(staging)
@@ -4543,6 +4653,7 @@ def _initialize_project_locked(
             contract_bundle=context.bundle,
             provider_dispatch=context.provider_dispatch,
             receipt_root=context.control_root / "providers",
+            preflight_receipt=preflight_receipt,
         )
         if portable_shell_backup is not None and portable_shell_backup.exists():
             shutil.rmtree(portable_shell_backup)

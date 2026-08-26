@@ -180,19 +180,24 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
         "timeout_seconds": 600,
         "memory_bytes": 1073741824,
     }
-    assert manifest["aggregate"] == {"timeout_seconds": 3600}
+    assert manifest["aggregate"] == {"timeout_seconds": 6600}
+    assert manifest["selector_count"] == 126
     assert validated["selector_count"] == manifest["selector_count"]
     shards = manifest["shards"]
-    assert len(shards) == 7
-    assert {shard["id"] for shard in shards} == {
+    assert len(shards) == 11
+    assert [shard["id"] for shard in shards] == [
         "core-state",
         "experience-portability",
         "reconciliation-paths",
         "alpha4-policies",
         "service-distribution",
+        "verified-query",
+        "verified-query-lifecycle",
+        "package-validation",
+        "package-execution",
         "heavy-hardening",
         "scale-search",
-    }
+    ]
     for shard in shards:
         assert shard["selectors"]
         assert shard["limits"] == manifest["per_process"]
@@ -202,9 +207,37 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "tests").glob("test_*.py")
     )
+    excluded = "tests/test_heavy_linux_model.py"
+    assert len(discovered) == 127
+    assert (ROOT / excluded).is_file()
+    package_manifest = json.loads((ROOT / "MANIFEST.json").read_text(encoding="utf-8"))
+    package_entry = next(
+        row for row in package_manifest["files"] if row["path"] == excluded
+    )
+    assert package_entry["path"] == excluded
+    checksums = (ROOT / "SHA256SUMS.txt").read_text(encoding="utf-8")
+    assert f"  {excluded}\n" in checksums
+    assert excluded not in declared
+    discovered.remove(excluded)
+    assert len(discovered) == 126
     assert len(declared) == len(set(declared))
     assert sorted(declared) == discovered
     verified_query_phase = "tests/test_verified_query_phase.py"
     assert manifest["selectors"].count(verified_query_phase) == 1
-    heavy_hardening = next(shard for shard in shards if shard["id"] == "heavy-hardening")
-    assert heavy_hardening["selectors"].count(verified_query_phase) == 1
+    alpha4_policies = next(shard for shard in shards if shard["id"] == "alpha4-policies")
+    verified_query = next(shard for shard in shards if shard["id"] == "verified-query")
+    verified_query_lifecycle = next(shard for shard in shards if shard["id"] == "verified-query-lifecycle")
+    assert alpha4_policies["selectors"].count(verified_query_phase) == 0
+    assert verified_query["selectors"].count(verified_query_phase) == 1
+    assert verified_query_lifecycle["selectors"] == ["tests/test_verified_query_phase_lifecycle.py"]
+    service_authority_workflow = "tests/test_service_authority_workflow.py"
+    experience_portability = next(shard for shard in shards if shard["id"] == "experience-portability")
+    scale_search = next(shard for shard in shards if shard["id"] == "scale-search")
+    assert experience_portability["selectors"].count(service_authority_workflow) == 1
+    assert scale_search["selectors"].count(service_authority_workflow) == 0
+    package_validation_execution = "tests/test_package_validation_execution.py"
+    package_validation = next(shard for shard in shards if shard["id"] == "package-validation")
+    package_execution = next(shard for shard in shards if shard["id"] == "package-execution")
+    assert experience_portability["selectors"].count(package_validation_execution) == 0
+    assert package_validation["selectors"].count(package_validation_execution) == 0
+    assert package_execution["selectors"].count(package_validation_execution) == 1

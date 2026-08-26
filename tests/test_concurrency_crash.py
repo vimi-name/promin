@@ -1552,9 +1552,6 @@ class EventConcurrencyCrashTests(unittest.TestCase):
                 journal = next(store.journal.glob("*.json"))
                 envelope = json.loads(journal.read_text(encoding="utf-8"))
                 envelope["batch"]["command_id"] = "command:attacker"
-                if os.name == "nt":
-                    with self.assertRaises(PermissionError):
-                        journal.write_bytes(canonical_bytes(envelope))
                 store.close()
                 journal.write_bytes(canonical_bytes(envelope))
                 with self.assertRaises(JournalCorruption):

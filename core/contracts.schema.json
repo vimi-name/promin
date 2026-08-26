@@ -4944,9 +4944,67 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "inventory_bucket_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "inventory_bucket_manifest_digest": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "$ref": "#/$defs/Digest"
+                    }
+                  ]
+                },
+                "inventory_content_index_algorithm": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "const": "inventory-content-fts-v3"
+                    }
+                  ]
+                },
+                "inventory_content_index_digest": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "$ref": "#/$defs/Digest"
+                    }
+                  ]
+                },
+                "inventory_content_index_rows": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "inventory_digest": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "$ref": "#/$defs/Digest"
+                    }
+                  ]
+                },
                 "inventory_entries": {
                   "minimum": 0,
                   "type": "integer"
+                },
+                "inventory_manifest_digest": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "$ref": "#/$defs/Digest"
+                    }
+                  ]
                 },
                 "inventory_passes": {
                   "minimum": 0,
@@ -4959,6 +5017,23 @@
                 "inventory_relations": {
                   "minimum": 0,
                   "type": "integer"
+                },
+                "inventory_storage_mode": {
+                  "enum": [
+                    "none",
+                    "semantic-artifacts-v1",
+                    "physical-inventory-buckets-v1"
+                  ]
+                },
+                "inventory_stream_digest": {
+                  "oneOf": [
+                    {
+                      "const": ""
+                    },
+                    {
+                      "$ref": "#/$defs/Digest"
+                    }
+                  ]
                 },
                 "product_passes": {
                   "minimum": 0,
@@ -5016,6 +5091,15 @@
                 "inventory_proxies",
                 "inventory_relations",
                 "inventory_passes",
+                "inventory_storage_mode",
+                "inventory_bucket_count",
+                "inventory_bucket_manifest_digest",
+                "inventory_stream_digest",
+                "inventory_digest",
+                "inventory_manifest_digest",
+                "inventory_content_index_algorithm",
+                "inventory_content_index_rows",
+                "inventory_content_index_digest",
                 "product_passes",
                 "event_count",
                 "built_at",
@@ -9352,8 +9436,8 @@
                     ],
                     "type": "object"
                   },
-                  "maxItems": 7,
-                  "minItems": 7,
+                  "maxItems": 12,
+                  "minItems": 12,
                   "type": "array"
                 },
                 "mode": {
@@ -10701,8 +10785,8 @@
                 ],
                 "type": "object"
               },
-              "maxItems": 7,
-              "minItems": 7,
+              "maxItems": 12,
+              "minItems": 12,
               "type": "array"
             },
             "console_script": {

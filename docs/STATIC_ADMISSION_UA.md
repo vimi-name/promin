@@ -51,6 +51,7 @@ duplicate або extra selector. Для всіх shard фіксуються од
 
 Loader строго парсить JSON, відхиляє duplicate JSON keys і нормалізує/
 перевіряє digest. Runner перед запуском повторно валідовує manifest і не може
-підмінити selectors, marker або limits. Якщо host не вміє примусово встановити
-memory limit, він повертає `UNAVAILABLE`, не `PASS`. Aggregate timeout та
+підмінити selectors, marker або limits. Windows aggregate route фіксує
+`memory_enforcement=host-responsibility`: обмеження пам'яті є відповідальністю
+host/user і не видаються за process-level enforcement. Aggregate timeout та
 відсутній terminal receipt не є semantic PASS і ніколи не дають credit.

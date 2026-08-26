@@ -23,6 +23,7 @@ from .authority import AuthorityError, canonical_digest, parse_timestamp
 from .resources import bundle_root
 from .version import standard_version
 from .canonical import CanonicalError, ParseLimits, canonical_bytes, parse_json_strict
+from .contracts import BASE_USER_COMMANDS
 from .final_admission import FinalAdmissionError, _archive_name as _final_admission_archive_name
 from .platform_paths import filesystem_path
 from .saturation_query_trace import SaturationQueryTraceError, validate_saturation_query_trace
@@ -2630,6 +2631,43 @@ def _validate_no_degradation_runtime_cross_binding(
         raise EvidenceError("no-degradation controller executable SHA-256 drift")
 
 
+_EXPECTED_INSTALLED_COMMAND_INVOCATIONS = (
+    "--help",
+    *(f"{command} --help" for command in BASE_USER_COMMANDS),
+)
+
+
+def _validate_installed_command_invocations(value: Any) -> None:
+    """Require one bounded successful help probe for every public command."""
+
+    if (
+        not isinstance(value, list)
+        or [row.get("command") for row in value if isinstance(row, Mapping)]
+        != list(_EXPECTED_INSTALLED_COMMAND_INVOCATIONS)
+    ):
+        raise EvidenceError("installed command invocation set is incomplete or reordered")
+    for row in value:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != _PLATFORM_COMMAND_FIELDS
+            or not isinstance(row.get("returncode"), int)
+            or isinstance(row.get("returncode"), bool)
+            or row["returncode"] != 0
+            or not all(
+                _valid_digest(row.get(field))
+                for field in ("argv_digest", "stdout_sha256", "stderr_sha256")
+            )
+            or any(
+                not isinstance(row.get(field), int)
+                or isinstance(row.get(field), bool)
+                or row[field] < 0
+                or row[field] > 1024 * 1024
+                for field in ("stdout_bytes", "stderr_bytes")
+            )
+        ):
+            raise EvidenceError("installed command invocation evidence is invalid")
+
+
 def _validate_no_degradation_installation(
     value: Any,
     *,
@@ -2747,32 +2785,7 @@ def _validate_no_degradation_installation(
         or (expected_platform == "windows" and console.get("posix_execute_bits") is not None)
     ):
         raise EvidenceError("no-degradation installed command identity is invalid")
-    commands = value.get("invocations")
-    expected_commands = [
-        "--help",
-        "init --help",
-        "doctor --help",
-        "status --help",
-        "next --help",
-        "validate --help",
-        "continue --help",
-    ]
-    if (
-        not isinstance(commands, list)
-        or [row.get("command") for row in commands if isinstance(row, Mapping)]
-        != expected_commands
-        or any(
-            not isinstance(row, Mapping)
-            or set(row) != _PLATFORM_COMMAND_FIELDS
-            or row.get("returncode") != 0
-            or not all(
-                _valid_digest(row.get(field))
-                for field in ("argv_digest", "stdout_sha256", "stderr_sha256")
-            )
-            for row in commands
-        )
-    ):
-        raise EvidenceError("no-degradation installed command probes are incomplete")
+    _validate_installed_command_invocations(value.get("invocations"))
     if (
         not isinstance(value.get("declared_runtime_dependencies"), list)
         or not value["declared_runtime_dependencies"]
@@ -5670,14 +5683,11 @@ def validate_platform_verification(
     ):
         raise EvidenceError("platform identity is not derived from the installed environment")
     distribution = installation.get("installed_distribution")
-    if (
-        not isinstance(distribution, Mapping)
-        or set(distribution) != {"name", "version", "runtime_version"}
-        or distribution.get("name") != "promin"
-        or distribution.get("version") != candidate["version"]
-        or distribution.get("runtime_version") != candidate["version"]
-    ):
-        raise EvidenceError("installed distribution identity differs from the exact candidate")
+    _validate_installed_distribution_identity(
+        distribution,
+        candidate=candidate,
+        observed=observed,
+    )
     console = installation.get("console_script")
     if (
         not isinstance(console, Mapping)
@@ -5702,35 +5712,7 @@ def validate_platform_verification(
         or console["size_bytes"] != observed["console_wrapper"]["bytes"]
     ):
         raise EvidenceError("installed console-script differs from the nested observation")
-    commands = installation.get("command_invocations")
-    expected_commands = [
-        "--help",
-        "init --help",
-        "doctor --help",
-        "status --help",
-        "next --help",
-        "validate --help",
-        "continue --help",
-    ]
-    if not isinstance(commands, list) or [item.get("command") for item in commands if isinstance(item, Mapping)] != expected_commands:
-        raise EvidenceError("installed command invocation set is incomplete or reordered")
-    for command in commands:
-        if (
-            not isinstance(command, Mapping)
-            or set(command) != _PLATFORM_COMMAND_FIELDS
-            or command.get("returncode") != 0
-            or not _valid_digest(command.get("argv_digest"))
-            or not _valid_digest(command.get("stdout_sha256"))
-            or not _valid_digest(command.get("stderr_sha256"))
-            or any(
-                not isinstance(command.get(field), int)
-                or isinstance(command.get(field), bool)
-                or command[field] < 0
-                or command[field] > 1024 * 1024
-                for field in ("stdout_bytes", "stderr_bytes")
-            )
-        ):
-            raise EvidenceError("installed command invocation evidence is invalid")
+    _validate_installed_command_invocations(installation.get("command_invocations"))
     closure = installation.get("dependency_closure")
     if not isinstance(closure, Mapping) or set(closure) != {
         "declared_runtime",
@@ -5830,6 +5812,42 @@ def validate_platform_verification(
     ):
         raise EvidenceError("platform installation projections differ from the nested observation")
     return deepcopy(dict(verification))
+
+
+def _validate_installed_distribution_identity(
+    distribution: Any,
+    *,
+    candidate: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> None:
+    """Bind canonical SemVer and its observed Python metadata normalization."""
+
+    from .version import python_distribution_version
+
+    installed = observed.get("promin")
+    transitive = observed.get("transitive_distributions")
+    metadata_rows = (
+        [
+            row
+            for row in transitive
+            if isinstance(row, Mapping)
+            and str(row.get("name", "")).casefold() == "promin"
+        ]
+        if isinstance(transitive, list)
+        else []
+    )
+    if (
+        not isinstance(distribution, Mapping)
+        or set(distribution) != {"name", "version", "runtime_version"}
+        or distribution.get("name") != "promin"
+        or distribution.get("version") != candidate.get("version")
+        or distribution.get("runtime_version") != candidate.get("version")
+        or not isinstance(installed, Mapping)
+        or installed.get("version") != candidate.get("version")
+        or len(metadata_rows) != 1
+        or metadata_rows[0].get("version") != python_distribution_version()
+    ):
+        raise EvidenceError("installed distribution identity differs from the exact candidate")
 
 
 def validate_human_document_verification(

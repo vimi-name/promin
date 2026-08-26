@@ -45,6 +45,7 @@ from promin_validate import (  # noqa: E402
     _observe_installed_environment,
     _pip_install_arguments,
     _run_capture_with_deadline,
+    _invoke_workflow_help,
     canonical_bytes,
     distribution_identity,
     scan_distribution,
@@ -63,6 +64,7 @@ from promin_no_degradation import (  # noqa: E402
     _run_bounded,
     main as no_degradation_main,
 )
+from promin import evidence as evidence_module  # noqa: E402
 from promin.evidence import EvidenceError, load_external_json_stable  # noqa: E402
 
 sys.path.remove(str(TOOLS))
@@ -231,39 +233,12 @@ def create_fabricated_standard_evidence(
     return evidence_root, plan_path
 
 
-class PackageValidationTests(unittest.TestCase):
+class _PackageValidationBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.template_temporary = tempfile.TemporaryDirectory(prefix="promin-package-template-")
         cls.template = Path(cls.template_temporary.name) / "promin"
-        local_control_dir = "." + "".join(
-            map(chr, (97, 103, 101, 110, 116, 100, 111, 99))
-        )
-        shutil.copytree(
-            PACKAGE_ROOT,
-            cls.template,
-            ignore=shutil.ignore_patterns(
-                "MANIFEST.json",
-                "SHA256SUMS.txt",
-                ".git",
-                local_control_dir,
-                "__pycache__",
-                "*.pyc",
-                ".pytest_cache",
-                ".mypy_cache",
-                ".cache",
-                "cache",
-                "_work",
-                ".venv",
-                "venv",
-                "build",
-                "dist",
-                "htmlcov",
-                "*.egg-info",
-            ),
-        )
-        repair_core_manifest(cls.template)
-        sync_version(cls.template)
+        copy_canonical_payload_tree(cls.template)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -278,6 +253,8 @@ class PackageValidationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+
+class PackageValidationInventoryTests(_PackageValidationBase):
     def test_manifest_and_checksum_close_over_exact_tree(self) -> None:
         write_integrity(self.root)
         result = verify_package_integrity(self.root)
@@ -323,7 +300,7 @@ class PackageValidationTests(unittest.TestCase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 294)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 304)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -355,6 +332,7 @@ class PackageValidationTests(unittest.TestCase):
             "docs/audit/2026-08-26-windows-content-index-linearization-wave.md",
             "docs/audit/2026-08-26-windows-broad-search-dependency-batch-wave.md",
             "docs/audit/2026-08-26-windows-execution-status-sealing-wave.md",
+            "docs/audit/2026-08-26-windows-platform-version-identity-wave.md",
             "presets/semantic-standard.json",
         ):
             self.assertIn(required, CANONICAL_PACKAGE_FILES)
@@ -406,6 +384,9 @@ class PackageValidationTests(unittest.TestCase):
             "tests/test_verified_commit_phase_tamper.py",
             "tests/test_verified_envelope_snapshot.py",
             "tests/test_verified_query_phase.py",
+            "tests/test_verified_query_phase_admission.py",
+            "tests/test_verified_query_phase_freshness.py",
+            "tests/test_verified_query_phase_lifecycle.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
             "tests/test_heavy_checkpoint_profile.py",
@@ -1215,6 +1196,14 @@ class PackageValidationTests(unittest.TestCase):
         self.assertEqual(result["environment"], "current-interpreter")
         self.assertFalse(result["interpreter"]["nested_venv_created"])
 
+
+class _PackageValidationExecutionChecks(_PackageValidationBase):
+    __test__ = False
+
+    def test_template_excludes_arbitrary_untracked_root_file(self) -> None:
+        self.assertNotIn(".tmp_refs.txt", CANONICAL_PAYLOAD_FILES)
+        self.assertFalse((self.template / ".tmp_refs.txt").exists())
+
     def test_required_test_skip_is_fail_closed(self) -> None:
         clean = {"tests": 10, "failures": 0, "errors": 0, "skipped": 0}
         skipped = {**clean, "skipped": 1}
@@ -1471,6 +1460,13 @@ class PackageValidationTests(unittest.TestCase):
             install_mode=None,
             candidate_binding_output=candidate_binding_path,
         )
+        candidate_binding_value = json.loads(
+            candidate_binding_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            candidate_binding_path.read_bytes(),
+            canonical_bytes(candidate_binding_value),
+        )
         candidate_bytes = archive.read_bytes()
         self.assertTrue(built["candidate_only"])
         self.assertFalse(built["current_distribution_eligible"])
@@ -1561,6 +1557,127 @@ class PackageValidationTests(unittest.TestCase):
                     install_mode=mode,
                     wheelhouse=wheelhouse,
                 )
+
+    def test_installed_command_help_probes_cover_exact_public_surface(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        invoked = _invoke_workflow_help(
+            root=self.root,
+            python=Path(sys.executable),
+            environment=environment,
+            executable=None,
+        )
+
+        self.assertEqual(
+            [row["command"] for row in invoked],
+            [
+                "--help",
+                "init --help",
+                "doctor --help",
+                "status --help",
+                "next --help",
+                "validate --help",
+                "static-admission --help",
+                "continue --help",
+                "audit --help",
+                "refresh --help",
+                "context --help",
+                "skills --help",
+            ],
+        )
+        schema = json.loads(
+            (self.root / "core" / "contracts.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        invocation_schema = schema["$defs"]["PlatformVerificationResult"][
+            "properties"
+        ]["installation"]["properties"]["command_invocations"]
+        self.assertEqual(invocation_schema["minItems"], 12)
+        self.assertEqual(invocation_schema["maxItems"], 12)
+
+    def test_independent_command_validator_requires_exact_public_help_closure(self) -> None:
+        validator = getattr(
+            evidence_module,
+            "_validate_installed_command_invocations",
+            None,
+        )
+        self.assertIsNotNone(validator)
+        expected_commands = [
+            "--help",
+            "init --help",
+            "doctor --help",
+            "status --help",
+            "next --help",
+            "validate --help",
+            "static-admission --help",
+            "continue --help",
+            "audit --help",
+            "refresh --help",
+            "context --help",
+            "skills --help",
+        ]
+
+        def command_row(command: str) -> dict[str, object]:
+            return {
+                "command": command,
+                "argv_digest": "1" * 64,
+                "returncode": 0,
+                "stdout_sha256": "2" * 64,
+                "stdout_bytes": 1,
+                "stderr_sha256": "3" * 64,
+                "stderr_bytes": 0,
+            }
+
+        exact = [command_row(command) for command in expected_commands]
+        validator(exact)
+        for invalid in (
+            exact[:-1],
+            [*exact[:6], *exact[7:]],
+            [exact[1], exact[0], *exact[2:]],
+            [*exact, command_row("extra --help")],
+            [{**exact[0], "returncode": False}, *exact[1:]],
+            [{**exact[0], "returncode": 0.0}, *exact[1:]],
+        ):
+            with self.assertRaisesRegex(
+                EvidenceError,
+                "installed command invocation",
+            ):
+                validator(invalid)
+
+    def test_installed_distribution_binds_semver_and_metadata_version(self) -> None:
+        candidate = {"version": "1.0.0-alpha.4"}
+        distribution = {
+            "name": "promin",
+            "version": "1.0.0-alpha.4",
+            "runtime_version": "1.0.0-alpha.4",
+        }
+        observed = {
+            "promin": {"version": "1.0.0-alpha.4"},
+            "transitive_distributions": [
+                {"name": "promin", "version": "1.0.0a4"},
+                {"name": "jsonschema", "version": "4.26.0"},
+            ]
+        }
+
+        evidence_module._validate_installed_distribution_identity(
+            distribution,
+            candidate=candidate,
+            observed=observed,
+        )
+        stale_observed = {
+            **observed,
+            "transitive_distributions": [
+                {"name": "promin", "version": "1.0.0a3"},
+                {"name": "jsonschema", "version": "4.26.0"},
+            ],
+        }
+        with self.assertRaisesRegex(EvidenceError, "installed distribution identity"):
+            evidence_module._validate_installed_distribution_identity(
+                distribution,
+                candidate=candidate,
+                observed=stale_observed,
+            )
 
     def test_installed_observation_reads_version_from_canonical_source_root(self) -> None:
         """The isolated installation cwd intentionally has no canonical source tree."""

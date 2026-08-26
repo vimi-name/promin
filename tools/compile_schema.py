@@ -3502,6 +3502,29 @@ def _compile_projection(
         "inventory_proxies": {"minimum": 0, "type": "integer"},
         "inventory_relations": {"minimum": 0, "type": "integer"},
         "inventory_passes": {"minimum": 0, "type": "integer"},
+        "inventory_storage_mode": {
+            "enum": ["none", "semantic-artifacts-v1", "physical-inventory-buckets-v1"]
+        },
+        "inventory_bucket_count": {"minimum": 0, "type": "integer"},
+        "inventory_bucket_manifest_digest": {
+            "oneOf": [{"const": ""}, {"$ref": "#/$defs/Digest"}]
+        },
+        "inventory_stream_digest": {
+            "oneOf": [{"const": ""}, {"$ref": "#/$defs/Digest"}]
+        },
+        "inventory_digest": {
+            "oneOf": [{"const": ""}, {"$ref": "#/$defs/Digest"}]
+        },
+        "inventory_manifest_digest": {
+            "oneOf": [{"const": ""}, {"$ref": "#/$defs/Digest"}]
+        },
+        "inventory_content_index_algorithm": {
+            "oneOf": [{"const": ""}, {"const": "inventory-content-fts-v3"}]
+        },
+        "inventory_content_index_rows": {"minimum": 0, "type": "integer"},
+        "inventory_content_index_digest": {
+            "oneOf": [{"const": ""}, {"$ref": "#/$defs/Digest"}]
+        },
         "product_passes": {"minimum": 0, "type": "integer"},
         "event_count": {"minimum": 0, "type": "integer"},
         "built_at": {"$ref": "#/$defs/Timestamp"},
@@ -5202,8 +5225,8 @@ def _compile_projection(
             ),
             "command_invocations": {
                 "items": command_invocation,
-                "maxItems": 7,
-                "minItems": 7,
+                "maxItems": 12,
+                "minItems": 12,
                 "type": "array",
             },
             "dependency_closure": dependency_closure,

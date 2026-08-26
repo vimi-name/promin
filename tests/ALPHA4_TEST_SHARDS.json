@@ -50,9 +50,10 @@
     "tests/test_authority_domain.py",
     "tests/test_bootstrap_mutation_verification.py",
     "tests/test_canonical_init.py",
+    "tests/test_client_report_tool.py",
     "tests/test_concurrency_crash.py",
-    "tests/test_contract_mutations.py",
     "tests/test_continuation_renewal.py",
+    "tests/test_contract_mutations.py",
     "tests/test_events_projection.py",
     "tests/test_expert_init_bundle_roundtrip.py",
     "tests/test_heavy_artifact_minimality.py",
@@ -70,7 +71,6 @@
     "tests/test_heavy_language_analysis.py",
     "tests/test_heavy_language_catalog.py",
     "tests/test_heavy_language_profile_catalog.py",
-    "tests/test_heavy_linux_model.py",
     "tests/test_heavy_performance_model.py",
     "tests/test_heavy_product_inspection.py",
     "tests/test_heavy_projection_bulk_rebuild.py",
@@ -94,31 +94,49 @@
     "tests/test_heavy_windows_event_history.py",
     "tests/test_heavy_windows_publication.py",
     "tests/test_heavy_windows_seal_scaling.py",
+    "tests/test_init_layer_configured_routes.py",
     "tests/test_initial_project_work.py",
     "tests/test_installed_distribution.py",
-    "tests/test_client_report_tool.py",
     "tests/test_language_tooling.py",
     "tests/test_package_validation.py",
+    "tests/test_package_validation_execution.py",
     "tests/test_platform_paths_hotpath.py",
     "tests/test_projection_profile_cleanup.py",
     "tests/test_public_workflows_cli.py",
     "tests/test_retrieval_continuation_service.py",
     "tests/test_revalidation_workflow.py",
     "tests/test_saturation_archive_binding.py",
+    "tests/test_saturation_query_trace.py",
     "tests/test_saturation_raw_artifact_cardinality.py",
+    "tests/test_saturation_schema_meta_policy.py",
+    "tests/test_saturation_vcs_maintenance_policy.py",
     "tests/test_scale_orchestration.py",
     "tests/test_search_scale.py",
+    "tests/test_service_authority_workflow.py",
     "tests/test_service_cli.py",
+    "tests/test_service_cli_team_workflow.py",
+    "tests/test_service_context_cache.py",
+    "tests/test_service_coordination_workflow.py",
     "tests/test_service_mutation_cache.py",
-    "tests/test_verified_query_phase.py"
+    "tests/test_service_projection_workflow.py",
+    "tests/test_verified_commit_phase.py",
+    "tests/test_verified_commit_phase_activation_binding.py",
+    "tests/test_verified_commit_phase_refresh_budget.py",
+    "tests/test_verified_commit_phase_service.py",
+    "tests/test_verified_commit_phase_tamper.py",
+    "tests/test_verified_envelope_snapshot.py",
+    "tests/test_verified_query_phase.py",
+    "tests/test_verified_query_phase_admission.py",
+    "tests/test_verified_query_phase_freshness.py",
+    "tests/test_verified_query_phase_lifecycle.py"
   ],
-  "selector_count": 108,
+  "selector_count": 126,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
   },
   "aggregate": {
-    "timeout_seconds": 3600
+    "timeout_seconds": 6600
   },
   "shards": [
     {
@@ -131,7 +149,9 @@
         "tests/test_canonical_init.py",
         "tests/test_concurrency_crash.py",
         "tests/test_contract_mutations.py",
-        "tests/test_events_projection.py"
+        "tests/test_events_projection.py",
+        "tests/test_heavy_saturation_storage_budget.py",
+        "tests/test_heavy_state_binding_storage.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -153,7 +173,9 @@
         "tests/test_alpha_promin_docs_shell.py",
         "tests/test_alpha_skills.py",
         "tests/test_alpha_skills_checklist.py",
-        "tests/test_initial_project_work.py"
+        "tests/test_initial_project_work.py",
+        "tests/test_service_authority_workflow.py",
+        "tests/test_service_projection_workflow.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -169,7 +191,10 @@
         "tests/test_alpha3_reconciliation_performance.py",
         "tests/test_alpha3_reconciliation_static.py",
         "tests/test_alpha3_reconciliation_windows.py",
-        "tests/test_platform_paths_hotpath.py"
+        "tests/test_heavy_derived_storage.py",
+        "tests/test_heavy_projection_bulk_rebuild.py",
+        "tests/test_platform_paths_hotpath.py",
+        "tests/test_service_context_cache.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -202,7 +227,24 @@
         "tests/test_alpha4_semantic_scope_gates.py",
         "tests/test_alpha4_static_admission.py",
         "tests/test_alpha4_windows_publication.py",
-        "tests/test_expert_init_bundle_roundtrip.py"
+        "tests/test_expert_init_bundle_roundtrip.py",
+        "tests/test_heavy_failclosed_adversarial.py",
+        "tests/test_heavy_init_profiles.py",
+        "tests/test_heavy_language_analysis.py",
+        "tests/test_heavy_language_profile_catalog.py",
+        "tests/test_heavy_provider_identity.py",
+        "tests/test_heavy_receipt_cache.py",
+        "tests/test_heavy_weak_model_execution.py",
+        "tests/test_heavy_windows_seal_scaling.py",
+        "tests/test_init_layer_configured_routes.py",
+        "tests/test_language_tooling.py",
+        "tests/test_projection_profile_cleanup.py",
+        "tests/test_saturation_schema_meta_policy.py",
+        "tests/test_saturation_vcs_maintenance_policy.py",
+        "tests/test_service_cli_team_workflow.py",
+        "tests/test_verified_commit_phase.py",
+        "tests/test_verified_commit_phase_activation_binding.py",
+        "tests/test_verified_commit_phase_refresh_budget.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -213,11 +255,71 @@
       "id": "service-distribution",
       "selectors": [
         "tests/test_bootstrap_mutation_verification.py",
+        "tests/test_client_report_tool.py",
+        "tests/test_continuation_renewal.py",
+        "tests/test_heavy_eventstore_lifecycle.py",
+        "tests/test_heavy_eventstore_postcommit_index_failure.py",
+        "tests/test_heavy_recovery_stress.py",
+        "tests/test_heavy_revalidation.py",
+        "tests/test_heavy_runtime_checkpoint_incremental.py",
+        "tests/test_heavy_saturation_continuation_sqlite.py",
+        "tests/test_heavy_state_binding_batching.py",
         "tests/test_installed_distribution.py",
-        "tests/test_package_validation.py",
         "tests/test_public_workflows_cli.py",
+        "tests/test_retrieval_continuation_service.py",
+        "tests/test_revalidation_workflow.py",
         "tests/test_service_cli.py",
-        "tests/test_service_mutation_cache.py"
+        "tests/test_service_coordination_workflow.py",
+        "tests/test_service_mutation_cache.py",
+        "tests/test_verified_commit_phase_service.py",
+        "tests/test_verified_commit_phase_tamper.py",
+        "tests/test_verified_envelope_snapshot.py",
+        "tests/test_verified_query_phase_freshness.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "verified-query",
+      "selectors": [
+        "tests/test_verified_query_phase.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "verified-query-lifecycle",
+      "selectors": [
+        "tests/test_verified_query_phase_lifecycle.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "package-validation",
+      "selectors": [
+        "tests/test_heavy_artifact_minimality.py",
+        "tests/test_heavy_language_catalog.py",
+        "tests/test_heavy_windows_publication.py",
+        "tests/test_package_validation.py",
+        "tests/test_saturation_archive_binding.py",
+        "tests/test_verified_query_phase_admission.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "package-execution",
+      "selectors": [
+        "tests/test_package_validation_execution.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -227,54 +329,22 @@
     {
       "id": "heavy-hardening",
       "selectors": [
-        "tests/test_heavy_artifact_minimality.py",
-        "tests/test_client_report_tool.py",
         "tests/test_heavy_checkpoint_profile.py",
         "tests/test_heavy_comparative_bench.py",
-        "tests/test_heavy_derived_storage.py",
         "tests/test_heavy_event_batching.py",
         "tests/test_heavy_eventstore_commit_io_profile.py",
-        "tests/test_heavy_eventstore_lifecycle.py",
-        "tests/test_heavy_eventstore_postcommit_index_failure.py",
         "tests/test_heavy_eventstore_prefix_witness.py",
         "tests/test_heavy_eventstore_validator_cache.py",
-        "tests/test_heavy_failclosed_adversarial.py",
-        "tests/test_heavy_init_profiles.py",
-        "tests/test_heavy_language_analysis.py",
-        "tests/test_heavy_language_catalog.py",
-        "tests/test_heavy_language_profile_catalog.py",
-        "tests/test_heavy_linux_model.py",
-        "tests/test_heavy_performance_model.py",
         "tests/test_heavy_product_inspection.py",
-        "tests/test_heavy_projection_bulk_rebuild.py",
         "tests/test_heavy_projection_incremental_shards.py",
         "tests/test_heavy_projection_profile.py",
-        "tests/test_projection_profile_cleanup.py",
-        "tests/test_heavy_provider_identity.py",
-        "tests/test_heavy_query_tail_scale.py",
-        "tests/test_heavy_receipt_cache.py",
-        "tests/test_heavy_recovery_stress.py",
         "tests/test_heavy_relation_ledger_hotpath.py",
-        "tests/test_heavy_revalidation.py",
-        "tests/test_heavy_runtime_checkpoint_incremental.py",
-        "tests/test_heavy_saturation_continuation_sqlite.py",
-        "tests/test_heavy_saturation_storage_budget.py",
         "tests/test_heavy_state_binding_batch_union.py",
-        "tests/test_heavy_state_binding_batching.py",
-        "tests/test_heavy_state_binding_storage.py",
         "tests/test_heavy_state_binding_storage_retention.py",
-        "tests/test_heavy_weak_model_execution.py",
         "tests/test_heavy_weak_model_workflow.py",
-        "tests/test_language_tooling.py",
         "tests/test_heavy_windows_event_history.py",
-        "tests/test_heavy_windows_publication.py",
-        "tests/test_heavy_windows_seal_scaling.py",
-        "tests/test_retrieval_continuation_service.py",
-        "tests/test_continuation_renewal.py",
-        "tests/test_revalidation_workflow.py",
-        "tests/test_saturation_archive_binding.py",
-        "tests/test_saturation_raw_artifact_cardinality.py",
-        "tests/test_verified_query_phase.py"
+        "tests/test_saturation_query_trace.py",
+        "tests/test_saturation_raw_artifact_cardinality.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -284,6 +354,8 @@
     {
       "id": "scale-search",
       "selectors": [
+        "tests/test_heavy_performance_model.py",
+        "tests/test_heavy_query_tail_scale.py",
         "tests/test_scale_orchestration.py",
         "tests/test_search_scale.py"
       ],
@@ -292,5 +364,7 @@
         "memory_bytes": 1073741824
       }
     }
-  ]
+  ],
+  "selector_digest": "0e5db56cbb788defc4be2ffd2e0242617a2828945c6ff2f4e431438225840568",
+  "manifest_digest": "f71d97ff0f2347048a480ef82726495bb7ceaadd676627b82664f1b523b722ea"
 }

@@ -18,6 +18,10 @@ recovery, autonomy та reporting-language contours. Project package може д
 default, але не може перевищити authority ceiling або підмінити explicit user
 choice.
 
+Для C/C++ розробки project-level композиція явно використовує
+`c-family-development`; вона підключає C-family semantic/tooling capabilities,
+але не створює окрему реалізацію стандарту і не надає PASS сама по собі.
+
 ## Generic language catalog
 
 `promin/language_catalog.py` є єдиним source of truth для мов, profiles і tools.

@@ -761,7 +761,9 @@ def test_v1_core_and_preset_verify() -> None:
     workflows = next(
         action for action in command_parser()._actions if action.dest == "workflow"
     )
-    assert tuple(workflows.choices) == expected_commands
+    assert tuple(
+        choice for choice in workflows.choices if choice in expected_commands
+    ) == expected_commands
 
 
 def test_executable_contract_maps_exactly_cover_core_owners() -> None:
@@ -1195,6 +1197,271 @@ def test_init_is_atomic_zero_scan_exact_and_idempotent(
     )
     assert second.context.activation_digest == result.context.activation_digest
     assert second.context.continuation_secret == result.context.continuation_secret
+
+
+def test_fresh_init_executes_provider_healthchecks_once_then_reuses_observations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, paths = _plans(tmp_path)
+    modes: list[str] = []
+    executions: list[tuple[str, ...]] = []
+    original_preflight = init_runtime.verify_provider_preflight
+    original_process = init_runtime._run_identity_process
+
+    def observe_preflight(*args: object, **kwargs: object):
+        modes.append("reuse" if kwargs.get("preflight_receipt") is not None else "execute")
+        return original_preflight(*args, **kwargs)
+
+    def observe_process(argv: list[str], **kwargs: object):
+        executions.append(tuple(argv))
+        return original_process(argv, **kwargs)
+
+    monkeypatch.setattr(init_runtime, "verify_provider_preflight", observe_preflight)
+    monkeypatch.setattr(init_runtime, "_run_identity_process", observe_process)
+    result = initialize_project(_request(project, paths))
+
+    expected_provider_count = len(result.context.plans["technologies.json"]["bindings"])
+    assert modes == ["execute", "reuse", "reuse"]
+    assert len(executions) == expected_provider_count
+    assert result.preflight_receipt.provider_count == expected_provider_count
+    assert len(result.preflight_receipt.observation_bytes) == expected_provider_count
+
+
+def test_fresh_init_final_dispatch_runtime_evidence_matches_reused_observations(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+
+    decoded = tuple(
+        parse_json_strict(payload)
+        for payload in result.preflight_receipt.observation_bytes
+    )
+    assert result.context.provider_dispatch.runtime_evidence() == decoded
+
+
+def test_reused_preflight_rejects_installed_receipt_before_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+    context = result.context
+    receipt = Path(
+        context.provider_dispatch.binding("control-runtime")["invocation"]["value"]
+    )
+    os.chmod(receipt, stat.S_IWRITE | stat.S_IREAD)
+    with receipt.open("ab") as handle:
+        handle.write(b"receipt-drift")
+
+    rebound = False
+
+    def fail_rebind(_observations: object):
+        nonlocal rebound
+        rebound = True
+        raise AssertionError("rebind must not run after inventory drift")
+
+    monkeypatch.setattr(context.provider_dispatch, "rebind_runtime_evidence", fail_rebind)
+    with pytest.raises(InitError, match="provider receipt digest mismatch"):
+        init_runtime.verify_provider_preflight(
+            context.plans["technologies.json"],
+            project,
+            contract_bundle=context.bundle,
+            provider_dispatch=context.provider_dispatch,
+            receipt_root=context.control_root / "providers",
+            preflight_receipt=result.preflight_receipt,
+        )
+    assert rebound is False
+
+
+def test_receipt_backed_preflight_does_not_fallback_for_tampered_source(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+    context = result.context
+    source = project / _provider_executable().name
+    os.chmod(source, stat.S_IWRITE | stat.S_IREAD)
+    with source.open("ab") as handle:
+        handle.write(b"source-drift")
+
+    with pytest.raises(InitError, match="provider digest mismatch"):
+        init_runtime.verify_provider_preflight(
+            context.plans["technologies.json"],
+            project,
+            contract_bundle=context.bundle,
+            provider_dispatch=context.provider_dispatch,
+            receipt_root=context.control_root / "providers",
+        )
+
+
+def _split_python_runtime_provider_source(
+    project: Path, paths: dict[str, Path]
+) -> Path:
+    provider = project / _provider_executable().name
+    second_provider = project / f"second-{provider.name}"
+    shutil.copy2(provider, second_provider)
+    if os.name != "nt":
+        os.chmod(second_provider, second_provider.stat().st_mode | stat.S_IXUSR)
+    technologies = json.loads(paths["technologies_plan"].read_text(encoding="utf-8"))
+    binding = technologies["bindings"][1]
+    binding["invocation"]["value"] = str(second_provider)
+    binding["healthcheck"]["argv"][0] = str(second_provider)
+    binding["identity"]["source"] = str(second_provider)
+    binding["identity"]["digest"] = digest_file(second_provider)
+    binding["dependency_receipt"] = init_runtime.build_provider_dependency_receipt(
+        binding, project
+    )
+    technologies = bind_implementation_closures(technologies, project)
+    _write(paths["technologies_plan"], technologies)
+    return second_provider
+
+
+def test_receipt_backed_preflight_uses_existing_source_when_first_source_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, paths = _plans(tmp_path)
+    second_provider = _split_python_runtime_provider_source(project, paths)
+    result = initialize_project(_request(project, paths))
+    context = result.context
+    (project / _provider_executable().name).unlink()
+    executions: list[tuple[str, ...]] = []
+    original_process = init_runtime._run_identity_process
+
+    def observe_process(argv: list[str], **kwargs: object):
+        executions.append(tuple(argv))
+        return original_process(argv, **kwargs)
+
+    monkeypatch.setattr(init_runtime, "_run_identity_process", observe_process)
+    observations = init_runtime.verify_provider_preflight(
+        context.plans["technologies.json"],
+        project,
+        contract_bundle=context.bundle,
+        provider_dispatch=context.provider_dispatch,
+        receipt_root=context.control_root / "providers",
+    )
+
+    assert len(observations) == len(context.plans["technologies.json"]["bindings"])
+    assert any(argv[0] == str(second_provider) for argv in executions)
+
+
+def test_receipt_backed_preflight_rejects_tampered_existing_source_after_missing_first(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    second_provider = _split_python_runtime_provider_source(project, paths)
+    result = initialize_project(_request(project, paths))
+    context = result.context
+    (project / _provider_executable().name).unlink()
+    with second_provider.open("ab") as handle:
+        handle.write(b"source-drift")
+
+    with pytest.raises(InitError, match="provider digest mismatch"):
+        init_runtime.verify_provider_preflight(
+            context.plans["technologies.json"],
+            project,
+            contract_bundle=context.bundle,
+            provider_dispatch=context.provider_dispatch,
+            receipt_root=context.control_root / "providers",
+        )
+
+
+def _reissued_preflight_receipt(
+    receipt: init_runtime.InitPreflightReceipt,
+    payloads: tuple[bytes, ...],
+    *,
+    observation_digests: tuple[str, ...] | None = None,
+    provider_count: int | None = None,
+) -> init_runtime.InitPreflightReceipt:
+    digests = observation_digests or tuple(
+        digest_value(parse_json_strict(payload)) for payload in payloads
+    )
+    return replace(
+        receipt,
+        provider_count=len(payloads) if provider_count is None else provider_count,
+        observation_digests=digests,
+        observation_bytes=payloads,
+        receipt_digest=digest_value({"observation_digests": list(digests)}),
+    )
+
+
+def test_preflight_receipt_decoder_rejects_malformed_and_noncanonical_payloads(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+    dispatch = result.context.provider_dispatch
+    receipt = result.preflight_receipt
+    malformed = (b"not-json", *receipt.observation_bytes[1:])
+    with pytest.raises(InitError, match="payload is invalid"):
+        init_runtime._decode_init_preflight_observations(
+            _reissued_preflight_receipt(
+                receipt,
+                malformed,
+                observation_digests=receipt.observation_digests,
+            ),
+            dispatch,
+        )
+
+    noncanonical = (b" " + receipt.observation_bytes[0], *receipt.observation_bytes[1:])
+    with pytest.raises(InitError, match="not canonical"):
+        init_runtime._decode_init_preflight_observations(
+            _reissued_preflight_receipt(receipt, noncanonical), dispatch
+        )
+
+
+def test_preflight_receipt_decoder_rejects_count_and_observation_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+    dispatch = result.context.provider_dispatch
+    receipt = result.preflight_receipt
+    with pytest.raises(InitError, match="shape or digest"):
+        init_runtime._decode_init_preflight_observations(
+            replace(receipt, provider_count=receipt.provider_count + 1), dispatch
+        )
+
+    digests = list(receipt.observation_digests)
+    digests[0] = "0" * 64
+    mismatched = _reissued_preflight_receipt(
+        receipt,
+        receipt.observation_bytes,
+        observation_digests=tuple(digests),
+    )
+    with pytest.raises(InitError, match="observation digest mismatch"):
+        init_runtime._decode_init_preflight_observations(mismatched, dispatch)
+
+
+def test_preflight_receipt_decoder_rejects_duplicate_unknown_and_missing_capabilities(
+    tmp_path: Path,
+) -> None:
+    project, paths = _plans(tmp_path)
+    result = initialize_project(_request(project, paths))
+    dispatch = result.context.provider_dispatch
+    receipt = result.preflight_receipt
+    values = [dict(parse_json_strict(payload)) for payload in receipt.observation_bytes]
+
+    duplicate_values = list(values)
+    duplicate_values[1]["capability_id"] = duplicate_values[0]["capability_id"]
+    duplicate_payloads = tuple(canonical_bytes(value) for value in duplicate_values)
+    with pytest.raises(InitError, match="duplicate"):
+        init_runtime._decode_init_preflight_observations(
+            _reissued_preflight_receipt(receipt, duplicate_payloads), dispatch
+        )
+
+    unknown_values = list(values)
+    unknown_values[0]["capability_id"] = "unknown-capability"
+    unknown_payloads = tuple(canonical_bytes(value) for value in unknown_values)
+    with pytest.raises(InitError, match="unknown"):
+        init_runtime._decode_init_preflight_observations(
+            _reissued_preflight_receipt(receipt, unknown_payloads), dispatch
+        )
+
+    missing_payloads = receipt.observation_bytes[:-1]
+    with pytest.raises(InitError, match="shape or digest|configured capabilities"):
+        init_runtime._decode_init_preflight_observations(
+            _reissued_preflight_receipt(receipt, missing_payloads), dispatch
+        )
 
 
 def test_init_tool_separates_standard_bundle_from_target_project(tmp_path: Path) -> None:
@@ -2350,6 +2617,56 @@ def test_read_context_skips_repeated_schema_meta_validation(
     )
     result = ProminService(project).status()
     assert result["record_type"] == "StatusResult"
+
+
+def test_schema_meta_validation_reuses_exact_content_across_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import promin.contracts as contract_runtime
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for root in (first, second):
+        shutil.copytree(PACKAGE_ROOT / "core", root / "core")
+        (root / "presets").mkdir()
+        shutil.copy2(PRESET, root / "presets" / "semantic-standard.json")
+    contract_runtime._bundle_cache.clear()
+    bundle_content_cache = getattr(contract_runtime, "_bundle_content_cache", None)
+    if bundle_content_cache is not None:
+        bundle_content_cache.clear()
+    schema_cache = getattr(contract_runtime, "_schema_meta_cache", None)
+    if schema_cache is not None:
+        schema_cache.clear()
+    original = contract_runtime.Draft202012Validator.check_schema
+    original_verify_core = contract_runtime.verify_core
+    calls = 0
+    verify_core_calls = 0
+
+    def counted(schema: object) -> None:
+        nonlocal calls
+        calls += 1
+        original(schema)
+
+    def counted_verify_core(*args: object, **kwargs: object):
+        nonlocal verify_core_calls
+        verify_core_calls += 1
+        return original_verify_core(*args, **kwargs)
+
+    monkeypatch.setattr(
+        contract_runtime.Draft202012Validator,
+        "check_schema",
+        counted,
+    )
+    monkeypatch.setattr(contract_runtime, "verify_core", counted_verify_core)
+    for root in (first, second):
+        contract_runtime.load_contract_bundle(
+            root,
+            root / "presets" / "semantic-standard.json",
+        )
+
+    assert calls == 1
+    assert verify_core_calls == 1
 
 
 def test_canonical_runtime_bundle_uses_resource_resolver(

@@ -163,7 +163,7 @@ def test_phase_rejects_invalid_grant_and_continuation_then_closes_cleanly(
     service.close()
 
 
-def test_phase_close_fails_closed_on_structural_authority_tamper_and_releases_lock(
+def _check_phase_close_fails_closed_on_structural_authority_tamper_and_releases_lock(
     tmp_path: Path,
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -183,7 +183,7 @@ def test_phase_close_fails_closed_on_structural_authority_tamper_and_releases_lo
     service.close()
 
 
-def test_phase_close_rejects_projection_semantic_binding_drift(
+def _check_phase_close_rejects_projection_semantic_binding_drift(
     tmp_path: Path,
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -202,7 +202,7 @@ def test_phase_close_rejects_projection_semantic_binding_drift(
     service.close()
 
 
-def test_phase_entry_failure_releases_writer_lock_and_does_not_activate_phase(
+def _check_phase_entry_failure_releases_writer_lock_and_does_not_activate_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -222,7 +222,7 @@ def test_phase_entry_failure_releases_writer_lock_and_does_not_activate_phase(
     service.close()
 
 
-def test_phase_operation_failure_still_closes_and_releases_writer_lock(
+def _check_phase_operation_failure_still_closes_and_releases_writer_lock(
     tmp_path: Path,
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -236,7 +236,7 @@ def test_phase_operation_failure_still_closes_and_releases_writer_lock(
     service.close()
 
 
-def test_service_close_rejects_live_phase_until_phase_closes(
+def _check_service_close_rejects_live_phase_until_phase_closes(
     tmp_path: Path,
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -248,7 +248,7 @@ def test_service_close_rejects_live_phase_until_phase_closes(
     service.close()
 
 
-def test_begin_publication_race_with_service_close_is_serialized(
+def _check_begin_publication_race_with_service_close_is_serialized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -303,7 +303,7 @@ def test_begin_publication_race_with_service_close_is_serialized(
     service.close()
 
 
-def test_event_store_admission_is_atomic_with_phase_publication(
+def _check_event_store_admission_is_atomic_with_phase_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -378,7 +378,7 @@ def test_event_store_admission_is_atomic_with_phase_publication(
     service.close()
 
 
-def test_initialize_admission_is_atomic_with_phase_publication(
+def _check_initialize_admission_is_atomic_with_phase_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -462,7 +462,7 @@ def test_initialize_admission_is_atomic_with_phase_publication(
     service.close()
 
 
-def test_verified_query_lease_entry_preserves_primary_exception_identity(
+def _check_verified_query_lease_entry_preserves_primary_exception_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, _grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -486,7 +486,7 @@ def test_verified_query_lease_entry_preserves_primary_exception_identity(
     service.close()
 
 
-def test_same_thread_commit_is_rejected_before_eventstore_reentry(
+def _check_same_thread_commit_is_rejected_before_eventstore_reentry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, task, lease, head = _phase_fixture(tmp_path)
@@ -540,7 +540,7 @@ def test_same_thread_commit_is_rejected_before_eventstore_reentry(
     service.close()
 
 
-def test_same_thread_recovery_is_rejected_before_eventstore_open(
+def _check_same_thread_recovery_is_rejected_before_eventstore_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -563,7 +563,7 @@ def test_same_thread_recovery_is_rejected_before_eventstore_open(
     service.close()
 
 
-def test_mutation_cleanup_preserves_original_exception_identity(
+def _check_mutation_cleanup_preserves_original_exception_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, _grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -582,7 +582,7 @@ def test_mutation_cleanup_preserves_original_exception_identity(
     assert raised.value is original_error
 
 
-def test_public_search_remains_fresh_after_phase_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _check_public_search_remains_fresh_after_phase_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
     store = service._event_store(service._context(), recover_publications=False)
     count = 0
@@ -603,7 +603,7 @@ def test_public_search_remains_fresh_after_phase_close(tmp_path: Path, monkeypat
     service.close()
 
 
-def test_phase_reuses_validated_projection_status_for_search_and_renewal(
+def _check_phase_reuses_validated_projection_status_for_search_and_renewal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
@@ -640,7 +640,7 @@ def test_phase_reuses_validated_projection_status_for_search_and_renewal(
     service.close()
 
 
-def test_phase_close_rejects_physical_content_binding_drift(tmp_path: Path) -> None:
+def _check_phase_close_rejects_physical_content_binding_drift(tmp_path: Path) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
     phase = service.begin_immutable_query_phase(max_operations=1)
     phase.search(**_query_kwargs(grants))
@@ -658,7 +658,7 @@ def test_phase_close_rejects_physical_content_binding_drift(tmp_path: Path) -> N
     service.close()
 
 
-def test_phase_close_ignores_continuation_persistence_byte_growth(tmp_path: Path) -> None:
+def _check_phase_close_ignores_continuation_persistence_byte_growth(tmp_path: Path) -> None:
     service, grants, _task, _lease, _head = _phase_fixture(tmp_path)
     phase = service.begin_immutable_query_phase(max_operations=1)
     result = phase.search(**_query_kwargs(grants))

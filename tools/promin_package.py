@@ -46,6 +46,7 @@ from promin.evidence import (
     validate_standard_release_evidence_manifest,
 )
 from promin.authority import parse_timestamp
+from promin.canonical import canonical_bytes
 
 from promin_validate import (
     CANONICAL_PACKAGE_FILES,
@@ -82,6 +83,14 @@ def _write_json(path: Path, value: Any) -> None:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(rendered, encoding="utf-8", newline="\n")
+    os.replace(temporary, path)
+
+
+def _write_canonical_json(path: Path, value: Any) -> None:
+    """Write one byte-canonical external machine input atomically."""
+
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(canonical_bytes(value))
     os.replace(temporary, path)
 
 
@@ -559,7 +568,10 @@ def build_archive(
     }
     if candidate_binding_output is not None:
         candidate_binding_output.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(candidate_binding_output.resolve(), verified["candidate_binding"])
+        _write_canonical_json(
+            candidate_binding_output.resolve(),
+            verified["candidate_binding"],
+        )
     return result
 
 
@@ -915,7 +927,7 @@ def verify_platform(
         "declared_python_requirement": installability.get("declared_python_requirement"),
         "installed_distribution": {
             "name": "promin",
-            "version": installability.get("python_distribution_version"),
+            "version": installability.get("version"),
             "runtime_version": installability.get("version"),
         },
         "console_script": installability.get("console_script"),

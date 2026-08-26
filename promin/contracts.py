@@ -369,6 +369,29 @@ def _verify_authority_vocabulary(core: Mapping[str, Any]) -> None:
             raise ContractError(f"role preset {role} references an unknown capability")
 
 
+_SCHEMA_META_CACHE_LIMIT = 4
+_schema_meta_cache: "OrderedDict[str, None]" = OrderedDict()
+_schema_meta_cache_guard = threading.Lock()
+
+
+def _verify_schema_meta(schema: Mapping[str, Any]) -> None:
+    """Check one exact Draft schema once per in-process content identity."""
+
+    schema_digest = digest_value(schema)
+    with _schema_meta_cache_guard:
+        if schema_digest in _schema_meta_cache:
+            _schema_meta_cache.move_to_end(schema_digest)
+            return
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise ContractError(f"invalid Draft 2020-12 schema: {exc.message}") from exc
+        _schema_meta_cache[schema_digest] = None
+        _schema_meta_cache.move_to_end(schema_digest)
+        while len(_schema_meta_cache) > _SCHEMA_META_CACHE_LIMIT:
+            _schema_meta_cache.popitem(last=False)
+
+
 def verify_core(
     core_dir: str | Path, *, verify_schema_meta: bool = True
 ) -> dict[str, Any]:
@@ -380,10 +403,7 @@ def verify_core(
     }
     schema = core["contracts.schema.json"]
     if verify_schema_meta:
-        try:
-            Draft202012Validator.check_schema(schema)
-        except SchemaError as exc:
-            raise ContractError(f"invalid Draft 2020-12 schema: {exc.message}") from exc
+        _verify_schema_meta(schema)
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise ContractError("contracts.schema.json must declare Draft 2020-12")
     definitions = schema.get("$defs")
@@ -558,6 +578,7 @@ MUTATION_PROBES: Mapping[str, Callable[..., None]] = mutation_catalogue()
 
 _BUNDLE_CACHE_LIMIT = 4
 _bundle_cache: "OrderedDict[tuple[Any, ...], ContractBundle]" = OrderedDict()
+_bundle_content_cache: "OrderedDict[tuple[Any, ...], tuple[Mapping[str, Any], Mapping[str, Any]]]" = OrderedDict()
 _bundle_cache_guard = threading.Lock()
 
 
@@ -617,11 +638,28 @@ def load_contract_bundle(
     key = _bundle_cache_key(
         root, core_dir, selected_preset, verify_schema_meta=verify_schema_meta
     )
+    content_key = (key[2], key[4], key[5])
     with _bundle_cache_guard:
         cached = _bundle_cache.get(key)
         if cached is not None:
             _bundle_cache.move_to_end(key)
             return cached
+        cached_content = _bundle_content_cache.get(content_key)
+        if cached_content is not None:
+            _bundle_content_cache.move_to_end(content_key)
+            bundle = ContractBundle(
+                root,
+                core_dir,
+                selected_preset,
+                cached_content[0],
+                cached_content[1],
+                schema_meta_verified=verify_schema_meta,
+            )
+            _bundle_cache[key] = bundle
+            _bundle_cache.move_to_end(key)
+            while len(_bundle_cache) > _BUNDLE_CACHE_LIMIT:
+                _bundle_cache.popitem(last=False)
+            return bundle
     core = verify_core(core_dir, verify_schema_meta=verify_schema_meta)
     preset = verify_preset(selected_preset, core)
     bundle = ContractBundle(
@@ -633,6 +671,10 @@ def load_contract_bundle(
         schema_meta_verified=verify_schema_meta,
     )
     with _bundle_cache_guard:
+        _bundle_content_cache[content_key] = (core, preset)
+        _bundle_content_cache.move_to_end(content_key)
+        while len(_bundle_content_cache) > _BUNDLE_CACHE_LIMIT:
+            _bundle_content_cache.popitem(last=False)
         _bundle_cache[key] = bundle
         _bundle_cache.move_to_end(key)
         while len(_bundle_cache) > _BUNDLE_CACHE_LIMIT:

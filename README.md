@@ -108,10 +108,10 @@ or evidence requirements.
 
 ## Package contents
 
-The canonical alpha tree contains exactly 274 regular files under 17 declared
+The canonical alpha tree contains exactly 304 regular files under 17 declared
 directories, including the nested `docs/audit` and `skills/example` packages.
-`MANIFEST.json` enumerates the 272 payload files; `SHA256SUMS.txt` contains
-273 checksums for the payload plus `MANIFEST.json`.
+`MANIFEST.json` enumerates the 302 payload files; `SHA256SUMS.txt` contains
+303 checksums for the payload plus `MANIFEST.json`.
 
 | Location | Regular files |
 |---|---:|
@@ -119,16 +119,16 @@ directories, including the nested `docs/audit` and `skills/example` packages.
 | `.github/` | 1 |
 | `capability_profiles/` | 2 |
 | `core/` | 6 |
-| `docs/` | 31 |
+| `docs/` | 40 |
 | `examples/` | 1 |
 | `human/` | 4 |
 | `language_profiles/` | 7 |
 | `presets/` | 1 |
 | `profiles/` | 12 |
-| `promin/` | 62 |
+| `promin/` | 63 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 108 |
+| `tests/` | 128 |
 | `tools/` | 19 |
 
 The 14 root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,

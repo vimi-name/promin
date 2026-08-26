@@ -161,6 +161,14 @@ def test_inspect_cli_is_bounded_static_and_claim_free(tmp_path, capsys):
     assert report["effects"]["filesystem_writes"] == 0
 
 
+def test_successful_non_selector_status_returns_zero(tmp_path, capsys):
+    assert main(["--root", str(tmp_path / "missing"), "--no-telemetry", "status"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_type"] == "ProminStatus"
+    assert result["status"] == "not-initialized"
+
+
 def test_report_cli_rejects_promoted_inspection_and_existing_output(tmp_path):
     promoted = {"claims": {"acceptance_pass": True}}
     (tmp_path / "inspection.json").write_text(json.dumps(promoted), encoding="utf-8")
@@ -554,6 +562,7 @@ def test_parser_keeps_base_commands_and_thin_nested_selectors(tmp_path: Path) ->
         + ("revalidate",)
         + BASE_COMMANDS[2 : BASE_COMMANDS.index("continue")]
         + ("tooling",)
+        + ("selector-shards",)
         + ("inspect", "report")
         + ("recover",)
         + BASE_COMMANDS[BASE_COMMANDS.index("continue") :]

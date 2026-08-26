@@ -202,6 +202,17 @@ def _parser(*, include_public: bool = False) -> argparse.ArgumentParser:
         if action == "run":
             command.add_argument("--output-root")
 
+    selector_shards = sub.add_parser("selector-shards", help="run or validate bounded Windows selector evidence")
+    selector_commands = selector_shards.add_subparsers(dest="selector_shards_action", required=True)
+    aggregate = selector_commands.add_parser("aggregate", help="execute one sequential selector aggregate")
+    aggregate.add_argument("--manifest", type=Path, required=True)
+    aggregate.add_argument("--candidate-binding", type=Path, required=True)
+    aggregate.add_argument("--output", type=Path, required=True, metavar="EVIDENCE_ROOT")
+    validate_selector = selector_commands.add_parser("validate", help="independently validate selector evidence")
+    validate_selector.add_argument("--manifest", type=Path, required=True)
+    validate_selector.add_argument("--candidate-binding", type=Path, required=True)
+    validate_selector.add_argument("--evidence-root", type=Path, required=True)
+
     inspect = sub.add_parser("inspect", help="inspect product sources without operational effects")
     inspect.add_argument("--audience", choices=("client", "machine"), default="client")
     inspect.add_argument("--output", type=Path)
@@ -1199,6 +1210,8 @@ def _command_mutates(args: argparse.Namespace, result: Mapping[str, Any] | None 
     workflow = args.workflow
     if workflow in {"status", "context", "validate", "audit", "static-admission", "tooling"}:
         return False
+    if workflow == "selector-shards":
+        return getattr(args, "selector_shards_action", None) == "aggregate"
     if workflow == "inspect":
         return getattr(args, "output", None) is not None
     if workflow == "report":
@@ -1241,6 +1254,8 @@ def _public_plan_boundary_disables_telemetry(args: argparse.Namespace) -> bool:
     if args.workflow in {"inspect", "report"}:
         return True
     if args.workflow == "tooling":
+        return True
+    if args.workflow == "selector-shards":
         return True
     if args.workflow == "recover" and getattr(args, "recover_action", None) == "clean":
         return not bool(getattr(args, "apply", False))
@@ -1342,6 +1357,39 @@ def _run_tooling(args: argparse.Namespace, root: Path) -> dict[str, Any]:
             "release_approved": False,
         }
     except LanguageToolingError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def _run_selector_shards(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    from .selector_shards import (
+        SelectorShardError,
+        load_selector_shard_manifest,
+        run_selector_aggregate,
+        validate_selector_aggregate_evidence,
+    )
+
+    def input_path(value: Path) -> Path:
+        return (value if value.is_absolute() else root / value).absolute()
+
+    try:
+        manifest = load_selector_shard_manifest(input_path(args.manifest))
+        candidate = _load_canonical_object(input_path(args.candidate_binding), "candidate binding")
+        if args.selector_shards_action == "aggregate":
+            result = run_selector_aggregate(
+                manifest,
+                project_root=root,
+                evidence_root=input_path(args.output),
+                candidate_binding=candidate,
+            )
+        else:
+            result = validate_selector_aggregate_evidence(
+                manifest,
+                project_root=root,
+                evidence_root=input_path(args.evidence_root),
+                candidate_binding=candidate,
+            )
+        return result
+    except SelectorShardError as exc:
         raise ServiceError(str(exc)) from exc
 
 
@@ -1486,6 +1534,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             result = run_static_admission(root, profile=args.profile, handoff=handoff)
         elif args.workflow == "tooling":
             result = _run_tooling(args, root)
+        elif args.workflow == "selector-shards":
+            result = _run_selector_shards(args, root)
         elif args.workflow == "inspect":
             inspected = inspect_product(root)
             if args.output is not None:
@@ -1586,6 +1636,8 @@ def main(argv: list[str] | None = None) -> int:
         parsed = parser.parse_args(argv)
         result = _run(parsed)
         sys.stdout.buffer.write(canonical_bytes(result))
+        if parsed.workflow == "selector-shards":
+            return 0 if isinstance(result, Mapping) and result.get("status") == "PASS" else 2
         return 0
     except Exception as exc:
         root = None if parsed is None else Path(parsed.root).resolve()

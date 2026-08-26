@@ -1614,8 +1614,8 @@ def _validate_physical_result(
 ) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("physical result is not an object")
-    if loaded.get("status") != "fail" or loaded.get("pass_credit") is not False:
-        raise ValueError("physical result did not fail-closed to evidence-only status")
+    if loaded.get("status") != "pass" or loaded.get("pass_credit") is not False:
+        raise ValueError("physical result did not report terminal successful execution state")
     if (
         loaded.get("acceptance_pass") is not False
         or loaded.get("product_acceptance_pass") is not False
@@ -1631,7 +1631,7 @@ def _validate_physical_result(
     invocation = loaded.get("invocation")
     if (
         not isinstance(invocation, dict)
-        or invocation.get("exit_code") != 1
+        or invocation.get("exit_code") != 0
         or invocation.get("arguments", {}).get("archive_sha256")
         != artifact_binding["archive"]["sha256"]
     ):
@@ -2185,9 +2185,8 @@ def run(
         physical_result: dict[str, Any] | None = None
         physical_metrics: dict[str, Any] | None = None
         physical_result_path = saturation_output / "saturation-result.json"
-        # The bounded saturation producer intentionally exits nonzero because
-        # its result is evidence-only.  Validate that fail-classified result
-        # independently instead of treating its raw evidence as absent.
+        # Validate the producer's successful terminal result independently
+        # instead of treating its raw evidence as authoritative.
         if saturation_code in (0, 1):
             try:
                 loaded = load_external_json_stable(
@@ -2232,20 +2231,6 @@ def run(
                     "sha256:"
                     + hashlib.sha256(f"invalid-physical-result:{exc}".encode("utf-8")).hexdigest()
                 )
-        # The physical producer's truthful evidence-only terminal result has
-        # status=fail and child exit code 1 by contract.  Once the independent
-        # verifier has checked that complete result, normalize the audit action
-        # itself to success so it can close the zero-new streak.  This does not
-        # change or promote the nested failed result: its invocation remains
-        # exit_code=1 and all credit flags remain false.
-        evidence_only_terminal = (
-            saturation_process_code == 1
-            and saturation_code == 1
-            and physical_result is not None
-            and physical_result.get("status") == "fail"
-        )
-        if evidence_only_terminal:
-            saturation_code = 0
         if saturation_code != 0:
             saturation_fingerprints = set(_fingerprints(saturation_log))
             if not saturation_fingerprints:

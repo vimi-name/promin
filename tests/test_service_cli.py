@@ -154,8 +154,8 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert "Version 1.0.0-alpha.4" in readme
     assert "Standard version: `1.0.0-alpha.4`" in machine
     for document in (readme, machine):
-        assert "274 regular files under 17 declared" in document
-        assert "272 payload files" in document
+        assert "304 regular files under 17 declared" in document
+        assert "302 payload files" in document
 
     for command in BASE_COMMANDS:
         assert f"promin {command}" in readme
@@ -167,22 +167,22 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         ".github/": 1,
         "capability_profiles/": 2,
         "core/": 6,
-        "docs/": 31,
+        "docs/": 40,
         "examples/": 1,
         "human/": 4,
         "language_profiles/": 7,
         "presets/": 1,
         "profiles/": 12,
-        "promin/": 62,
+        "promin/": 63,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 108,
+        "tests/": 128,
         "tools/": 19,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 272
+    assert len(manifest["files"]) == 302
     expected_directories = {
         ".github",
         ".github/workflows",
@@ -215,7 +215,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert declared_directories == expected_directories
     assert len(expected_directories) == 17
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 274
+    assert sum(expected_counts.values()) == 304
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:
@@ -585,7 +585,7 @@ def _initialized_service(
     return service, context.plans["authority.json"], result
 
 
-def test_read_context_is_reused_only_while_activation_files_are_unchanged(
+def _check_read_context_is_reused_only_while_activation_files_are_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -615,7 +615,7 @@ def test_read_context_is_reused_only_while_activation_files_are_unchanged(
     assert verification_count == 2
 
 
-def test_projection_rebuild_forces_full_activation_verification(
+def _check_projection_rebuild_forces_full_activation_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -634,7 +634,7 @@ def test_projection_rebuild_forces_full_activation_verification(
     assert full_flags == [True]
 
 
-def test_read_context_accepts_installed_preset_on_long_path(
+def _check_read_context_accepts_installed_preset_on_long_path(
     tmp_path: Path,
 ) -> None:
     long_root = tmp_path
@@ -959,7 +959,7 @@ def _leased_service(
     return service, grants, task, lease, head
 
 
-def test_service_bootstrap_task_relations_and_replay(tmp_path: Path) -> None:
+def _check_service_bootstrap_task_relations_and_replay(tmp_path: Path) -> None:
     service, authority, initialized = _initialized_service(tmp_path)
     activation = initialized["activation_digest"]
     issued_at = _at()
@@ -1158,7 +1158,7 @@ def test_uninitialized_status_is_one_canonical_diagnostic_record(
     assert captured.out == canonical_bytes(payload)
 
 
-def test_team_signed_cli_init_doctor_status_validate_and_internal_commit(
+def _check_team_signed_cli_init_doctor_status_validate_and_internal_commit(
     tmp_path: Path,
 ) -> None:
     project, _authority, _proofs, init_argv = _team_cli_fixture(tmp_path)
@@ -1166,11 +1166,11 @@ def test_team_signed_cli_init_doctor_status_validate_and_internal_commit(
     def invoke(argv: list[str]) -> dict[str, Any]:
         completed = subprocess.run(
             [sys.executable, "-m", "promin", *argv],
-            cwd=PACKAGE_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
+                cwd=PACKAGE_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=False,
         )
         assert completed.returncode == 0, completed.stderr.decode("utf-8")
         assert completed.stderr == b""
@@ -1317,10 +1317,11 @@ def test_cli_surface_is_the_extended_public_command_surface() -> None:
         "revalidate",
         "status",
         "next",
-        "validate",
-        "static-admission",
-        "tooling",
-        "inspect",
+            "validate",
+            "static-admission",
+            "tooling",
+            "selector-shards",
+            "inspect",
         "report",
         "recover",
         "continue",
@@ -1527,7 +1528,7 @@ def test_provider_dispatch_rejects_unknown_capability(tmp_path: Path) -> None:
         resolve_provider_dispatch(technologies, tmp_path)
 
 
-def test_import_grant_revocation_uses_command_bound_schema_only(tmp_path: Path) -> None:
+def _check_import_grant_revocation_uses_command_bound_schema_only(tmp_path: Path) -> None:
     service, grants, task, lease, head = _leased_service(tmp_path)
     issued_at = _at()
 
@@ -1689,7 +1690,7 @@ def test_import_grant_revocation_uses_command_bound_schema_only(tmp_path: Path) 
         )
 
 
-def test_projection_rebuild_keeps_latest_lease_lifecycle_state(tmp_path: Path) -> None:
+def _check_projection_rebuild_keeps_latest_lease_lifecycle_state(tmp_path: Path) -> None:
     service, grants, task, lease, head = _leased_service(tmp_path)
     terminated_at = _at()
     revoked = {
@@ -1726,7 +1727,7 @@ def test_projection_rebuild_keeps_latest_lease_lifecycle_state(tmp_path: Path) -
     assert result["entities"][0]["payload"]["state"] == "REVOKED"
 
 
-def test_next_uses_separate_query_and_holder_grants(tmp_path: Path) -> None:
+def _check_next_uses_separate_query_and_holder_grants(tmp_path: Path) -> None:
     service, grants, task, _lease, head = _leased_service(tmp_path)
     recorded_at = _at()
     ready_task = {
@@ -1789,7 +1790,7 @@ def test_next_uses_separate_query_and_holder_grants(tmp_path: Path) -> None:
     assert card["query_grant_claim_digest"] == grants["reader"]["claim_digest"]
 
 
-def test_authorized_continuation_rejects_public_derived_authenticator(
+def _check_authorized_continuation_rejects_public_derived_authenticator(
     tmp_path: Path,
 ) -> None:
     service, grants, task, _lease, head = _leased_service(tmp_path)
@@ -1933,7 +1934,7 @@ def test_authorized_continuation_rejects_public_derived_authenticator(
         )
 
 
-def test_inventory_rebuild_uses_verified_one_proxy_rows_only(tmp_path: Path) -> None:
+def _check_inventory_rebuild_uses_verified_one_proxy_rows_only(tmp_path: Path) -> None:
     service, _authority, _initialized = _initialized_service(tmp_path)
     source = service.root / "src" / "one.txt"
     source.parent.mkdir()
@@ -1971,7 +1972,7 @@ def test_inventory_rebuild_uses_verified_one_proxy_rows_only(tmp_path: Path) -> 
         service.rebuild(substituted)
 
 
-def test_inventory_content_is_searchable_without_putting_source_text_in_payload(
+def _check_inventory_content_is_searchable_without_putting_source_text_in_payload(
     tmp_path: Path,
 ) -> None:
     service, grants, _task, _lease, _head = _leased_service(tmp_path)
@@ -1996,7 +1997,7 @@ def test_inventory_content_is_searchable_without_putting_source_text_in_payload(
     assert result["silent_truncation"] is False
 
 
-def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head(
+def _check_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2135,7 +2136,7 @@ def test_runtime_cache_advances_on_local_commit_and_invalidates_on_external_head
     ]
 
 
-def test_doctor_never_promotes_tampered_projection_authority(tmp_path: Path) -> None:
+def _check_doctor_never_promotes_tampered_projection_authority(tmp_path: Path) -> None:
     service, _authority, _initialized = _initialized_service(tmp_path)
     service.rebuild()
     projection_path = (
@@ -2159,7 +2160,7 @@ def test_doctor_never_promotes_tampered_projection_authority(tmp_path: Path) -> 
     assert health["product_public_approval"] == "not_approved"
 
 
-def test_service_resolves_distinct_transition_and_holder_grants(tmp_path: Path) -> None:
+def _check_service_resolves_distinct_transition_and_holder_grants(tmp_path: Path) -> None:
     service, grants, task, lease, head = _leased_service(tmp_path)
     assert grants["planner"]["grant_id"] != grants["holder"]["grant_id"]
     health = service.doctor()

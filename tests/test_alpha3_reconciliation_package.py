@@ -12,33 +12,21 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from promin_package import build_archive, sync_version, verify_archive, write_integrity  # noqa: E402
-from promin_validate import validate_tree, verify_package_integrity  # noqa: E402
+from promin_validate import (  # noqa: E402
+    CANONICAL_PAYLOAD_FILES,
+    validate_tree,
+    verify_package_integrity,
+)
 
 
 def _canonical_package_copy(destination: Path) -> Path:
     package = destination / "promin"
-    shutil.copytree(
-        ROOT,
-        package,
-        ignore=shutil.ignore_patterns(
-            "MANIFEST.json",
-            "SHA256SUMS.txt",
-            ".git",
-            "__pycache__",
-            "*.pyc",
-            ".pytest_cache",
-            ".mypy_cache",
-            ".cache",
-            "cache",
-            "_work",
-            ".venv",
-            "venv",
-            "build",
-            "dist",
-            "htmlcov",
-            "*.egg-info",
-        ),
-    )
+    package.mkdir(parents=True, exist_ok=True)
+    for relative_path in sorted(CANONICAL_PAYLOAD_FILES, key=lambda path: path.encode("utf-8")):
+        source = ROOT / relative_path
+        target = package / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
     sync_version(package)
     write_integrity(package)
     return package

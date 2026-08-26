@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -7,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -37,6 +39,14 @@ from promin.evidence import (
     validate_saturation_evidence,
 )
 import promin.evidence as evidence
+
+
+@contextlib.contextmanager
+def _inject_promin_init(apply_plan):
+    module = types.ModuleType("promin_init")
+    module.apply_plan = apply_plan
+    with mock.patch.dict(sys.modules, {"promin_init": module}):
+        yield
 
 
 def _load(name: str, path: Path):
@@ -1536,7 +1546,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
             self.assertEqual(raw["physical_bucket_cardinality"], {"minimum": 1_000, "maximum": 1_000, "distinct": 1})
             self.assertEqual(raw["physical_bucket_aggregate_digest"], aggregate_digest)
 
-    def test_physical_relation_evidence_stream_is_canonical_exact_and_bound(self) -> None:
+    def test_physical_result_relation_evidence_stream_is_canonical_exact_and_bound(self) -> None:
         """Count the independently published 198999-link stream, not a scalar."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "result"
@@ -1706,7 +1716,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
             }
             assembled = {
                 **loaded,
-                "status": "fail",
+                "status": "pass",
                 "pass_credit": False,
                 "acceptance_pass": False,
                 "product_acceptance_pass": False,
@@ -1714,7 +1724,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                 "candidate_binding_digest": candidate_digest,
                 "artifact_binding": artifact_binding,
                 "invocation": {
-                    "exit_code": 1,
+                    "exit_code": 0,
                     "arguments": {"archive_sha256": "d" * 64},
                 },
                 "physical_files": 100_000,
@@ -1770,6 +1780,22 @@ class ScaleOrchestrationTests(unittest.TestCase):
                         performance_profile="portable-local-v1",
                     )
             relation_validator.assert_called_once()
+
+            stale = json.loads(json.dumps(assembled))
+            stale["status"] = "fail"
+            stale["invocation"]["exit_code"] = 1
+            with self.assertRaisesRegex(
+                ValueError,
+                "physical result did not report terminal successful execution state",
+            ):
+                saturation_audit._validate_physical_result(
+                    stale,
+                    record_path=root / "saturation-result.json",
+                    artifact_binding=artifact_binding,
+                    files=100_000,
+                    queries=600,
+                    performance_profile="portable-local-v1",
+                )
 
             duplicate = payload.replace(
                 b"physical-relation:000001",
@@ -2785,7 +2811,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "preset_digest": "f" * 64,
                 }
 
-            with mock.patch("promin_init.apply_plan", side_effect=apply_plan):
+            with _inject_promin_init(apply_plan):
                 for iteration in range(1, 4):
                     initialized = saturation_audit._fresh_iteration_control_state(
                         coordinator,
@@ -2884,7 +2910,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "preset_digest": "8" * 64,
                 }
 
-            with mock.patch("promin_init.apply_plan", side_effect=wrong_apply):
+            with _inject_promin_init(wrong_apply):
                 with self.assertRaisesRegex(
                     saturation_audit.AuditError,
                     "exact candidate",
@@ -2956,7 +2982,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "preset_digest": "d" * 64,
                 }
 
-            with mock.patch("promin_init.apply_plan", side_effect=apply_plan):
+            with _inject_promin_init(apply_plan):
                 saturation_audit._fresh_iteration_control_state(
                     reconciled,
                     tool,
@@ -3046,7 +3072,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "preset_digest": "4" * 64,
                 }
 
-            with mock.patch("promin_init.apply_plan", side_effect=apply_plan):
+            with _inject_promin_init(apply_plan):
                 saturation_audit._fresh_iteration_control_state(
                     coordinator,
                     tool,
@@ -3284,7 +3310,7 @@ class ScaleOrchestrationTests(unittest.TestCase):
                     "preset_digest": "4" * 64,
                 }
 
-            with mock.patch("promin_init.apply_plan", side_effect=apply_plan):
+            with _inject_promin_init(apply_plan):
                 saturation_audit._fresh_iteration_control_state(
                     coordinator,
                     tool,

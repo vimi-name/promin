@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 294
+CANONICAL_PACKAGE_FILE_COUNT = 304
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -132,6 +132,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'docs/audit/2026-08-26-windows-content-index-linearization-wave.md',
         'docs/audit/2026-08-26-windows-broad-search-dependency-batch-wave.md',
         'docs/audit/2026-08-26-windows-execution-status-sealing-wave.md',
+        'docs/audit/2026-08-26-windows-platform-version-identity-wave.md',
         'docs/audit/PROMIN_ALPHA4_VERIFIED_COMMIT_PHASE_WAVE.md',
         'examples/project-brief.json',
         'human/promin_appendices_en.pdf',
@@ -333,6 +334,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_client_report_tool.py',
         'tests/test_language_tooling.py',
         'tests/test_package_validation.py',
+        'tests/test_package_validation_execution.py',
         'tests/test_platform_paths_hotpath.py',
         'tests/test_projection_profile_cleanup.py',
         'tests/test_public_workflows_cli.py',
@@ -345,7 +347,12 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_scale_orchestration.py',
         'tests/test_search_scale.py',
         'tests/test_service_cli.py',
+        'tests/test_service_authority_workflow.py',
+        'tests/test_service_coordination_workflow.py',
+        'tests/test_service_cli_team_workflow.py',
+        'tests/test_service_context_cache.py',
         'tests/test_service_mutation_cache.py',
+        'tests/test_service_projection_workflow.py',
         'tests/test_saturation_query_trace.py',
         'tests/test_verified_commit_phase.py',
         'tests/test_verified_commit_phase_activation_binding.py',
@@ -354,6 +361,9 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_verified_commit_phase_tamper.py',
         'tests/test_verified_envelope_snapshot.py',
         'tests/test_verified_query_phase.py',
+        'tests/test_verified_query_phase_admission.py',
+        'tests/test_verified_query_phase_freshness.py',
+        'tests/test_verified_query_phase_lifecycle.py',
         'THIRD_PARTY_NOTICES.md',
         'tools/compile_schema.py',
         'tools/generate_human.py',
@@ -2082,7 +2092,7 @@ def _invoke_workflow_help(
     executable: Path | None,
     deadline_monotonic: float | None = None,
 ) -> list[dict[str, Any]]:
-    workflows = ["init", "doctor", "status", "next", "validate", "continue", "audit", "refresh", "context", "skills"]
+    workflows = ["init", "doctor", "status", "next", "validate", "static-admission", "continue", "audit", "refresh", "context", "skills"]
     base = [str(executable)] if executable is not None else [str(python), "-B", "-m", "promin"]
     invoked: list[dict[str, Any]] = []
     for command in [None, *workflows]:
