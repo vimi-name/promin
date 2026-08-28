@@ -180,20 +180,25 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
         "timeout_seconds": 600,
         "memory_bytes": 1073741824,
     }
-    assert manifest["aggregate"] == {"timeout_seconds": 6600}
-    assert manifest["selector_count"] == 126
+    assert manifest["aggregate"] == {"timeout_seconds": 9600}
+    assert manifest["selector_count"] == 125
     assert validated["selector_count"] == manifest["selector_count"]
     shards = manifest["shards"]
-    assert len(shards) == 11
+    assert len(shards) == 16
     assert [shard["id"] for shard in shards] == [
         "core-state",
+        "canonical-init",
         "experience-portability",
         "reconciliation-paths",
+        "eventstore-derived-storage",
         "alpha4-policies",
+        "alpha4-policy-hardening",
         "service-distribution",
+        "client-evidence-publication",
         "verified-query",
         "verified-query-lifecycle",
         "package-validation",
+        "package-integrity",
         "package-execution",
         "heavy-hardening",
         "scale-search",
@@ -208,7 +213,7 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
         for path in (ROOT / "tests").glob("test_*.py")
     )
     excluded = "tests/test_heavy_linux_model.py"
-    assert len(discovered) == 127
+    assert len(discovered) == 126
     assert (ROOT / excluded).is_file()
     package_manifest = json.loads((ROOT / "MANIFEST.json").read_text(encoding="utf-8"))
     package_entry = next(
@@ -219,12 +224,29 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
     assert f"  {excluded}\n" in checksums
     assert excluded not in declared
     discovered.remove(excluded)
-    assert len(discovered) == 126
+    assert len(discovered) == 125
     assert len(declared) == len(set(declared))
     assert sorted(declared) == discovered
+    canonical_init = next(shard for shard in shards if shard["id"] == "canonical-init")
+    assert canonical_init["selectors"] == ["tests/test_canonical_init.py"]
+    core_state = next(shard for shard in shards if shard["id"] == "core-state")
+    assert "tests/test_canonical_init.py" not in core_state["selectors"]
+    reconciliation_paths = next(
+        shard for shard in shards if shard["id"] == "reconciliation-paths"
+    )
+    derived_storage = next(
+        shard for shard in shards if shard["id"] == "eventstore-derived-storage"
+    )
+    assert "tests/test_heavy_derived_storage.py" not in reconciliation_paths["selectors"]
+    assert derived_storage["selectors"] == ["tests/test_heavy_derived_storage.py"]
     verified_query_phase = "tests/test_verified_query_phase.py"
     assert manifest["selectors"].count(verified_query_phase) == 1
     alpha4_policies = next(shard for shard in shards if shard["id"] == "alpha4-policies")
+    alpha4_policy_hardening = next(
+        shard for shard in shards if shard["id"] == "alpha4-policy-hardening"
+    )
+    assert len(alpha4_policies["selectors"]) == 25
+    assert len(alpha4_policy_hardening["selectors"]) == 15
     verified_query = next(shard for shard in shards if shard["id"] == "verified-query")
     verified_query_lifecycle = next(shard for shard in shards if shard["id"] == "verified-query-lifecycle")
     assert alpha4_policies["selectors"].count(verified_query_phase) == 0
@@ -235,9 +257,26 @@ def test_shard_manifest_defines_exact_alpha4_non_scale_coverage() -> None:
     scale_search = next(shard for shard in shards if shard["id"] == "scale-search")
     assert experience_portability["selectors"].count(service_authority_workflow) == 1
     assert scale_search["selectors"].count(service_authority_workflow) == 0
+    client_report_tool = "tests/test_client_report_tool.py"
+    service_distribution = next(
+        shard for shard in shards if shard["id"] == "service-distribution"
+    )
+    client_evidence_publication = next(
+        shard for shard in shards if shard["id"] == "client-evidence-publication"
+    )
+    assert service_distribution["selectors"].count(client_report_tool) == 0
+    assert client_evidence_publication["selectors"] == [client_report_tool]
     package_validation_execution = "tests/test_package_validation_execution.py"
     package_validation = next(shard for shard in shards if shard["id"] == "package-validation")
+    package_integrity = next(shard for shard in shards if shard["id"] == "package-integrity")
     package_execution = next(shard for shard in shards if shard["id"] == "package-execution")
     assert experience_portability["selectors"].count(package_validation_execution) == 0
     assert package_validation["selectors"].count(package_validation_execution) == 0
+    assert package_integrity["selectors"] == ["tests/test_package_validation.py"]
+    assert "tests/test_package_validation.py" not in package_validation["selectors"]
     assert package_execution["selectors"].count(package_validation_execution) == 1
+    heavy_hardening = next(shard for shard in shards if shard["id"] == "heavy-hardening")
+    assert heavy_hardening["selectors"] == sorted(heavy_hardening["selectors"])
+    assert heavy_hardening["selectors"].count(
+        "tests/test_heavy_eventstore_portable_recovery.py"
+    ) == 1

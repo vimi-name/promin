@@ -99,35 +99,6 @@ bytes SHA-256.
 `pass_credit=false`. Навіть успішний rebind є лише доказом цілісності inputs,
 не релізним або продуктовим acceptance.
 
-## Windows physical EventStore history seal
-
-`promin.windows_event_history` додає вузький фізичний seal лише для Windows
-history EventStore на томі **NTFS** або **ReFS**. До вже наявної повної
-EventStore-перевірки він утримує immutable journal та authority files відкритими
-no-write/no-delete handles, а також утримує handles обох history directories.
-Seal прив'язується лише після успішної повної byte verification; він не створює
-окремий metadata-only шлях довіри.
-
-Fast validation вимагає одночасно:
-
-- exact closure імен та кількості файлів у journal і authority directories;
-- незмінні held immutable file witnesses під утримуваними handles;
-- точну рівність mutable control digests для HEAD payload, authority-root
-  payload і checkpoint payload, а також authority generation.
-
-`ChangeTime` є лише witness/hint зміни, а не джерелом істини для reuse: writer
-з `FILE_WRITE_ATTRIBUTES` може відновити timestamp на NTFS. Тому ChangeTime не
-замінює exact filename/count closure, утримувані handles або byte verification.
-
-Якщо том або Windows capability не підтримується, є конфліктний writer,
-неможливо утримати directory/file handle, перевищено cap held files або
-спостереження конфліктують, seal не дає часткового результату: використовується
-звичайний повний scan / EventStore verification. POSIX-маршрут не змінюється і не
-отримує Windows physical seal.
-
-Цей механізм не є acceptance або performance claim: `acceptance_pass=false` і
-`pass_credit=false` залишаються незмінними.
-
 ## Core event batch ceiling: 128
 
 Core ceiling для одного atomic EventStore batch дорівнює **128 events** і

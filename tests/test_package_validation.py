@@ -300,7 +300,7 @@ class PackageValidationInventoryTests(_PackageValidationBase):
             verify_package_inventory(root)
 
     def test_canonical_inventory_declares_exact_v1_tree(self) -> None:
-        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 304)
+        self.assertEqual(CANONICAL_PACKAGE_FILE_COUNT, 302)
         self.assertEqual(CANONICAL_PACKAGE_DIRECTORY_COUNT, 17)
         self.assertEqual(len(CANONICAL_PACKAGE_FILES), CANONICAL_PACKAGE_FILE_COUNT)
         self.assertEqual(
@@ -351,7 +351,6 @@ class PackageValidationInventoryTests(_PackageValidationBase):
             "promin/skills.py",
             "promin/system_check.py",
             "promin/weak_model_workflow.py",
-            "promin/windows_event_history.py",
         }.issubset(CANONICAL_PACKAGE_FILES))
         self.assertTrue({
             "tools/compile_schema.py",
@@ -395,6 +394,7 @@ class PackageValidationInventoryTests(_PackageValidationBase):
             "tests/test_heavy_eventstore_commit_io_profile.py",
             "tests/test_heavy_eventstore_lifecycle.py",
             "tests/test_heavy_eventstore_postcommit_index_failure.py",
+            "tests/test_heavy_eventstore_portable_recovery.py",
             "tests/test_heavy_eventstore_validator_cache.py",
             "tests/test_heavy_performance_model.py",
             "tests/test_heavy_projection_bulk_rebuild.py",
@@ -409,8 +409,6 @@ class PackageValidationInventoryTests(_PackageValidationBase):
             "tests/test_heavy_state_binding_storage_retention.py",
             "tests/test_heavy_runtime_checkpoint_incremental.py",
             "tests/test_heavy_weak_model_workflow.py",
-            "tests/test_heavy_windows_event_history.py",
-            "tests/test_heavy_windows_seal_scaling.py",
             "tests/test_retrieval_continuation_service.py",
             "tests/test_saturation_archive_binding.py",
             "tests/test_saturation_raw_artifact_cardinality.py",

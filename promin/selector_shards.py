@@ -62,16 +62,21 @@ _REPARSE_POINT: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 _AGGREGATE_EXECUTION_SCHEMA: Final = "promin.selector-shard-aggregate-execution.v1"
 _FIXED_SELECTOR_SET_ID: Final = "standard-alpha4-non-scale-v1"
 _FIXED_MARKER_EXPRESSION: Final = "not scale"
-_FIXED_SELECTOR_COUNT: Final = 126
+_FIXED_SELECTOR_COUNT: Final = 125
 _FIXED_SHARD_IDS: Final = (
     "core-state",
+    "canonical-init",
     "experience-portability",
     "reconciliation-paths",
+    "eventstore-derived-storage",
     "alpha4-policies",
+    "alpha4-policy-hardening",
     "service-distribution",
+    "client-evidence-publication",
     "verified-query",
     "verified-query-lifecycle",
     "package-validation",
+    "package-integrity",
     "package-execution",
     "heavy-hardening",
     "scale-search",
@@ -80,7 +85,7 @@ _FIXED_PER_PROCESS_LIMITS: Final = {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824,
 }
-_FIXED_AGGREGATE_TIMEOUT_SECONDS: Final = 6600
+_FIXED_AGGREGATE_TIMEOUT_SECONDS: Final = 9600
 _FIXED_PLAN_RELATIVE_PATH: Final = Path("tests") / "ALPHA4_TEST_SHARDS.json"
 _FIXED_WINDOWS_EXCLUDED_SELECTORS: Final = frozenset(
     {"tests/test_heavy_linux_model.py"}

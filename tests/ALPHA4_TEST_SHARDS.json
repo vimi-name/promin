@@ -63,6 +63,7 @@
     "tests/test_heavy_event_batching.py",
     "tests/test_heavy_eventstore_commit_io_profile.py",
     "tests/test_heavy_eventstore_lifecycle.py",
+    "tests/test_heavy_eventstore_portable_recovery.py",
     "tests/test_heavy_eventstore_postcommit_index_failure.py",
     "tests/test_heavy_eventstore_prefix_witness.py",
     "tests/test_heavy_eventstore_validator_cache.py",
@@ -91,9 +92,7 @@
     "tests/test_heavy_state_binding_storage_retention.py",
     "tests/test_heavy_weak_model_execution.py",
     "tests/test_heavy_weak_model_workflow.py",
-    "tests/test_heavy_windows_event_history.py",
     "tests/test_heavy_windows_publication.py",
-    "tests/test_heavy_windows_seal_scaling.py",
     "tests/test_init_layer_configured_routes.py",
     "tests/test_initial_project_work.py",
     "tests/test_installed_distribution.py",
@@ -130,13 +129,13 @@
     "tests/test_verified_query_phase_freshness.py",
     "tests/test_verified_query_phase_lifecycle.py"
   ],
-  "selector_count": 126,
+  "selector_count": 125,
   "per_process": {
     "timeout_seconds": 600,
     "memory_bytes": 1073741824
   },
   "aggregate": {
-    "timeout_seconds": 6600
+    "timeout_seconds": 9600
   },
   "shards": [
     {
@@ -146,12 +145,21 @@
         "tests/test_alpha_context_index.py",
         "tests/test_alpha_deployable.py",
         "tests/test_authority_domain.py",
-        "tests/test_canonical_init.py",
         "tests/test_concurrency_crash.py",
         "tests/test_contract_mutations.py",
         "tests/test_events_projection.py",
         "tests/test_heavy_saturation_storage_budget.py",
         "tests/test_heavy_state_binding_storage.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "canonical-init",
+      "selectors": [
+        "tests/test_canonical_init.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -191,10 +199,19 @@
         "tests/test_alpha3_reconciliation_performance.py",
         "tests/test_alpha3_reconciliation_static.py",
         "tests/test_alpha3_reconciliation_windows.py",
-        "tests/test_heavy_derived_storage.py",
         "tests/test_heavy_projection_bulk_rebuild.py",
         "tests/test_platform_paths_hotpath.py",
         "tests/test_service_context_cache.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "eventstore-derived-storage",
+      "selectors": [
+        "tests/test_heavy_derived_storage.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -228,6 +245,16 @@
         "tests/test_alpha4_static_admission.py",
         "tests/test_alpha4_windows_publication.py",
         "tests/test_expert_init_bundle_roundtrip.py",
+        "tests/test_init_layer_configured_routes.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "alpha4-policy-hardening",
+      "selectors": [
         "tests/test_heavy_failclosed_adversarial.py",
         "tests/test_heavy_init_profiles.py",
         "tests/test_heavy_language_analysis.py",
@@ -235,8 +262,6 @@
         "tests/test_heavy_provider_identity.py",
         "tests/test_heavy_receipt_cache.py",
         "tests/test_heavy_weak_model_execution.py",
-        "tests/test_heavy_windows_seal_scaling.py",
-        "tests/test_init_layer_configured_routes.py",
         "tests/test_language_tooling.py",
         "tests/test_projection_profile_cleanup.py",
         "tests/test_saturation_schema_meta_policy.py",
@@ -255,7 +280,6 @@
       "id": "service-distribution",
       "selectors": [
         "tests/test_bootstrap_mutation_verification.py",
-        "tests/test_client_report_tool.py",
         "tests/test_continuation_renewal.py",
         "tests/test_heavy_eventstore_lifecycle.py",
         "tests/test_heavy_eventstore_postcommit_index_failure.py",
@@ -275,6 +299,16 @@
         "tests/test_verified_commit_phase_tamper.py",
         "tests/test_verified_envelope_snapshot.py",
         "tests/test_verified_query_phase_freshness.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "client-evidence-publication",
+      "selectors": [
+        "tests/test_client_report_tool.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -307,9 +341,18 @@
         "tests/test_heavy_artifact_minimality.py",
         "tests/test_heavy_language_catalog.py",
         "tests/test_heavy_windows_publication.py",
-        "tests/test_package_validation.py",
         "tests/test_saturation_archive_binding.py",
         "tests/test_verified_query_phase_admission.py"
+      ],
+      "limits": {
+        "timeout_seconds": 600,
+        "memory_bytes": 1073741824
+      }
+    },
+    {
+      "id": "package-integrity",
+      "selectors": [
+        "tests/test_package_validation.py"
       ],
       "limits": {
         "timeout_seconds": 600,
@@ -333,6 +376,7 @@
         "tests/test_heavy_comparative_bench.py",
         "tests/test_heavy_event_batching.py",
         "tests/test_heavy_eventstore_commit_io_profile.py",
+        "tests/test_heavy_eventstore_portable_recovery.py",
         "tests/test_heavy_eventstore_prefix_witness.py",
         "tests/test_heavy_eventstore_validator_cache.py",
         "tests/test_heavy_product_inspection.py",
@@ -342,7 +386,6 @@
         "tests/test_heavy_state_binding_batch_union.py",
         "tests/test_heavy_state_binding_storage_retention.py",
         "tests/test_heavy_weak_model_workflow.py",
-        "tests/test_heavy_windows_event_history.py",
         "tests/test_saturation_query_trace.py",
         "tests/test_saturation_raw_artifact_cardinality.py"
       ],
@@ -365,6 +408,6 @@
       }
     }
   ],
-  "selector_digest": "0e5db56cbb788defc4be2ffd2e0242617a2828945c6ff2f4e431438225840568",
-  "manifest_digest": "f71d97ff0f2347048a480ef82726495bb7ceaadd676627b82664f1b523b722ea"
+  "selector_digest": "531745e1fc64b7e9a534122b77fa42799c246e40415993094078301cb4b29410",
+  "manifest_digest": "d45244ff18a47d6e8cfc6b681bd4cd97a61c75584cd7f781983e5c43c96fa5a1"
 }

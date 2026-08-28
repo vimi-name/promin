@@ -154,8 +154,8 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert "Version 1.0.0-alpha.4" in readme
     assert "Standard version: `1.0.0-alpha.4`" in machine
     for document in (readme, machine):
-        assert "304 regular files under 17 declared" in document
-        assert "302 payload files" in document
+        assert "302 regular files under 17 declared" in document
+        assert "300 payload files" in document
 
     for command in BASE_COMMANDS:
         assert f"promin {command}" in readme
@@ -173,16 +173,16 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
         "language_profiles/": 7,
         "presets/": 1,
         "profiles/": 12,
-        "promin/": 63,
+        "promin/": 62,
         "prompts/": 2,
         "skills/": 4,
-        "tests/": 128,
+        "tests/": 127,
         "tools/": 19,
     }
     assert _documented_package_counts(readme) == expected_counts
     assert _documented_package_counts(machine) == expected_counts
     manifest = load_json_strict(PACKAGE_ROOT / "MANIFEST.json")
-    assert len(manifest["files"]) == 302
+    assert len(manifest["files"]) == 300
     expected_directories = {
         ".github",
         ".github/workflows",
@@ -215,7 +215,7 @@ def test_documented_v1_surface_and_package_inventory_are_exact() -> None:
     assert declared_directories == expected_directories
     assert len(expected_directories) == 17
     assert actual_counts == expected_counts
-    assert sum(expected_counts.values()) == 304
+    assert sum(expected_counts.values()) == 302
 
 
 def test_documented_observability_and_evidence_boundaries_are_static() -> None:

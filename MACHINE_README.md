@@ -44,9 +44,9 @@ the external verified chain.
 
 ## Exact package inventory
 
-The canonical alpha tree contains exactly 304 regular files under 17 declared
+The canonical alpha tree contains exactly 302 regular files under 17 declared
 directories, including the nested `docs/audit` and `skills/example` directories.
-The manifest enumerates 302 payload files; `SHA256SUMS.txt` contains 303
+The manifest enumerates 300 payload files; `SHA256SUMS.txt` contains 301
 checksums for the payload plus `MANIFEST.json`:
 
 | Location | Regular files |
@@ -61,10 +61,10 @@ checksums for the payload plus `MANIFEST.json`:
 | `language_profiles/` | 7 |
 | `presets/` | 1 |
 | `profiles/` | 12 |
-| `promin/` | 63 |
+| `promin/` | 62 |
 | `prompts/` | 2 |
 | `skills/` | 4 |
-| `tests/` | 128 |
+| `tests/` | 127 |
 | `tools/` | 19 |
 
 Root files are exactly `.gitattributes`, `.gitignore`, `CONTRIBUTING.md`, `LICENSE`,

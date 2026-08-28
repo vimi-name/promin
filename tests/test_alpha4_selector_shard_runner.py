@@ -68,8 +68,8 @@ def test_alpha4_plan_has_exact_current_test_file_coverage() -> None:
         expected_selectors=expected,
     )
 
-    assert len(expected) == 126
-    assert manifest["selector_count"] == 126
+    assert len(expected) == 125
+    assert manifest["selector_count"] == 125
     assert manifest["marker_expression"] == "not scale"
     assert result["coverage"]["exact"] is True
     assert result["coverage"]["duplicates"] == []
@@ -251,7 +251,7 @@ def test_aggregate_rejects_non_windows_before_spawn(tmp_path: Path, monkeypatch)
 def test_aggregate_persists_exact_logs_and_independently_validates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _canonical_eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _canonical_sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     result = run_selector_aggregate(
@@ -275,7 +275,7 @@ def test_aggregate_persists_exact_logs_and_independently_validates(
 def test_aggregate_rejects_structurally_valid_non_current_candidate_before_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _canonical_eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _canonical_sixteen_shard_fixture(tmp_path)
     candidate = dict(candidate)
     candidate["version"] = "1.0.1"
     candidate["candidate_binding_digest"] = digest_value(
@@ -296,19 +296,19 @@ def test_aggregate_rejects_structurally_valid_non_current_candidate_before_spawn
     spawn.assert_not_called()
 
 
-def _eleven_shard_fixture(tmp_path: Path) -> tuple[Path, dict[str, object], dict[str, object]]:
-    return _canonical_eleven_shard_fixture(tmp_path)
+def _sixteen_shard_fixture(tmp_path: Path) -> tuple[Path, dict[str, object], dict[str, object]]:
+    return _canonical_sixteen_shard_fixture(tmp_path)
 
 
-def _canonical_eleven_shard_fixture(
+def _canonical_sixteen_shard_fixture(
     tmp_path: Path,
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
-    project = tmp_path / "canonical-eleven-project"
+    project = tmp_path / "canonical-sixteen-project"
     tests = project / "tests"
     tests.mkdir(parents=True)
     source_plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
     selectors = source_plan["selectors"]
-    assert isinstance(selectors, list) and len(selectors) == 126
+    assert isinstance(selectors, list) and len(selectors) == 125
     rows = []
     import hashlib
 
@@ -452,7 +452,7 @@ def _patch_aggregate_execution(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_aggregate_rejects_every_noncanonical_fixed_protocol_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation,
 ) -> None:
-    project, manifest, candidate = _canonical_eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _canonical_sixteen_shard_fixture(tmp_path)
     mutation(manifest)
     _drop_manifest_digests(manifest)
     monkeypatch.setattr("promin.selector_shards.os.name", "nt")
@@ -487,7 +487,7 @@ def test_evidence_walk_propagates_scan_errors(
         selector_module._walk_evidence_files(tmp_path)
 
 
-def test_aggregate_requires_standard_alpha4_eleven_shards(tmp_path: Path) -> None:
+def test_aggregate_requires_standard_alpha4_sixteen_shards(tmp_path: Path) -> None:
     project = tmp_path / "project"
     tests = project / "tests"
     tests.mkdir(parents=True)
@@ -508,7 +508,7 @@ def test_aggregate_requires_standard_alpha4_eleven_shards(tmp_path: Path) -> Non
     invalid_manifest = _fixture_manifest("tests/test_fast.py")
     invalid_manifest["selector_set_id"] = "standard-alpha4-non-scale-v1"
     invalid_manifest.pop("manifest_digest", None)
-    with pytest.raises(SelectorShardError, match="126 selectors"):
+    with pytest.raises(SelectorShardError, match="125 selectors"):
         run_selector_aggregate(
             invalid_manifest,
             project_root=project,
@@ -518,7 +518,7 @@ def test_aggregate_requires_standard_alpha4_eleven_shards(tmp_path: Path) -> Non
 
 
 def test_aggregate_passes_exact_command_and_environment(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     class FinishedProcess:
@@ -548,7 +548,7 @@ def test_aggregate_passes_exact_command_and_environment(tmp_path: Path, monkeypa
         evidence_root=tmp_path / "evidence",
         candidate_binding=candidate,
     )
-    assert len(calls) == 11
+    assert len(calls) == 16
     command, kwargs = calls[0]
     assert command[1:8] == ["-B", "-m", "pytest", "-p", "no:cacheprovider", "-q", "-m"]
     assert command[8] == "not scale"
@@ -561,7 +561,7 @@ def test_aggregate_passes_exact_command_and_environment(tmp_path: Path, monkeypa
 def test_validator_rejects_canonically_rewritten_inconsistent_pass_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
@@ -598,7 +598,7 @@ def test_cli_non_pass_selector_result_is_not_success(tmp_path: Path, monkeypatch
 
 
 def test_aggregate_overflow_is_invalid_harness_and_bounded(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
 
     class FinishedProcess:
         returncode = 0
@@ -635,7 +635,7 @@ def test_aggregate_overflow_is_invalid_harness_and_bounded(tmp_path: Path, monke
 
 
 def test_aggregate_non_utf8_output_is_invalid_harness(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
 
     class FinishedProcess:
         returncode = 0
@@ -670,7 +670,7 @@ def test_aggregate_non_utf8_output_is_invalid_harness(tmp_path: Path, monkeypatc
 
 
 def test_aggregate_source_drift_is_invalid_harness(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     import promin.selector_shards as selector_module
 
     _patch_aggregate_execution(monkeypatch)
@@ -688,16 +688,20 @@ def test_aggregate_source_drift_is_invalid_harness(tmp_path: Path, monkeypatch) 
 
 
 def test_aggregate_deadline_marks_unstarted_shards_terminal(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     import promin.selector_shards as selector_module
 
     clock = [0.0]
     monkeypatch.setattr(selector_module.time, "monotonic", lambda: clock[0])
     calls = []
+    aggregate = manifest["aggregate"]
+    assert isinstance(aggregate, dict)
+    aggregate_timeout = aggregate["timeout_seconds"]
+    assert isinstance(aggregate_timeout, int)
 
     def fake_execute(normalized, shard, **kwargs):
         calls.append(shard["id"])
-        clock[0] = 7000.0
+        clock[0] = float(aggregate_timeout) + 1.0
         return selector_module._aggregate_receipt(
             normalized, shard, shard_order=0, status="PASS", execution_state="completed",
             elapsed_seconds=0.1, timeout_seconds=30, exit_code=0, stdout=b"", stderr=b"",
@@ -727,7 +731,7 @@ def test_aggregate_deadline_marks_unstarted_shards_terminal(tmp_path: Path, monk
 def test_validator_rejects_extra_file_and_create_only_sentinel_is_preserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     sentinel = tmp_path / "sentinel"
@@ -759,7 +763,7 @@ def test_validator_rejects_extra_file_and_create_only_sentinel_is_preserved(
 def test_validator_rejects_reparse_evidence_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
@@ -809,7 +813,7 @@ def test_aggregate_exact_deadline_boundary_is_timeout() -> None:
 def test_validator_rejects_receipt_schema_and_type_tamper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
@@ -834,7 +838,7 @@ def test_validator_rejects_receipt_schema_and_type_tamper(
 def test_validator_rejects_evidence_root_ancestor_of_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     _patch_aggregate_execution(monkeypatch)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
@@ -853,7 +857,7 @@ def test_validator_rejects_evidence_root_ancestor_of_project(
 
 
 def test_aggregate_termination_uses_bounded_kill_fallback(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, _candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, _candidate = _sixteen_shard_fixture(tmp_path)
     import promin.selector_shards as selector_module
 
     normalized = selector_module._normalize_manifest(manifest)
@@ -901,7 +905,7 @@ def test_aggregate_termination_uses_bounded_kill_fallback(tmp_path: Path, monkey
 
 
 def test_aggregate_reader_error_is_invalid_harness(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
 
     class BrokenStream:
         def read(self, _size):
@@ -926,7 +930,7 @@ def test_aggregate_reader_error_is_invalid_harness(tmp_path: Path, monkeypatch) 
 
 
 def test_aggregate_failed_termination_is_invalid_harness(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, _candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, _candidate = _sixteen_shard_fixture(tmp_path)
     import promin.selector_shards as selector_module
 
     normalized = selector_module._normalize_manifest(manifest)
@@ -971,7 +975,7 @@ def test_aggregate_failed_termination_is_invalid_harness(tmp_path: Path, monkeyp
 
 
 def test_validator_rejects_execution_marker_tamper(tmp_path: Path) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
         manifest,
@@ -993,7 +997,7 @@ def test_validator_rejects_execution_marker_tamper(tmp_path: Path) -> None:
 
 
 def test_validator_rejects_reparse_ancestor_metadata(tmp_path: Path, monkeypatch) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
     evidence = tmp_path / "evidence"
     run_selector_aggregate(
         manifest,
@@ -1024,7 +1028,7 @@ def test_validator_rejects_reparse_ancestor_metadata(tmp_path: Path, monkeypatch
 def test_aggregate_poll_failure_enters_bounded_containment_and_invalid_receipt(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    project, manifest, _candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, _candidate = _sixteen_shard_fixture(tmp_path)
     import subprocess
 
     import promin.selector_shards as selector_module
@@ -1124,7 +1128,7 @@ def test_aggregate_poll_failure_enters_bounded_containment_and_invalid_receipt(
 def test_aggregate_termination_error_is_invalid_not_timeout(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    project, manifest, _candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, _candidate = _sixteen_shard_fixture(tmp_path)
     import subprocess
 
     import promin.selector_shards as selector_module
@@ -1184,7 +1188,7 @@ def test_aggregate_termination_error_is_invalid_not_timeout(
 def test_persisted_invalid_harness_aggregate_roundtrips_through_validator(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    project, manifest, candidate = _eleven_shard_fixture(tmp_path)
+    project, manifest, candidate = _sixteen_shard_fixture(tmp_path)
 
     class BrokenStream:
         def read(self, _size: int) -> bytes:

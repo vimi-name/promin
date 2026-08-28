@@ -52,24 +52,21 @@ and saturated repeatedly after each downstream discovery.
 2. The sequential aggregate runner has a measured unchanged-scope lower bound
    of at least `4,082.11` seconds before residual work, so seven `600`-second
    shards under a `3,600`-second aggregate deadline are mathematically
-   infeasible. The source closure contains 127 `tests/test_*.py` files; the
-   Windows execution manifest covers 126 of 127 and excludes exactly
+   infeasible. The corrected source closure contains 126 `tests/test_*.py`
+   files; the Windows execution manifest covers 125 of 126 and excludes exactly
    `tests/test_heavy_linux_model.py`. That Linux-model file remains in package
    inventory and source digests and is not executed on Windows. The corrected
-   manifest uses eleven deterministic shards in fixed order with the unchanged
+   manifest uses sixteen deterministic shards in fixed order with the unchanged
    `600`-second / `1,073,741,824`-byte per-shard limits and an exact sequential
-   aggregate budget of `6,600` seconds (`11 * 600`). The isolated
+   aggregate budget of `9,600` seconds (`16 * 600`). The isolated
    `verified-query` workload is ordered after `service-distribution`, followed
    immediately by its five-case `verified-query-lifecycle` companion shard;
    admission and freshness companion selectors remain in their package and
-   service shards. Mapping fix round1 moves exactly
-   `tests/test_service_authority_workflow.py` from `scale-search` to
-   `experience-portability`, preserving the 126-selector closure, fixed
-   per-shard limits, and the `6,000`-second aggregate budget. Mapping fix
-   round2 moves exactly `tests/test_package_validation_execution.py` from
-   `experience-portability` to a new `package-execution` shard immediately
-   after `package-validation`, preserving the same closure and limits while
-   deriving the `6,600`-second aggregate budget.
+   service shards. The timeout-hardening partitions are domain-owned:
+   `canonical-init`, `eventstore-derived-storage`,
+   `alpha4-policy-hardening`, `client-evidence-publication`, and
+   `package-integrity`. `package-execution` remains a separate one-selector
+   shard. No selector was dropped and no per-shard limit was raised.
 3. `promin_saturation_audit.py` still required the obsolete evidence-only
    `status=fail` / `exit_code=1` convention. It now independently validates the
    producer's truthful successful `status=pass` / `exit_code=0` state while all
@@ -160,15 +157,52 @@ are unchanged; only its external byte representation is made directly
 consumable by strict public workflows. TDD reproduced the pretty/canonical byte
 mismatch and the focused package test passed after the correction.
 
+## P2 canonical inventory correction
+
+The confirmed P2 is fixed in the source-owned canonical package and Windows
+selector protocol. The obsolete `promin/windows_event_history.py` module and
+its two Windows history-seal test selectors are no longer declared by the
+canonical inventory or selector manifest. Their portable commit/recovery
+coverage is represented by the new
+`tests/test_heavy_eventstore_portable_recovery.py` selector in the existing
+`heavy-hardening` shard, exactly once. A bounded source-level regression guard
+also rejects any renewed runtime dependency on the removed module or class.
+
+The source test closure is now 126 files; Windows executes 125 selectors and
+continues to exclude only `tests/test_heavy_linux_model.py`. The manifest now
+has sixteen shards in the established order, with the single-selector
+`canonical-init`, `eventstore-derived-storage`,
+`client-evidence-publication`, and `package-integrity` domains plus the bounded
+`alpha4-policy-hardening` partition. Every shard retains `600` seconds and
+`1,073,741,824` bytes, and the aggregate budget is exactly `9,600` seconds. The
+`tests/test_heavy_eventstore_portable_recovery.py` selector remains in
+`heavy-hardening` in bytewise order. All acceptance and pass-credit claims
+remain false. The r15 baseline is non-final and remains pending a refreshed
+candidate after generated integrity surfaces are rebuilt by the integrator.
+
+The r15 live baseline completed with aggregate `status=TIMEOUT`: ten shards
+timed out at the 600-second boundary and only `experience-portability` passed.
+Independent process inspection also found concurrent Codex-owned unittest and
+harness workloads outside the aggregate process tree. The receipts are
+preserved as truthful diagnostic evidence, but the contaminated timing does not
+promote acceptance or pass credit. The final candidate must be rerun with zero
+concurrent test workloads.
+
+No pytest or physical aggregate was run for this correction while PID 30460
+was active. The permitted JSON parse, direct selector loader, AST parse, and
+`git diff --check` checks passed; package-list commands remain pending for the
+integrator after the live aggregate terminates.
+
 ## Remaining exact execution gate
 
 No r12 artifact or downstream result is claimed by this source wave. After the
 final integrity refresh and coherent commit, the required order is:
 
-1. build and independently verify one deterministic r12 archive/binding;
+1. build and independently verify one deterministic refreshed same-version
+   archive/binding;
 2. produce one fresh online-clean Windows platform receipt;
 3. launch exactly one fresh 100,000-file / 600-query Windows saturation from
-   the r12 extraction and independently recompute it;
+   the refreshed extraction and independently recompute it;
 4. run the exact Windows selector aggregate twice in separate evidence roots;
 5. execute the fixed 72-bucket comparison;
 6. run product inspection and publish the evidence-bound client packet, PDF,
@@ -179,7 +213,7 @@ scope. No automatic cleanup or deletion is authorized.
 
 ```text
 validation_claim=targeted_windows_only
-runtime_diagnostic_pass=true
+runtime_diagnostic_pass=false
 acceptance_pass=false
 performance_acceptance=false
 pass_credit=false

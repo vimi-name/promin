@@ -78,7 +78,7 @@ _HUMAN_DOCUMENT_SUMMARIES: OrderedDict[str, tuple[int, int, tuple[int, ...]]] = 
 _MAX_HUMAN_DOCUMENT_SUMMARIES = 32
 INIT_DEFINITIONS = frozenset({"ProjectInit", "StandardsInit", "TechnologiesInit", "AuthorityInit", "Activation"})
 GENERATED_SURFACES = frozenset({"MANIFEST.json", "SHA256SUMS.txt"})
-CANONICAL_PACKAGE_FILE_COUNT = 304
+CANONICAL_PACKAGE_FILE_COUNT = 302
 CANONICAL_PACKAGE_DIRECTORY_COUNT = 17
 CANONICAL_PACKAGE_FILES = frozenset(
     {
@@ -225,7 +225,6 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'promin/writer_identity.py',
         'promin/weak_model_execution.py',
         'promin/weak_model_workflow.py',
-        'promin/windows_event_history.py',
         'prompts/INIT_PROMPT_EN.txt',
         'prompts/INIT_PROMPT_UA.txt',
         'pyproject.toml',
@@ -297,6 +296,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_eventstore_commit_io_profile.py',
         'tests/test_heavy_eventstore_lifecycle.py',
         'tests/test_heavy_eventstore_postcommit_index_failure.py',
+        'tests/test_heavy_eventstore_portable_recovery.py',
         'tests/test_heavy_eventstore_prefix_witness.py',
         'tests/test_heavy_eventstore_validator_cache.py',
         'tests/test_heavy_failclosed_adversarial.py',
@@ -325,9 +325,7 @@ CANONICAL_PACKAGE_FILES = frozenset(
         'tests/test_heavy_state_binding_storage_retention.py',
         'tests/test_heavy_weak_model_execution.py',
         'tests/test_heavy_weak_model_workflow.py',
-        'tests/test_heavy_windows_event_history.py',
         'tests/test_heavy_windows_publication.py',
-        'tests/test_heavy_windows_seal_scaling.py',
         'tests/test_initial_project_work.py',
         'tests/test_init_layer_configured_routes.py',
         'tests/test_installed_distribution.py',
