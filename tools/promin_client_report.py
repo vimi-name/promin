@@ -561,16 +561,25 @@ def _numeric_field_name(key: object) -> bool:
     return lowered in {"size", "p50", "p95", "p99", "count", "index"} or lowered.endswith(("_ms", "_bytes", "_count", "_size", "_records", "_envelopes", "_files", "_relations", "_queries", "_duration", "_elapsed"))
 
 
+def _signed_numeric_field_name(key: object) -> bool:
+    return isinstance(key, str) and key.casefold() == "p95_log_slope"
+
+
 def _validate_numbers(value: Any, *, key: object = None) -> None:
     if isinstance(value, bool):
         if _numeric_field_name(key):
             raise ClientReportToolError("comparative evidence contains a boolean numeric field")
         return
     if isinstance(value, int):
-        if value < 0 or value > _MAX_CLIENT_NUMERIC:
+        if abs(value) > _MAX_CLIENT_NUMERIC or (value < 0 and not _signed_numeric_field_name(key)):
             raise ClientReportToolError("comparative evidence contains an invalid numeric observation")
-    elif isinstance(value, float) and (value < 0 or value > _MAX_CLIENT_NUMERIC or not math.isfinite(value)):
-        raise ClientReportToolError("comparative evidence contains an invalid numeric observation")
+    elif isinstance(value, float):
+        if (
+            not math.isfinite(value)
+            or abs(value) > _MAX_CLIENT_NUMERIC
+            or (value < 0 and not _signed_numeric_field_name(key))
+        ):
+            raise ClientReportToolError("comparative evidence contains an invalid numeric observation")
     if isinstance(value, Mapping):
         for name, item in value.items():
             _validate_numbers(item, key=name)

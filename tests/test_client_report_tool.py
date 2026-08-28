@@ -419,6 +419,26 @@ def test_packet_rejects_failed_comparative_bucket(tmp_path: Path) -> None:
         module._comparative_summary(comparative)
 
 
+def test_packet_accepts_finite_signed_scaling_slope(tmp_path: Path) -> None:
+    _inspection, _root, _candidate, comparative_path, _result = _packet_fixture(tmp_path)
+    comparative = json.loads(comparative_path.read_text(encoding="utf-8"))
+    comparative["scaling_checks"] = [
+        {"p95_intervals": [{"p95_log_slope": -0.25}]}
+    ]
+    import tools.promin_client_report as module
+
+    assert len(module._comparative_summary(comparative)) == 3
+
+
+def test_packet_rejects_negative_unsigned_observation(tmp_path: Path) -> None:
+    _inspection, _root, _candidate, comparative_path, _result = _packet_fixture(tmp_path)
+    comparative = json.loads(comparative_path.read_text(encoding="utf-8"))
+    comparative["results"][0]["latency_ms"]["p50"] = -1.0
+    with pytest.raises(ClientReportToolError, match="observation"):
+        import tools.promin_client_report as module
+        module._comparative_summary(comparative)
+
+
 def test_packet_accepts_r11_shaped_saturation_result_without_semantic_ingestion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tools.promin_client_report as module
     inspection, root, candidate, comparative, result = _packet_fixture(tmp_path)

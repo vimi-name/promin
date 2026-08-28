@@ -1013,8 +1013,8 @@
     },
     {
       "path": "tests/test_client_report_tool.py",
-      "sha256": "97a84284e8bef7e7c9e2a4488a07da0c06904d52f786b059662807b62e585b15",
-      "size": 63975
+      "sha256": "0137453a6ddc46b57d8118bba46fbc0620fd36ecda0cac7d731359d0bfe26c2f",
+      "size": 64901
     },
     {
       "path": "tests/test_concurrency_crash.py",
@@ -1433,8 +1433,8 @@
     },
     {
       "path": "tools/promin_client_report.py",
-      "sha256": "8ea683ea8ef88027bdb214bf2279231b38f5a9f64754797e686f254288b9804d",
-      "size": 66053
+      "sha256": "e05a78da278f6ee8f156526123417a1f6b83dea5c8626702096392a30a12b845",
+      "size": 66330
     },
     {
       "path": "tools/promin_command_bench.py",
